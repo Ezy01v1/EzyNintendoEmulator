@@ -1,0 +1,20 @@
+# Build output
+build/
+out/
+
+# Editor
+.vs/
+.vscode/*
+!.vscode/settings.json
+
+# ROMs, BIOS and firmware are never committed
+roms/*
+!roms/README.md
+*.ch8
+*.gb
+*.gbc
+*.gba
+*.iso
+*.gcm
+*.rvz
+*.wbfs
