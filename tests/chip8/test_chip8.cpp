@@ -91,7 +91,9 @@ TEST_CASE("DXYN draws a font glyph and 00E0 clears it") {
 }
 
 TEST_CASE("DXYN drawing twice erases and sets VF") {
-    const auto chip8 = run({0xA0, 0x50, 0xD0, 0x15, 0xD0, 0x15}, 3);
+    auto chip8 = run({0xA0, 0x50, 0xD0, 0x15, 0xD0, 0x15}, 2);
+    chip8.tick_timers();  // display wait: one draw per frame
+    chip8.step();
     CHECK_FALSE(pixel(chip8, 0, 0));
     CHECK(chip8.v(0xF) == 1);
 }
@@ -204,6 +206,43 @@ TEST_CASE("FX0A waits for a key press and release") {
     chip8.step();
     CHECK(chip8.pc() == 0x202);
     CHECK(chip8.v(3) == 0x7);
+}
+
+TEST_CASE("quirk: display wait allows one draw per frame") {
+    auto chip8 = run({0xA0, 0x50, 0xD0, 0x15, 0xD0, 0x15}, 3);
+    CHECK(chip8.pc() == 0x204);  // second DXYN stalled
+    chip8.tick_timers();
+    chip8.step();
+    CHECK(chip8.pc() == 0x206);
+}
+
+TEST_CASE("quirk: shift in place when shift_uses_vy is off") {
+    Chip8 chip8;
+    chip8.set_quirks(Quirks::superchip_modern());
+    const std::array<std::uint8_t, 6> rom = {0x60, 0x04, 0x61, 0xFF, 0x80, 0x16};
+    REQUIRE(chip8.load_rom(rom));
+    for (int i = 0; i < 3; ++i) chip8.step();
+    CHECK(chip8.v(0) == 0x02);  // V0 >> 1, V1 ignored
+    CHECK(chip8.v(0xF) == 0);
+}
+
+TEST_CASE("quirk: FX55 leaves I untouched when memory_increment is off") {
+    Chip8 chip8;
+    chip8.set_quirks(Quirks::superchip_modern());
+    const std::array<std::uint8_t, 4> rom = {0xA3, 0x00, 0xF2, 0x55};
+    REQUIRE(chip8.load_rom(rom));
+    chip8.step();
+    chip8.step();
+    CHECK(chip8.index() == 0x300);
+}
+
+TEST_CASE("quirk: BXNN jumps with VX when jump_uses_v0 is off") {
+    Chip8 chip8;
+    chip8.set_quirks(Quirks::superchip_modern());
+    const std::array<std::uint8_t, 6> rom = {0x60, 0x10, 0x62, 0x01, 0xB2, 0x00};
+    REQUIRE(chip8.load_rom(rom));
+    for (int i = 0; i < 3; ++i) chip8.step();
+    CHECK(chip8.pc() == 0x201);  // 0x200 + V2
 }
 
 TEST_CASE("step fetches two bytes and advances pc") {

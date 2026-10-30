@@ -46,6 +46,7 @@ void Chip8::reset() {
     sound_timer_ = 0;
     waiting_for_key_ = false;
     released_key_ = kNoKey;
+    drew_this_frame_ = false;
     std::ranges::copy(kFont, memory_.begin() + kFontStart);
 }
 
@@ -112,14 +113,19 @@ void Chip8::step() {
         case 0xA:  // ANNN: I = NNN
             i_ = nnn;
             break;
-        case 0xB:  // BNNN: jump to NNN + V0 (COSMAC VIP behaviour)
-            pc_ = static_cast<std::uint16_t>((nnn + v_[0]) & kAddressMask);
+        case 0xB:  // BNNN: jump to NNN + V0 (quirk off: BXNN jumps to XNN + VX)
+            pc_ = static_cast<std::uint16_t>((nnn + v_[quirks_.jump_uses_v0 ? 0 : x]) & kAddressMask);
             break;
         case 0xC:  // CXNN: VX = random byte AND NN
             v_[x] = static_cast<std::uint8_t>(byte_dist_(rng_) & nn);
             break;
         case 0xD:  // DXYN: draw N-row sprite from memory[I] at (VX, VY)
+            if (quirks_.display_wait && drew_this_frame_) {
+                pc_ = static_cast<std::uint16_t>((pc_ - 2) & kAddressMask);  // stall until the next tick
+                break;
+            }
             draw_sprite(v_[x], v_[y], n);
+            drew_this_frame_ = true;
             break;
         case 0xE:
             if (nn == 0x9E && keys_[v_[x] & 0xF]) skip_next();   // EX9E: skip if key VX down
@@ -137,11 +143,21 @@ void Chip8::execute_alu(std::size_t x, std::size_t y, std::uint8_t n) {
     // The flag is always written after the result, so VF as destination ends up holding the flag.
     const std::uint8_t vx = v_[x];
     const std::uint8_t vy = v_[y];
+    const std::uint8_t shift_src = quirks_.shift_uses_vy ? vy : vx;
     switch (n) {
-        case 0x0: v_[x] = vy; break;                                     // 8XY0: VX = VY
-        case 0x1: v_[x] = vx | vy; v_[0xF] = 0; break;                   // 8XY1: OR  (VIP resets VF)
-        case 0x2: v_[x] = vx & vy; v_[0xF] = 0; break;                   // 8XY2: AND (VIP resets VF)
-        case 0x3: v_[x] = vx ^ vy; v_[0xF] = 0; break;                   // 8XY3: XOR (VIP resets VF)
+        case 0x0: v_[x] = vy; break;  // 8XY0: VX = VY
+        case 0x1:                     // 8XY1: OR
+            v_[x] = vx | vy;
+            if (quirks_.vf_reset) v_[0xF] = 0;
+            break;
+        case 0x2:  // 8XY2: AND
+            v_[x] = vx & vy;
+            if (quirks_.vf_reset) v_[0xF] = 0;
+            break;
+        case 0x3:  // 8XY3: XOR
+            v_[x] = vx ^ vy;
+            if (quirks_.vf_reset) v_[0xF] = 0;
+            break;
         case 0x4: {                                                       // 8XY4: add, VF = carry
             const int sum = vx + vy;
             v_[x] = static_cast<std::uint8_t>(sum);
@@ -152,17 +168,17 @@ void Chip8::execute_alu(std::size_t x, std::size_t y, std::uint8_t n) {
             v_[x] = static_cast<std::uint8_t>(vx - vy);
             v_[0xF] = vx >= vy ? 1 : 0;
             break;
-        case 0x6:                                                         // 8XY6: VX = VY >> 1, VF = lost bit
-            v_[x] = static_cast<std::uint8_t>(vy >> 1);
-            v_[0xF] = vy & 0x1;
+        case 0x6:                                                         // 8XY6: shift right, VF = lost bit
+            v_[x] = static_cast<std::uint8_t>(shift_src >> 1);
+            v_[0xF] = shift_src & 0x1;
             break;
         case 0x7:                                                         // 8XY7: VY - VX, VF = no borrow
             v_[x] = static_cast<std::uint8_t>(vy - vx);
             v_[0xF] = vy >= vx ? 1 : 0;
             break;
-        case 0xE:                                                         // 8XYE: VX = VY << 1, VF = lost bit
-            v_[x] = static_cast<std::uint8_t>(vy << 1);
-            v_[0xF] = (vy >> 7) & 0x1;
+        case 0xE:                                                         // 8XYE: shift left, VF = lost bit
+            v_[x] = static_cast<std::uint8_t>(shift_src << 1);
+            v_[0xF] = (shift_src >> 7) & 0x1;
             break;
         default:
             break;
@@ -203,17 +219,17 @@ void Chip8::execute_misc(std::size_t x, std::uint8_t nn) {
             memory_[(i_ + 1) & kAddressMask] = (v_[x] / 10) % 10;
             memory_[(i_ + 2) & kAddressMask] = v_[x] % 10;
             break;
-        case 0x55:  // FX55: store V0..VX at I (VIP: I ends at I + X + 1)
+        case 0x55:  // FX55: store V0..VX at I
             for (std::size_t r = 0; r <= x; ++r) {
-                memory_[i_ & kAddressMask] = v_[r];
-                i_ = static_cast<std::uint16_t>((i_ + 1) & kAddressMask);
+                memory_[(i_ + r) & kAddressMask] = v_[r];
             }
+            if (quirks_.memory_increment) i_ = static_cast<std::uint16_t>((i_ + x + 1) & kAddressMask);
             break;
-        case 0x65:  // FX65: load V0..VX from I (VIP: I ends at I + X + 1)
+        case 0x65:  // FX65: load V0..VX from I
             for (std::size_t r = 0; r <= x; ++r) {
-                v_[r] = memory_[i_ & kAddressMask];
-                i_ = static_cast<std::uint16_t>((i_ + 1) & kAddressMask);
+                v_[r] = memory_[(i_ + r) & kAddressMask];
             }
+            if (quirks_.memory_increment) i_ = static_cast<std::uint16_t>((i_ + x + 1) & kAddressMask);
             break;
         default:
             break;
@@ -225,19 +241,25 @@ void Chip8::skip_next() {
 }
 
 void Chip8::draw_sprite(std::uint8_t vx, std::uint8_t vy, std::uint8_t height) {
-    // The start position wraps around the screen; pixels past the edge are clipped.
+    // The start position always wraps; pixels past the edge are clipped (or wrap, with the quirk off).
     const int start_x = vx % kScreenWidth;
     const int start_y = vy % kScreenHeight;
     v_[0xF] = 0;
 
     for (int row = 0; row < height; ++row) {
-        const int py = start_y + row;
-        if (py >= kScreenHeight) break;
+        int py = start_y + row;
+        if (py >= kScreenHeight) {
+            if (quirks_.clipping) break;
+            py %= kScreenHeight;
+        }
 
         const std::uint8_t sprite_byte = memory_[(i_ + row) & kAddressMask];
         for (int col = 0; col < 8; ++col) {
-            const int px = start_x + col;
-            if (px >= kScreenWidth) break;
+            int px = start_x + col;
+            if (px >= kScreenWidth) {
+                if (quirks_.clipping) break;
+                px %= kScreenWidth;
+            }
 
             if ((sprite_byte >> (7 - col)) & 1) {
                 auto& pixel = display_[static_cast<std::size_t>(py * kScreenWidth + px)];
@@ -249,6 +271,7 @@ void Chip8::draw_sprite(std::uint8_t vx, std::uint8_t vy, std::uint8_t height) {
 }
 
 void Chip8::tick_timers() {
+    drew_this_frame_ = false;
     if (delay_timer_ > 0) --delay_timer_;
     if (sound_timer_ > 0) --sound_timer_;
 }

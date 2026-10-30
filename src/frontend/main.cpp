@@ -30,6 +30,52 @@ constexpr std::array<SDL_Scancode, 16> kKeymap = {
     SDL_SCANCODE_4, SDL_SCANCODE_R, SDL_SCANCODE_F, SDL_SCANCODE_V,  // C D E F
 };
 
+// Square-wave beeper. Each frame we top up the SDL audio stream with just enough
+// samples to stay ~2 frames ahead, so the beep starts and stops with low latency.
+class Beeper {
+public:
+    static constexpr int kSampleRate = 48000;
+    static constexpr float kFrequency = 440.0F;
+    static constexpr float kVolume = 0.15F;
+
+    bool open() {
+        const SDL_AudioSpec spec{SDL_AUDIO_F32, 1, kSampleRate};
+        stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+        if (!stream_) {
+            return false;
+        }
+        SDL_ResumeAudioStreamDevice(stream_);
+        return true;
+    }
+
+    void update(bool active) {
+        if (!stream_) return;
+        if (!active) {
+            SDL_ClearAudioStream(stream_);  // stop immediately
+            return;
+        }
+        constexpr int kSamplesPerFrame = kSampleRate / 60;
+        constexpr int kTargetQueued = kSamplesPerFrame * 2 * static_cast<int>(sizeof(float));
+        while (SDL_GetAudioStreamQueued(stream_) < kTargetQueued) {
+            std::array<float, kSamplesPerFrame> samples{};
+            for (auto& s : samples) {
+                s = phase_ < 0.5F ? kVolume : -kVolume;
+                phase_ += kFrequency / kSampleRate;
+                if (phase_ >= 1.0F) phase_ -= 1.0F;
+            }
+            SDL_PutAudioStreamData(stream_, samples.data(), static_cast<int>(sizeof(samples)));
+        }
+    }
+
+    ~Beeper() {
+        if (stream_) SDL_DestroyAudioStream(stream_);
+    }
+
+private:
+    SDL_AudioStream* stream_ = nullptr;
+    float phase_ = 0.0F;
+};
+
 std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -61,9 +107,14 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
         return 1;
+    }
+
+    Beeper beeper;
+    if (!beeper.open()) {
+        std::cerr << "Audio unavailable, continuing without sound: " << SDL_GetError() << '\n';
     }
 
     SDL_Window* window = nullptr;
@@ -101,6 +152,7 @@ int main(int argc, char* argv[]) {
             chip8.step();
         }
         chip8.tick_timers();
+        beeper.update(chip8.sound_active());
 
         const auto fb = chip8.framebuffer();
         for (std::size_t i = 0; i < pixels.size(); ++i) {
