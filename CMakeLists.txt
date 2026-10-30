@@ -20,6 +20,7 @@ include(FetchContent)
 
 add_subdirectory(src/core/chip8)
 add_subdirectory(src/core/gb)
+add_subdirectory(tools/gb_runner)
 
 if(EZY_BUILD_FRONTEND)
     # Static SDL avoids having to copy SDL3.dll next to the executable.
@@ -60,6 +61,11 @@ if(EZY_BUILD_TESTS)
         GIT_TAG v2.4.11
         GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(doctest)
+
+    # JSON parser for the SingleStepTests CPU test data.
+    FetchContent_Declare(json
+        URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+    FetchContent_MakeAvailable(json)
     unset(CMAKE_POLICY_VERSION_MINIMUM)
 
     enable_testing()

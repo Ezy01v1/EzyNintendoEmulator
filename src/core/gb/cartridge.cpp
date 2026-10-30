@@ -1,5 +1,6 @@
 #include "gb/cartridge.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace ezy::gb {
@@ -87,8 +88,34 @@ std::optional<Cartridge> Cartridge::load(std::span<const std::uint8_t> rom) {
 }
 
 std::uint8_t Cartridge::read_rom(std::uint16_t addr) const {
+    std::size_t offset = addr;
+    if (is_mbc1()) {
+        constexpr std::size_t kBankSize = 0x4000;
+        const std::size_t bank_count = std::max<std::size_t>(1, rom_.size() / kBankSize);
+        std::size_t bank = 0;
+        if (addr < 0x4000) {
+            bank = advanced_mode_ ? std::size_t{bank_high_} << 5 : 0;
+        } else {
+            bank = (std::size_t{bank_high_} << 5) | bank_low_;
+        }
+        offset = (bank % bank_count) * kBankSize + (addr & 0x3FFF);
+    }
     // Reads past the end of a short ROM return open-bus 0xFF.
-    return addr < rom_.size() ? rom_[addr] : 0xFF;
+    return offset < rom_.size() ? rom_[offset] : 0xFF;
+}
+
+void Cartridge::write_rom(std::uint16_t addr, std::uint8_t value) {
+    if (!is_mbc1()) return;  // ROM ONLY: writes are ignored
+    if (addr < 0x2000) {
+        // RAM enable: external RAM not implemented yet.
+    } else if (addr < 0x4000) {
+        bank_low_ = value & 0x1F;
+        if (bank_low_ == 0) bank_low_ = 1;
+    } else if (addr < 0x6000) {
+        bank_high_ = value & 0x03;
+    } else {
+        advanced_mode_ = (value & 0x01) != 0;
+    }
 }
 
 }  // namespace ezy::gb

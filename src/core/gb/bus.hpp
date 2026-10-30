@@ -5,6 +5,8 @@
 #include <string>
 
 #include "gb/cartridge.hpp"
+#include "gb/cpu_bus.hpp"
+#include "gb/timer.hpp"
 
 namespace ezy::gb {
 
@@ -22,13 +24,16 @@ inline constexpr std::uint8_t kJoypad = 1 << 4;
 // Timing model (option B): every read()/write() costs one M-cycle (4 T-cycles) and
 // advances the rest of the system. peek()/poke() access memory without any timing
 // side effects; they are for tests and the debugger only.
-class Bus {
+class Bus final : public CpuBus {
 public:
     explicit Bus(Cartridge cartridge) : cartridge_(std::move(cartridge)) {}
 
-    std::uint8_t read(std::uint16_t addr);
-    void write(std::uint16_t addr, std::uint8_t value);
-    void tick();  // one internal M-cycle with no memory access (e.g. 16-bit ALU ops)
+    std::uint8_t read(std::uint16_t addr) override;
+    void write(std::uint16_t addr, std::uint8_t value) override;
+    void tick() override;  // one internal M-cycle with no memory access (e.g. 16-bit ALU ops)
+
+    [[nodiscard]] std::uint8_t pending_interrupts() const override { return ie_ & if_ & 0x1F; }
+    void acknowledge_interrupt(std::uint8_t bit) override { if_ &= static_cast<std::uint8_t>(~bit); }
 
     [[nodiscard]] std::uint8_t peek(std::uint16_t addr) const;
     void poke(std::uint16_t addr, std::uint8_t value);
@@ -50,6 +55,7 @@ private:
     [[nodiscard]] std::uint8_t read_io(std::uint16_t addr) const;
 
     Cartridge cartridge_;
+    Timer timer_;
     std::array<std::uint8_t, 0x2000> vram_{};
     std::array<std::uint8_t, 0x2000> wram_{};
     std::array<std::uint8_t, 0xA0> oam_{};

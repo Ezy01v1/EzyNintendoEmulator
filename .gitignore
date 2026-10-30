@@ -21,3 +21,6 @@ roms/*
 
 # Dear ImGui layout
 imgui.ini
+
+# Downloaded test suites
+testdata/

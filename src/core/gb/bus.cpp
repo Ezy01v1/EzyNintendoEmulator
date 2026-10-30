@@ -25,7 +25,9 @@ void Bus::tick() { advance(); }
 
 void Bus::advance() {
     t_cycles_ += 4;
-    // Timer, PPU and DMA will be stepped here.
+    timer_.tick();
+    if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
+    // PPU and DMA will be stepped here.
 }
 
 std::uint8_t Bus::peek(std::uint16_t addr) const {
@@ -42,7 +44,7 @@ std::uint8_t Bus::peek(std::uint16_t addr) const {
 }
 
 void Bus::poke(std::uint16_t addr, std::uint8_t value) {
-    if (addr < 0x8000) return;  // ROM: writes will go to the MBC later
+    if (addr < 0x8000) { cartridge_.write_rom(addr, value); return; }  // MBC registers
     if (addr < 0xA000) { vram_[addr - 0x8000] = value; return; }
     if (addr < 0xC000) return;  // external RAM: not implemented until MBCs
     if (addr < 0xE000) { wram_[addr - 0xC000] = value; return; }
@@ -55,6 +57,7 @@ void Bus::poke(std::uint16_t addr, std::uint8_t value) {
 }
 
 std::uint8_t Bus::read_io(std::uint16_t addr) const {
+    if (addr >= 0xFF04 && addr <= 0xFF07) return timer_.read(addr);
     switch (addr) {
         case kSerialControl: return io_[addr - 0xFF00] | 0x7E;  // unused bits read as 1
         case kInterruptFlag: return if_ | 0xE0;                 // upper 3 bits read as 1
@@ -63,6 +66,11 @@ std::uint8_t Bus::read_io(std::uint16_t addr) const {
 }
 
 void Bus::write_io(std::uint16_t addr, std::uint8_t value) {
+    if (addr >= 0xFF04 && addr <= 0xFF07) {
+        timer_.write(addr, value);
+        if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
+        return;
+    }
     switch (addr) {
         case kSerialControl:
             // Transfer start with internal clock: there is no link cable, so we complete

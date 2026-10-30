@@ -44,15 +44,26 @@ public:
 
     [[nodiscard]] const CartridgeHeader& header() const { return header_; }
 
-    // 0x0000-0x7FFF. ROM-only for now; MBCs come later.
+    // 0x0000-0x7FFF, through the MBC's current banks.
     [[nodiscard]] std::uint8_t read_rom(std::uint16_t addr) const;
+
+    // Writes to 0x0000-0x7FFF configure the MBC. Only MBC1 ROM banking so far;
+    // external RAM and the other MBCs come later.
+    void write_rom(std::uint16_t addr, std::uint8_t value);
 
 private:
     Cartridge(std::vector<std::uint8_t> rom, CartridgeHeader header)
         : rom_(std::move(rom)), header_(std::move(header)) {}
 
+    [[nodiscard]] bool is_mbc1() const { return header_.cart_type >= 0x01 && header_.cart_type <= 0x03; }
+
     std::vector<std::uint8_t> rom_;
     CartridgeHeader header_;
+
+    // MBC1 state.
+    std::uint8_t bank_low_ = 1;   // 5 bits, 0 is treated as 1
+    std::uint8_t bank_high_ = 0;  // 2 bits
+    bool advanced_mode_ = false;  // also applies bank_high_ to 0x0000-0x3FFF
 };
 
 }  // namespace ezy::gb
