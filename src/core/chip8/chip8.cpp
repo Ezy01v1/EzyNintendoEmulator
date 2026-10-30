@@ -59,13 +59,60 @@ void Chip8::step() {
     pc_ = static_cast<std::uint16_t>((pc_ + 2) & 0x0FFF);
 
     // DECODE: split the opcode into its fields.
-    // TODO(exercise 1): extract x, y, n, nn, nnn from `opcode`.
+    const std::size_t x = (opcode >> 8) & 0xF;
+    const std::size_t y = (opcode >> 4) & 0xF;
+    const std::uint8_t n = opcode & 0xF;
+    const auto nn = static_cast<std::uint8_t>(opcode & 0xFF);
+    const std::uint16_t nnn = opcode & 0xFFF;
 
     // EXECUTE: dispatch on the top nibble.
     switch (opcode >> 12) {
-        // TODO(exercise 1): implement 00E0, 1NNN, 6XNN, 7XNN, ANNN, DXYN.
+        case 0x0:
+            if (opcode == 0x00E0) {  // 00E0: clear screen
+                display_.fill(0);
+            }
+            break;
+        case 0x1:  // 1NNN: jump
+            pc_ = nnn;
+            break;
+        case 0x6:  // 6XNN: VX = NN
+            v_[x] = nn;
+            break;
+        case 0x7:  // 7XNN: VX += NN (wraps, VF untouched)
+            v_[x] = static_cast<std::uint8_t>(v_[x] + nn);
+            break;
+        case 0xA:  // ANNN: I = NNN
+            i_ = nnn;
+            break;
+        case 0xD:  // DXYN: draw N-row sprite from memory[I] at (VX, VY)
+            draw_sprite(v_[x], v_[y], n);
+            break;
         default:
             break;  // unknown/unimplemented opcode: ignored for now
+    }
+}
+
+void Chip8::draw_sprite(std::uint8_t vx, std::uint8_t vy, std::uint8_t height) {
+    // The start position wraps around the screen; pixels past the edge are clipped.
+    const int start_x = vx % kScreenWidth;
+    const int start_y = vy % kScreenHeight;
+    v_[0xF] = 0;
+
+    for (int row = 0; row < height; ++row) {
+        const int py = start_y + row;
+        if (py >= kScreenHeight) break;
+
+        const std::uint8_t sprite_byte = memory_[(i_ + row) & 0x0FFF];
+        for (int col = 0; col < 8; ++col) {
+            const int px = start_x + col;
+            if (px >= kScreenWidth) break;
+
+            if ((sprite_byte >> (7 - col)) & 1) {
+                auto& pixel = display_[static_cast<std::size_t>(py * kScreenWidth + px)];
+                if (pixel) v_[0xF] = 1;  // a lit pixel is being turned off: collision
+                pixel ^= 1;
+            }
+        }
     }
 }
 

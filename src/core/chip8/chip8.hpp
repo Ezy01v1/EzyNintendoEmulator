@@ -39,6 +39,8 @@ public:
     [[nodiscard]] std::uint8_t read(std::uint16_t addr) const { return memory_.at(addr); }
 
 private:
+    void draw_sprite(std::uint8_t vx, std::uint8_t vy, std::uint8_t height);
+
     std::array<std::uint8_t, kMemorySize> memory_{};
     std::array<std::uint8_t, 16> v_{};
     std::array<std::uint16_t, 16> stack_{};
