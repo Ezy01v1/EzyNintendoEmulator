@@ -55,6 +55,12 @@ public:
     [[nodiscard]] std::uint16_t index() const { return i_; }
     [[nodiscard]] std::uint8_t v(std::size_t reg) const { return v_.at(reg); }
     [[nodiscard]] std::uint8_t read(std::uint16_t addr) const { return memory_.at(addr); }
+    [[nodiscard]] std::span<const std::uint8_t> memory() const { return memory_; }
+    [[nodiscard]] std::uint8_t sp() const { return sp_; }
+    [[nodiscard]] std::uint16_t stack_at(std::size_t level) const { return stack_.at(level); }
+    [[nodiscard]] std::uint8_t delay_timer() const { return delay_timer_; }
+    [[nodiscard]] std::uint8_t sound_timer() const { return sound_timer_; }
+    [[nodiscard]] bool key(std::size_t k) const { return keys_.at(k); }
 
 private:
     static constexpr std::uint8_t kNoKey = 0xFF;
