@@ -5,41 +5,30 @@
 #include <imgui_impl_sdlrenderer3.h>
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "beeper.hpp"
-#include "chip8/chip8.hpp"
+#include "chip8_system.hpp"
 #include "debugger.hpp"
+#include "gameboy_system.hpp"
+#include "system.hpp"
 
 namespace {
 
-using ezy::chip8::Chip8;
 using ezy::frontend::RunState;
+using ezy::frontend::System;
 
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
-constexpr double kFrameSeconds = 1.0 / 60.0;
 constexpr double kMaxCatchUpSeconds = 0.25;  // avoid a "spiral of death" after a stall
-constexpr std::uint32_t kColorOn = 0xFFE0E0E0;
-constexpr std::uint32_t kColorOff = 0xFF101018;
-
-// CHIP-8 keypad      QWERTY keys (by physical position)
-// 1 2 3 C            1 2 3 4
-// 4 5 6 D            Q W E R
-// 7 8 9 E            A S D F
-// A 0 B F            Z X C V
-constexpr std::array<SDL_Scancode, 16> kKeymap = {
-    SDL_SCANCODE_X, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3,  // 0 1 2 3
-    SDL_SCANCODE_Q, SDL_SCANCODE_W, SDL_SCANCODE_E, SDL_SCANCODE_A,  // 4 5 6 7
-    SDL_SCANCODE_S, SDL_SCANCODE_D, SDL_SCANCODE_Z, SDL_SCANCODE_C,  // 8 9 A B
-    SDL_SCANCODE_4, SDL_SCANCODE_R, SDL_SCANCODE_F, SDL_SCANCODE_V,  // C D E F
-};
 
 std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
     std::ifstream file(path, std::ios::binary);
@@ -49,12 +38,12 @@ std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
     return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(file), {});
 }
 
-void handle_key(Chip8& chip8, SDL_Scancode scancode, bool pressed) {
-    for (std::size_t key = 0; key < kKeymap.size(); ++key) {
-        if (kKeymap[key] == scancode) {
-            chip8.set_key(static_cast<std::uint8_t>(key), pressed);
-        }
-    }
+// Picks the console from the file extension.
+std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext == ".gb" || ext == ".gbc") return ezy::frontend::GameBoySystem::create(rom);
+    return ezy::frontend::Chip8System::create(rom);
 }
 
 // Debugger shortcuts. Returns false when the app should quit.
@@ -69,25 +58,17 @@ bool handle_shortcut(SDL_Scancode scancode, RunState& run) {
     return true;
 }
 
-// One emulated 60 Hz frame: a batch of instructions, then the timers.
-void run_frame(Chip8& chip8, int instructions) {
-    for (int i = 0; i < instructions; ++i) {
-        chip8.step();
-    }
-    chip8.tick_timers();
-}
-
 }  // namespace
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: ezyemu <rom.ch8>\n";
+        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb>\n";
         return 1;
     }
 
     const auto rom = read_file(argv[1]);
-    Chip8 chip8;
-    if (!rom || !chip8.load_rom(*rom)) {
+    std::unique_ptr<System> system = rom ? create_system(argv[1], *rom) : nullptr;
+    if (!system) {
         std::cerr << "Could not load ROM: " << argv[1] << '\n';
         return 1;
     }
@@ -97,10 +78,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    const std::string title = "EzyEmulator - " + std::string(system->name());
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
-    if (!SDL_CreateWindowAndRenderer("EzyEmulator - CHIP-8", kWindowWidth, kWindowHeight, SDL_WINDOW_RESIZABLE,
-                                     &window, &renderer)) {
+    if (!SDL_CreateWindowAndRenderer(title.c_str(), kWindowWidth, kWindowHeight, SDL_WINDOW_RESIZABLE, &window,
+                                     &renderer)) {
         std::cerr << "SDL_CreateWindowAndRenderer failed: " << SDL_GetError() << '\n';
         SDL_Quit();
         return 1;
@@ -108,7 +90,7 @@ int main(int argc, char* argv[]) {
     SDL_SetRenderVSync(renderer, 1);
 
     SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-                                             ezy::chip8::kScreenWidth, ezy::chip8::kScreenHeight);
+                                             system->screen_width(), system->screen_height());
     SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
 
     IMGUI_CHECKVERSION();
@@ -124,10 +106,12 @@ int main(int argc, char* argv[]) {
         }
 
         RunState run;
-        std::array<std::uint32_t, ezy::chip8::kScreenWidth * ezy::chip8::kScreenHeight> pixels{};
+        std::vector<std::uint32_t> pixels(
+            static_cast<std::size_t>(system->screen_width() * system->screen_height()));
 
-        // Fixed-timestep loop: emulation advances in exact 1/60 s steps, no matter how
+        // Fixed-timestep loop: emulation advances in exact frame-sized steps, no matter how
         // often we render (60 Hz, 144 Hz or an uncapped loop).
+        const double frame_seconds = system->frame_seconds();
         const double counter_freq = static_cast<double>(SDL_GetPerformanceFrequency());
         std::uint64_t previous = SDL_GetPerformanceCounter();
         double accumulator = 0.0;
@@ -145,7 +129,7 @@ int main(int argc, char* argv[]) {
                     if (down && !event.key.repeat && !handle_shortcut(event.key.scancode, run)) {
                         running = false;
                     }
-                    handle_key(chip8, event.key.scancode, down);
+                    system->handle_key(event.key.scancode, down);
                 }
             }
 
@@ -155,33 +139,31 @@ int main(int argc, char* argv[]) {
             previous = now;
 
             if (run.reset) {
-                chip8.load_rom(*rom);  // quirks are kept across resets
+                system->reset();
                 run.reset = false;
             }
 
             if (run.paused) {
-                if (run.step_instruction) chip8.step();
-                if (run.step_frame) run_frame(chip8, run.instructions_per_frame);
+                if (run.step_instruction) system->step_instruction();
+                if (run.step_frame) system->run_frame();
                 run.step_instruction = run.step_frame = false;
                 accumulator = 0.0;
             } else {
-                while (accumulator >= kFrameSeconds) {
-                    run_frame(chip8, run.instructions_per_frame);
-                    accumulator -= kFrameSeconds;
+                while (accumulator >= frame_seconds) {
+                    system->run_frame();
+                    accumulator -= frame_seconds;
                 }
             }
-            beeper.update(!run.paused && chip8.sound_active());
+            beeper.update(!run.paused && system->sound_active());
 
-            const auto fb = chip8.framebuffer();
-            for (std::size_t i = 0; i < pixels.size(); ++i) {
-                pixels[i] = fb[i] ? kColorOn : kColorOff;
-            }
-            SDL_UpdateTexture(texture, nullptr, pixels.data(), ezy::chip8::kScreenWidth * sizeof(std::uint32_t));
+            system->render(pixels);
+            SDL_UpdateTexture(texture, nullptr, pixels.data(),
+                              system->screen_width() * static_cast<int>(sizeof(std::uint32_t)));
 
             ImGui_ImplSDLRenderer3_NewFrame();
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
-            ezy::frontend::draw_debugger(chip8, run, texture);
+            ezy::frontend::draw_debugger(*system, run, texture);
             ImGui::Render();
 
             SDL_SetRenderDrawColor(renderer, 24, 24, 28, 255);

@@ -6,18 +6,12 @@
 
 #include "gb/cartridge.hpp"
 #include "gb/cpu_bus.hpp"
+#include "gb/interrupts.hpp"
+#include "gb/joypad.hpp"
+#include "gb/ppu.hpp"
 #include "gb/timer.hpp"
 
 namespace ezy::gb {
-
-// Interrupt bits, shared by IE (0xFFFF) and IF (0xFF0F).
-namespace interrupt {
-inline constexpr std::uint8_t kVBlank = 1 << 0;
-inline constexpr std::uint8_t kStat = 1 << 1;
-inline constexpr std::uint8_t kTimer = 1 << 2;
-inline constexpr std::uint8_t kSerial = 1 << 3;
-inline constexpr std::uint8_t kJoypad = 1 << 4;
-}  // namespace interrupt
 
 // The memory bus: routes every CPU access to the right component.
 //
@@ -44,25 +38,31 @@ public:
     [[nodiscard]] std::uint8_t interrupt_flags() const { return if_; }
     [[nodiscard]] std::uint8_t interrupt_enable() const { return ie_; }
 
+    void set_button(Button button, bool pressed);
+
     // Bytes sent over the serial port. Blargg's test ROMs print their results here.
     [[nodiscard]] const std::string& serial_output() const { return serial_output_; }
 
     [[nodiscard]] const Cartridge& cartridge() const { return cartridge_; }
+    [[nodiscard]] Ppu& ppu() { return ppu_; }
+    [[nodiscard]] const Ppu& ppu() const { return ppu_; }
 
 private:
-    void advance();  // advances timer/PPU/... by one M-cycle (they come later)
+    void advance();  // advances timer and PPU by one M-cycle
     void write_io(std::uint16_t addr, std::uint8_t value);
     [[nodiscard]] std::uint8_t read_io(std::uint16_t addr) const;
+    void oam_dma(std::uint8_t page);
 
     Cartridge cartridge_;
     Timer timer_;
-    std::array<std::uint8_t, 0x2000> vram_{};
+    Ppu ppu_;
+    Joypad joypad_;
     std::array<std::uint8_t, 0x2000> wram_{};
-    std::array<std::uint8_t, 0xA0> oam_{};
     std::array<std::uint8_t, 0x80> io_{};  // raw storage for I/O registers not modelled yet
     std::array<std::uint8_t, 0x7F> hram_{};
     std::uint8_t if_ = 0;
     std::uint8_t ie_ = 0;
+    std::uint8_t dma_ = 0xFF;
 
     std::string serial_output_;
     std::uint64_t t_cycles_ = 0;
