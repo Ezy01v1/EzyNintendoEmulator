@@ -19,6 +19,7 @@ endif()
 include(FetchContent)
 
 add_subdirectory(src/core/chip8)
+add_subdirectory(src/core/gb)
 
 if(EZY_BUILD_FRONTEND)
     # Static SDL avoids having to copy SDL3.dll next to the executable.
@@ -63,4 +64,5 @@ if(EZY_BUILD_TESTS)
 
     enable_testing()
     add_subdirectory(tests/chip8)
+    add_subdirectory(tests/gb)
 endif()
