@@ -5,26 +5,10 @@
 #include <vector>
 
 #include "gb/cartridge.hpp"
+#include "test_helpers.hpp"
 
 using namespace ezy::gb;
-
-namespace {
-
-// Builds a synthetic 32 KiB ROM with a valid header.
-std::vector<std::uint8_t> make_rom(std::string_view title, std::uint8_t type = 0x00, std::uint8_t rom_code = 0x00,
-                                   std::uint8_t ram_code = 0x00) {
-    std::vector<std::uint8_t> rom(32 * 1024, 0);
-    for (std::size_t i = 0; i < title.size(); ++i) {
-        rom[kTitleStart + i] = static_cast<std::uint8_t>(title[i]);
-    }
-    rom[kCartTypeAddr] = type;
-    rom[kRomSizeAddr] = rom_code;
-    rom[kRamSizeAddr] = ram_code;
-    rom[kHeaderChecksumAddr] = compute_header_checksum(rom);
-    return rom;
-}
-
-}  // namespace
+using ezy::gb::test::make_rom;
 
 TEST_CASE("parse_header reads title, type and sizes") {
     const auto rom = make_rom("TESTGAME", 0x03, 0x02, 0x03);
