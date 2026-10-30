@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <random>
 #include <span>
 
 namespace ezy::chip8 {
@@ -18,7 +19,8 @@ inline constexpr std::size_t kMaxRomSize = kMemorySize - kProgramStart;
 // The frontend feeds it bytes and input, and reads back pixels and sound state.
 class Chip8 {
 public:
-    Chip8();
+    // A fixed seed makes CXNN (random) reproducible in tests.
+    explicit Chip8(std::uint32_t seed = std::random_device{}());
 
     void reset();
     bool load_rom(std::span<const std::uint8_t> rom);
@@ -39,6 +41,11 @@ public:
     [[nodiscard]] std::uint8_t read(std::uint16_t addr) const { return memory_.at(addr); }
 
 private:
+    static constexpr std::uint8_t kNoKey = 0xFF;
+
+    void execute_alu(std::size_t x, std::size_t y, std::uint8_t n);  // 8XYN
+    void execute_misc(std::size_t x, std::uint8_t nn);               // FXNN
+    void skip_next();
     void draw_sprite(std::uint8_t vx, std::uint8_t vy, std::uint8_t height);
 
     std::array<std::uint8_t, kMemorySize> memory_{};
@@ -52,6 +59,12 @@ private:
     std::uint8_t sp_ = 0;
     std::uint8_t delay_timer_ = 0;
     std::uint8_t sound_timer_ = 0;
+
+    bool waiting_for_key_ = false;      // FX0A in progress
+    std::uint8_t released_key_ = kNoKey;
+
+    std::mt19937 rng_;
+    std::uniform_int_distribution<int> byte_dist_{0, 255};
 };
 
 }  // namespace ezy::chip8

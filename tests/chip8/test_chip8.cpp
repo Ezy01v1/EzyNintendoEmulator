@@ -104,6 +104,108 @@ TEST_CASE("DXYN wraps the start position but clips at the edge") {
     CHECK_FALSE(pixel(chip8, 0, 0));  // no wrap-around to the left side
 }
 
+TEST_CASE("2NNN calls a subroutine and 00EE returns") {
+    // 0x200: CALL 0x206 | 0x202: V0 = 1 | 0x204: (unused) | 0x206: V1 = 2 | 0x208: RET
+    const std::vector<std::uint8_t> program = {0x22, 0x06, 0x60, 0x01, 0x00, 0x00, 0x61, 0x02, 0x00, 0xEE};
+    auto chip8 = run(program, 1);
+    CHECK(chip8.pc() == 0x206);
+    chip8.step();  // V1 = 2
+    chip8.step();  // RET
+    CHECK(chip8.pc() == 0x202);
+    CHECK(chip8.v(1) == 2);
+}
+
+TEST_CASE("3XNN skips only when equal") {
+    CHECK(run({0x60, 0x05, 0x30, 0x05}, 2).pc() == 0x206);
+    CHECK(run({0x60, 0x05, 0x30, 0x06}, 2).pc() == 0x204);
+}
+
+TEST_CASE("8XY4 adds with carry in VF") {
+    auto chip8 = run({0x60, 0xFF, 0x61, 0x02, 0x80, 0x14}, 3);
+    CHECK(chip8.v(0) == 0x01);
+    CHECK(chip8.v(0xF) == 1);
+
+    chip8 = run({0x60, 0x10, 0x61, 0x02, 0x80, 0x14}, 3);
+    CHECK(chip8.v(0) == 0x12);
+    CHECK(chip8.v(0xF) == 0);
+}
+
+TEST_CASE("8XY5 subtracts with VF = not borrow") {
+    auto chip8 = run({0x60, 0x05, 0x61, 0x03, 0x80, 0x15}, 3);
+    CHECK(chip8.v(0) == 0x02);
+    CHECK(chip8.v(0xF) == 1);
+
+    chip8 = run({0x60, 0x03, 0x61, 0x05, 0x80, 0x15}, 3);
+    CHECK(chip8.v(0) == 0xFE);
+    CHECK(chip8.v(0xF) == 0);
+}
+
+TEST_CASE("VF as destination ends up holding the flag") {
+    // VF = 0xFF, V1 = 2, VF += V1 -> result 0x01 is overwritten by carry 1.
+    const auto chip8 = run({0x6F, 0xFF, 0x61, 0x02, 0x8F, 0x14}, 3);
+    CHECK(chip8.v(0xF) == 1);
+}
+
+TEST_CASE("8XY6 and 8XYE shift VY into VX (COSMAC VIP)") {
+    auto chip8 = run({0x61, 0x05, 0x80, 0x16}, 2);
+    CHECK(chip8.v(0) == 0x02);
+    CHECK(chip8.v(0xF) == 1);
+
+    chip8 = run({0x61, 0x81, 0x80, 0x1E}, 2);
+    CHECK(chip8.v(0) == 0x02);
+    CHECK(chip8.v(0xF) == 1);
+}
+
+TEST_CASE("FX33 stores BCD") {
+    // V0 = 254, I = 0x300, BCD
+    const auto chip8 = run({0x60, 0xFE, 0xA3, 0x00, 0xF0, 0x33}, 3);
+    CHECK(chip8.read(0x300) == 2);
+    CHECK(chip8.read(0x301) == 5);
+    CHECK(chip8.read(0x302) == 4);
+}
+
+TEST_CASE("FX55 / FX65 round-trip registers and advance I") {
+    // V0 = 1, V1 = 2, I = 0x300, store V0..V1, V0 = V1 = 0, I = 0x300, load V0..V1
+    const std::vector<std::uint8_t> program = {0x60, 0x01, 0x61, 0x02, 0xA3, 0x00, 0xF1, 0x55,
+                                               0x60, 0x00, 0x61, 0x00, 0xA3, 0x00, 0xF1, 0x65};
+    const auto chip8 = run(program, 8);
+    CHECK(chip8.v(0) == 1);
+    CHECK(chip8.v(1) == 2);
+    CHECK(chip8.index() == 0x302);
+}
+
+TEST_CASE("FX29 points I at the font glyph") {
+    const auto chip8 = run({0x60, 0x0A, 0xF0, 0x29}, 2);
+    CHECK(chip8.index() == kFontStart + 0xA * 5);
+}
+
+TEST_CASE("CXNN is reproducible with a fixed seed and masked by NN") {
+    const std::array<std::uint8_t, 2> rom = {0xC0, 0x0F};
+    Chip8 a(1234);
+    Chip8 b(1234);
+    REQUIRE(a.load_rom(rom));
+    REQUIRE(b.load_rom(rom));
+    a.step();
+    b.step();
+    CHECK(a.v(0) == b.v(0));
+    CHECK(a.v(0) <= 0x0F);
+}
+
+TEST_CASE("FX0A waits for a key press and release") {
+    Chip8 chip8;
+    const std::array<std::uint8_t, 2> rom = {0xF3, 0x0A};
+    REQUIRE(chip8.load_rom(rom));
+    chip8.step();
+    CHECK(chip8.pc() == 0x200);  // still waiting
+    chip8.set_key(0x7, true);
+    chip8.step();
+    CHECK(chip8.pc() == 0x200);  // pressed but not released yet
+    chip8.set_key(0x7, false);
+    chip8.step();
+    CHECK(chip8.pc() == 0x202);
+    CHECK(chip8.v(3) == 0x7);
+}
+
 TEST_CASE("step fetches two bytes and advances pc") {
     Chip8 chip8;
     const std::array<std::uint8_t, 2> rom = {0x00, 0x00};
