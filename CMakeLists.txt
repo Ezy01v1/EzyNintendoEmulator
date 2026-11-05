@@ -20,6 +20,7 @@ include(FetchContent)
 
 add_subdirectory(src/core/chip8)
 add_subdirectory(src/core/gb)
+add_subdirectory(src/core/gba)
 add_subdirectory(tools/gb_runner)
 
 if(EZY_BUILD_FRONTEND)
@@ -71,4 +72,5 @@ if(EZY_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/chip8)
     add_subdirectory(tests/gb)
+    add_subdirectory(tests/gba)
 endif()
