@@ -8,8 +8,6 @@ namespace ezy::gba {
 
 namespace {
 
-constexpr std::uint32_t kRomEntry = 0x08000000;
-
 // Stack pointers the BIOS sets up before jumping to the cartridge (GBATEK "BIOS RAM Usage").
 constexpr std::uint32_t kStackSvc = 0x03007FE0;
 constexpr std::uint32_t kStackIrq = 0x03007FA0;
@@ -42,12 +40,12 @@ Gba::Gba(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios, 
 
 // The state the BIOS leaves when it hands over to the cartridge: System mode, ARM state,
 // interrupts enabled in the CPSR, stacks set up for SVC/IRQ/System.
-void Gba::boot_without_bios() {
+void Gba::boot_without_bios(std::uint32_t entry) {
     cpu_.set_banked(kBankSvc, 5, kStackSvc);
     cpu_.set_banked(kBankIrq, 5, kStackIrq);
     cpu_.set_cpsr_raw(static_cast<std::uint32_t>(Mode::System));
     cpu_.set_reg(13, kStackUser);
-    cpu_.jump(kRomEntry);
+    cpu_.jump(entry);
 }
 
 void Gba::dispatch_due_events() {

@@ -50,7 +50,9 @@ public:
 private:
     Gba(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios, CartridgeHeader header);
 
-    void boot_without_bios();
+    // Sets up what the BIOS leaves behind and jumps to `entry` (the cartridge, or EWRAM
+    // for a multiboot SoftReset).
+    void boot_without_bios(std::uint32_t entry = 0x08000000);
     void dispatch_due_events();
 
     // BIOS calls (hle_swi.cpp).
@@ -58,6 +60,8 @@ private:
     bool intr_wait(bool discard, std::uint16_t flags);
     void swi_div(std::uint32_t numerator, std::uint32_t denominator);
     void swi_cpu_set(bool fast);
+    void swi_soft_reset();
+    void swi_register_ram_reset(std::uint32_t flags);
 
     // Declaration order is construction order: the bus needs the scheduler, the CPU the bus.
     Scheduler scheduler_;
