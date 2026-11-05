@@ -3,12 +3,18 @@
 #include <imgui.h>
 
 #include <array>
+#include <fstream>
+#include <iostream>
+#include <iterator>
 
 #include "debug_ui.hpp"
 
 namespace ezy::frontend {
 
 namespace {
+
+// How often the save chip is flushed to disk while running, if it changed (~1 s).
+constexpr int kFlushIntervalFrames = 60;
 
 // KEYINPUT bits: A, B, Select, Start, Right, Left, Up, Down, R, L.
 struct KeyBinding {
@@ -63,20 +69,71 @@ void draw_video(const gba::Gba& gba) {
                 bus.interrupt_master_enable() ? 1 : 0);
     ImGui::SeparatorText("Cartridge");
     ImGui::Text("%s  (%s)", gba.header().title.c_str(), gba.header().game_code.c_str());
+    const gba::Backup& backup = bus.backup();
+    const std::string_view kind = gba::backup_type_name(backup.type());
+    ImGui::Text("Save: %.*s, %zu bytes%s", static_cast<int>(kind.size()), kind.data(), backup.data().size(),
+                backup.dirty() ? " (unsaved changes)" : "");
     ImGui::End();
 }
 
 }  // namespace
 
-std::unique_ptr<GbaSystem> GbaSystem::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios) {
+std::unique_ptr<GbaSystem> GbaSystem::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios,
+                                             std::filesystem::path save_path) {
     auto gba = gba::Gba::create(rom, bios);
     if (!gba) return nullptr;
-    return std::unique_ptr<GbaSystem>(
-        new GbaSystem({rom.begin(), rom.end()}, {bios.begin(), bios.end()}, std::move(gba)));
+    std::unique_ptr<GbaSystem> system(new GbaSystem({rom.begin(), rom.end()}, {bios.begin(), bios.end()},
+                                                    std::move(gba), std::move(save_path)));
+    system->load_save();
+    return system;
+}
+
+void GbaSystem::load_save() {
+    if (save_path_.empty()) return;
+    std::ifstream file(save_path_, std::ios::binary);
+    if (!file) return;  // first run: no save yet
+    const std::vector<std::uint8_t> data(std::istreambuf_iterator<char>(file), {});
+    gba::Backup& backup = gba_->bus().backup();
+    if (!backup.load(data)) {
+        std::cerr << "Warning: " << save_path_.string() << " has " << data.size() << " bytes, which doesn't fit "
+                  << gba::backup_type_name(backup.type()) << "; ignoring it\n";
+    }
+}
+
+void GbaSystem::flush_save() {
+    frames_since_flush_ = 0;
+    gba::Backup& backup = gba_->bus().backup();
+    if (save_path_.empty() || !backup.persists() || !backup.dirty()) return;
+    // Write to a temp file and rename, so a crash mid-write never corrupts the old save.
+    std::filesystem::path tmp = save_path_;
+    tmp += ".tmp";
+    {
+        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+        const auto data = backup.data();
+        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        if (!file) {
+            std::cerr << "Could not write " << tmp.string() << "\n";
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, save_path_, ec);
+    if (ec) {
+        std::cerr << "Could not replace " << save_path_.string() << ": " << ec.message() << "\n";
+        return;
+    }
+    backup.clear_dirty();
+}
+
+void GbaSystem::run_frame() {
+    gba_->run_frame();
+    if (++frames_since_flush_ >= kFlushIntervalFrames) flush_save();
 }
 
 void GbaSystem::reset() {
+    flush_save();
     gba_ = gba::Gba::create(rom_, bios_);
+    load_save();
     gba_->bus().set_keys(keys_);
 }
 

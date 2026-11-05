@@ -7,6 +7,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "gba/backup.hpp"
 #include "gba/cpu/cpu_bus.hpp"
 #include "gba/ppu.hpp"
 #include "gba/timer.hpp"
@@ -22,7 +23,7 @@ inline constexpr std::size_t kIoSize = 0x400;
 inline constexpr std::size_t kPaletteSize = 1024;
 inline constexpr std::size_t kVramSize = 96 * 1024;
 inline constexpr std::size_t kOamSize = 1024;
-inline constexpr std::size_t kSramSize = 64 * 1024;
+inline constexpr std::size_t kSramSize = 64 * 1024;  // the save chip's address window
 
 // The GBA memory bus: maps the 32-bit address space onto each memory region, with the
 // mirroring the hardware does inside each region.
@@ -37,6 +38,10 @@ inline constexpr std::size_t kSramSize = 64 * 1024;
 // - The CpuBus overrides (with an Access argument): what the CPU uses. Each one also
 //   charges the access's cost in cycles to the Scheduler, using the waitstate table
 //   (GBATEK "GBA Memory Map") and WAITCNT for the cartridge.
+//
+// Cartridge saves: 0x0E000000 goes to the save chip (SRAM or flash); with an EEPROM, the
+// top of the ROM area (0x0D) carries its serial bits instead. Untimed reads only peek at
+// the EEPROM; CPU and DMA reads advance its serial output.
 //
 // I/O side effects so far: DISPSTAT/VCOUNT read-only bits (PPU), BG2/BG3 X/Y reloading
 // the PPU's affine reference points, IF write-1-to-clear, KEYINPUT read-only, HALTCNT,
@@ -59,6 +64,9 @@ public:
 
     [[nodiscard]] Ppu& ppu() { return ppu_; }
     [[nodiscard]] const Ppu& ppu() const { return ppu_; }
+    // The cartridge's save chip, chosen from the ROM's backup ID string.
+    [[nodiscard]] Backup& backup() { return backup_; }
+    [[nodiscard]] const Backup& backup() const { return backup_; }
     [[nodiscard]] Timers& timers() { return timers_; }
     [[nodiscard]] const Timers& timers() const { return timers_; }
 
@@ -119,6 +127,8 @@ private:
     void run_dma(int index);
     [[nodiscard]] std::uint16_t dma_control(int index) const;
 
+    [[nodiscard]] bool is_eeprom_address(std::uint32_t addr) const;
+
     void charge(std::uint32_t cycles) {
         if (scheduler_ != nullptr) scheduler_->advance(cycles);
     }
@@ -141,7 +151,7 @@ private:
     std::array<std::uint8_t, kPaletteSize> palette_{};
     std::vector<std::uint8_t> vram_;
     std::array<std::uint8_t, kOamSize> oam_{};
-    std::vector<std::uint8_t> sram_;
+    Backup backup_;  // after rom_: detected from it
     Scheduler* scheduler_ = nullptr;
     std::uint16_t keys_pressed_ = 0;
     bool halted_ = false;

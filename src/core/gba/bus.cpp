@@ -45,7 +45,7 @@ Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios, Sche
       bios_(kBiosSize, 0),
       ewram_(kEwramSize, 0),
       vram_(kVramSize, 0),
-      sram_(kSramSize, 0xFF),  // erased flash/SRAM reads back as 0xFF
+      backup_(detect_backup_type(rom_)),
       scheduler_(scheduler),
       ppu_(io_, palette_, vram_, oam_, scheduler),
       timers_(io_, scheduler) {
@@ -116,11 +116,7 @@ auto Bus::resolve(Self& self, std::uint32_t addr, std::size_t& offset) {
                 if (offset >= self.rom_.size()) return Span{};
                 return Span{self.rom_};
             }
-            if (is_sram(region)) {
-                offset = addr & (kSramSize - 1);
-                return Span{self.sram_};
-            }
-            return Span{};
+            return Span{};  // the save chip (0x0E-0x0F) is handled by read()/write() directly
     }
 }
 
@@ -131,9 +127,11 @@ T Bus::read(std::uint32_t addr) const {
 
     if (is_sram(region)) {
         // 8-bit bus: wider reads see the same byte in every lane.
-        const std::uint8_t byte = sram_[addr & (kSramSize - 1)];
+        const std::uint8_t byte = backup_.read8(addr & (kSramSize - 1));
         return static_cast<T>(byte * static_cast<std::uint32_t>(sizeof(T) == 1 ? 0x01 : sizeof(T) == 2 ? 0x0101 : 0x01010101));
     }
+    // Untimed reads only peek at the EEPROM's serial output; CPU and DMA reads advance it.
+    if (is_eeprom_address(addr)) return static_cast<T>(backup_.eeprom_peek());
 
     std::size_t offset = 0;
     const auto memory = resolve(*this, addr, offset);
@@ -166,11 +164,15 @@ template <typename T>
 void Bus::write(std::uint32_t addr, T value) {
     addr &= ~static_cast<std::uint32_t>(sizeof(T) - 1);
     const std::uint32_t region = region_of(addr);
+    if (is_eeprom_address(addr)) {
+        backup_.eeprom_write(static_cast<std::uint16_t>(value));  // bit 0 is the serial input
+        return;
+    }
     if (region == kBios || is_rom(region)) return;  // read-only
 
     if (is_sram(region)) {
         // 8-bit bus: only one byte reaches the chip.
-        sram_[addr & (kSramSize - 1)] = static_cast<std::uint8_t>(value);
+        backup_.write8(addr & (kSramSize - 1), static_cast<std::uint8_t>(value));
         return;
     }
 
@@ -264,7 +266,15 @@ std::uint8_t Bus::read8(std::uint32_t addr, Access access) {
 
 std::uint16_t Bus::read16(std::uint32_t addr, Access access) {
     charge(access_cycles(addr, 2, access));
+    if (is_eeprom_address(addr)) return backup_.eeprom_read();
     return read<std::uint16_t>(addr);
+}
+
+bool Bus::is_eeprom_address(std::uint32_t addr) const {
+    // 0x0D000000-0x0DFFFFFF, or only its last 256 bytes when the ROM is bigger than 16 MiB
+    // (the rest of 0x0D is then ROM).
+    if (!backup_.is_eeprom() || region_of(addr) != 0x0D) return false;
+    return rom_.size() <= 16 * 1024 * 1024 || (addr & 0x00FFFFFF) >= 0x00FFFF00;
 }
 
 std::uint32_t Bus::read32(std::uint32_t addr, Access access) {
@@ -354,6 +364,9 @@ void Bus::run_dma(int index) {
     };
     const std::int32_t dst_step = step((control >> 5) & 3);
     const std::int32_t src_step = step((control >> 7) & 3);
+
+    // EEPROM requests are 9/17 (read) or 73/81 (write) halfwords long: that tells its size.
+    if (index == 3 && is_eeprom_address(ch.dst)) backup_.eeprom_dma_hint(ch.count);
 
     charge(2);
     Access access = static_cast<Access>(kDma | kNonseq);
