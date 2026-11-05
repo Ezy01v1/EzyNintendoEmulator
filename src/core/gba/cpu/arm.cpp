@@ -4,27 +4,18 @@
 
 #include "gba/bus.hpp"  // rotate_misaligned_word
 #include "gba/cpu/arm7tdmi.hpp"
+#include "gba/cpu/alu.hpp"
 #include "gba/cpu/shifter.hpp"
 
 namespace ezy::gba {
+
+using alu::add_with_carry;
+using alu::AddResult;
 
 namespace {
 
 constexpr std::uint32_t bit(std::uint32_t op, std::uint32_t n) { return (op >> n) & 1; }
 constexpr std::uint32_t field(std::uint32_t op, std::uint32_t shift, std::uint32_t mask) { return (op >> shift) & mask; }
-
-struct AddResult {
-    std::uint32_t value;
-    bool carry;
-    bool overflow;
-};
-
-// a + b + carry_in, with ARM carry/overflow. Subtraction is a + ~b + 1 (carry = no borrow).
-constexpr AddResult add_with_carry(std::uint32_t a, std::uint32_t b, bool carry_in) {
-    const std::uint64_t wide = std::uint64_t{a} + b + (carry_in ? 1 : 0);
-    const auto value = static_cast<std::uint32_t>(wide);
-    return {value, (wide >> 32) != 0, ((~(a ^ b) & (a ^ value)) >> 31) != 0};
-}
 
 constexpr std::uint32_t rotated_immediate(std::uint32_t op) {
     return std::rotr(op & 0xFF, static_cast<int>(field(op, 8, 0xF) * 2));
@@ -141,8 +132,7 @@ void Arm7tdmi::arm_data_processing(std::uint32_t op) {
             if (logical) {
                 set_flag(psr::kC, shifter_carry);
             } else {
-                set_flag(psr::kC, sum.carry);
-                set_flag(psr::kV, sum.overflow);
+                set_cv(sum);
             }
         }
     }
@@ -240,7 +230,7 @@ void Arm7tdmi::arm_single_transfer(std::uint32_t op) {
 
     if (load) {
         const std::uint32_t value =
-            byte ? bus_.read8(addr, kNonseq) : rotate_misaligned_word(bus_.read32(addr, kNonseq), addr);
+            byte ? bus_.read8(addr, kNonseq) : load_word(addr);
         bus_.idle();
         if (writeback) r_[rn] = moved + (rn == 15 ? 4 : 0);  // PC has advanced by now
         r_[rd] = value;  // the loaded value wins over writeback when rd == rn
@@ -275,20 +265,7 @@ void Arm7tdmi::arm_halfword_transfer(std::uint32_t op) {
     const std::uint32_t addr = pre ? moved : base;
 
     if (load) {
-        std::uint32_t value = 0;
-        if (kind == 1) {
-            // LDRH from an odd address: the halfword is rotated, like LDR.
-            value = std::rotr(std::uint32_t{bus_.read16(addr, kNonseq)}, static_cast<int>((addr & 1) * 8));
-        } else if (kind == 2) {
-            value = static_cast<std::uint32_t>(static_cast<std::int8_t>(bus_.read8(addr, kNonseq)));
-        } else if ((addr & 1) != 0) {
-            // LDRSH from an odd address: a halfword access whose upper byte (the addressed
-            // one) is sign-extended, as if it were LDRSB.
-            const auto half = bus_.read16(addr, kNonseq);
-            value = static_cast<std::uint32_t>(static_cast<std::int8_t>(half >> 8));
-        } else {
-            value = static_cast<std::uint32_t>(static_cast<std::int16_t>(bus_.read16(addr, kNonseq)));
-        }
+        const std::uint32_t value = kind == 1 ? load_half(addr) : kind == 2 ? load_signed_byte(addr) : load_signed_half(addr);
         bus_.idle();
         if (writeback) r_[rn] = moved + (rn == 15 ? 4 : 0);  // PC has advanced by now
         r_[rd] = value;
@@ -306,7 +283,9 @@ void Arm7tdmi::arm_halfword_transfer(std::uint32_t op) {
     }
 }
 
-void Arm7tdmi::arm_block_transfer(std::uint32_t op) {
+void Arm7tdmi::arm_block_transfer(std::uint32_t op) { block_transfer(op, 4); }
+
+void Arm7tdmi::block_transfer(std::uint32_t op, std::uint32_t pc_store_offset) {
     const bool pre = bit(op, 24) != 0;
     const bool up = bit(op, 23) != 0;
     const bool psr_or_user = bit(op, 22) != 0;
@@ -317,7 +296,8 @@ void Arm7tdmi::arm_block_transfer(std::uint32_t op) {
 
     // An empty list transfers only r15 but moves the base as if all 16 registers had been.
     std::uint32_t bytes = static_cast<std::uint32_t>(std::popcount(list)) * 4;
-    if (list == 0) {
+    const bool empty_list = list == 0;
+    if (empty_list) {
         list = 1U << 15;
         bytes = 0x40;
     }
@@ -343,7 +323,7 @@ void Arm7tdmi::arm_block_transfer(std::uint32_t op) {
             r_[i] = value;
         } else {
             // A base stored after the first register is already the written-back value.
-            bus_.write32(addr, r_[i] + (i == 15 ? 4 : 0), access);
+            bus_.write32(addr, r_[i] + (i == 15 ? pc_store_offset : 0), access);
             if (first && writeback) r_[rn] = new_base;
         }
         first = false;
@@ -361,6 +341,7 @@ void Arm7tdmi::arm_block_transfer(std::uint32_t op) {
         bus_.idle();
         if (pc_in_list) {
             if (psr_or_user) set_cpsr(spsr_ref());  // LDM ..., {.., pc}^ returns from an exception
+            if (thumb() && !empty_list) r_[15] &= ~1U;  // Thumb POP {pc}; no switch to ARM on ARMv4
             flush();
         }
     }
@@ -376,12 +357,40 @@ void Arm7tdmi::arm_swap(std::uint32_t op) {
         old = bus_.read8(addr, kNonseq);
         bus_.write8(addr, static_cast<std::uint8_t>(source), kLock);
     } else {
-        old = rotate_misaligned_word(bus_.read32(addr, kNonseq), addr);
+        old = load_word(addr);
         bus_.write32(addr, source, kLock);
     }
     bus_.idle();
     r_[rd] = old;
     if (rd == 15) flush();
+}
+
+// --- Helpers shared with Thumb ---
+
+void Arm7tdmi::set_cv(const alu::AddResult& sum) {
+    set_flag(psr::kC, sum.carry);
+    set_flag(psr::kV, sum.overflow);
+}
+
+std::uint32_t Arm7tdmi::load_word(std::uint32_t addr) {
+    return rotate_misaligned_word(bus_.read32(addr, kNonseq), addr);  // misaligned LDR rotates
+}
+
+std::uint32_t Arm7tdmi::load_half(std::uint32_t addr) {
+    // LDRH from an odd address: the halfword is rotated, like LDR.
+    return std::rotr(std::uint32_t{bus_.read16(addr, kNonseq)}, static_cast<int>((addr & 1) * 8));
+}
+
+std::uint32_t Arm7tdmi::load_signed_byte(std::uint32_t addr) {
+    return static_cast<std::uint32_t>(static_cast<std::int8_t>(bus_.read8(addr, kNonseq)));
+}
+
+std::uint32_t Arm7tdmi::load_signed_half(std::uint32_t addr) {
+    const auto half = bus_.read16(addr, kNonseq);
+    // From an odd address it is a halfword access whose upper byte (the addressed one) is
+    // sign-extended, as if it were LDRSB.
+    if ((addr & 1) != 0) return static_cast<std::uint32_t>(static_cast<std::int8_t>(half >> 8));
+    return static_cast<std::uint32_t>(static_cast<std::int16_t>(half));
 }
 
 // --- Exceptions ---

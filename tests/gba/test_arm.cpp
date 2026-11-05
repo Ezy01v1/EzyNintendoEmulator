@@ -221,3 +221,91 @@ TEST_CASE("ARM UMULL and SMLAL") {
     CHECK(f.cpu.reg(4) == 0xFFFFFFFE);
     CHECK(f.cpu.reg(5) == 0xFFFFFFFF);
 }
+
+// --- Thumb ---
+
+namespace {
+
+void program16(FlatBus& bus, std::initializer_list<std::uint16_t> ops, std::uint32_t at) {
+    for (const auto op : ops) {
+        bus.write16(at, op, kNonseq);
+        at += 2;
+    }
+}
+
+}  // namespace
+
+TEST_CASE("BX switches ARM -> Thumb -> ARM, and Thumb reads PC as +4") {
+    Fixture f;
+    f.bus.program({
+        0xE3A00C01,  // 0x00: MOV r0, #0x100
+        0xE2800001,  // 0x04: ADD r0, r0, #1  (Thumb bit)
+        0xE12FFF10,  // 0x08: BX r0
+    });
+    program16(f.bus, {0x4679, 0x2000, 0x4778, 0x46C0}, 0x100);  // MOV r1, pc; MOV r0, #0; BX pc; NOP
+    f.bus.program({0xE3A02009}, 0x108);                          // ARM again: MOV r2, #9
+    f.cpu.reset();
+    f.run(3);
+    CHECK(f.cpu.thumb());
+    f.run(1);
+    CHECK(f.cpu.reg(1) == 0x104);
+    f.run(2);  // MOV r0, #0 ; BX pc  (pc = 0x108, bit 0 clear -> ARM)
+    CHECK_FALSE(f.cpu.thumb());
+    f.run(1);
+    CHECK(f.cpu.reg(2) == 9);
+}
+
+TEST_CASE("Thumb BL pair calls and returns with LR bit 0 set") {
+    Fixture f;
+    f.bus.program({0xE3A00C01, 0xE2800001, 0xE12FFF10});  // enter Thumb at 0x100
+    // 0x100: BL 0x110 (two halves), 0x104: MOV r1, #1, 0x106: B .
+    // 0x110: MOV r2, #2, 0x112: BX lr
+    program16(f.bus, {0xF000, 0xF806, 0x2101, 0xE7FE}, 0x100);
+    program16(f.bus, {0x2202, 0x4770}, 0x110);
+    f.cpu.reset();
+    f.run(3);
+    f.run(2);  // BL prefix + suffix
+    CHECK(f.cpu.reg(15) == 0x114);  // at 0x110, +4
+    CHECK(f.cpu.reg(14) == 0x105);
+    f.run(3);  // MOV r2 ; BX lr ; MOV r1
+    CHECK(f.cpu.reg(2) == 2);
+    CHECK(f.cpu.reg(1) == 1);
+    CHECK(f.cpu.thumb());
+}
+
+TEST_CASE("Thumb PUSH/POP and PC-relative LDR alignment") {
+    Fixture f;
+    f.bus.program({0xE3A00C01, 0xE2800001, 0xE12FFF10, 0xE3A0DC02});  // sp is set below
+    // 0x100: MOV r4, #4 ; PUSH {r4, lr} ; MOV r4, #0 ; POP {r4} ... ; LDR r5, [pc, #4]
+    program16(f.bus, {0x2404, 0xB510, 0x2400, 0xBC10, 0x4D01, 0xE7FE}, 0x100);
+    f.bus.write32(0x10C, 0x12345678, kNonseq);  // decoy: must not be the one loaded
+    f.bus.write32(0x110, 0xCAFEF00D, kNonseq);
+    f.cpu.reset();
+    f.cpu.set_reg(13, 0x200);
+    f.run(3);
+    f.run(2);  // MOV r4, #4 ; PUSH {r4, lr}
+    CHECK(f.cpu.reg(13) == 0x1F8);
+    CHECK(f.bus.read32(0x1F8, kNonseq) == 4);
+    f.run(2);  // MOV r4, #0 ; POP {r4}
+    CHECK(f.cpu.reg(4) == 4);
+    CHECK(f.cpu.reg(13) == 0x1FC);
+    f.run(1);  // LDR r5, [pc, #4]: at 0x108, pc = 0x10C, aligned 0x10C + 4 = 0x110
+    CHECK(f.cpu.reg(5) == 0xCAFEF00D);
+}
+
+TEST_CASE("Thumb ALU sets flags and SWI returns to ARM state") {
+    Fixture f;
+    f.bus.program({0xE3A00C01, 0xE2800001, 0xE12FFF10});
+    program16(f.bus, {0x2000, 0x3801, 0xDF00}, 0x100);  // MOV r0, #0 ; SUB r0, #1 ; SWI 0
+    f.cpu.reset();
+    f.run(3);
+    f.run(2);
+    CHECK(f.cpu.reg(0) == 0xFFFFFFFF);
+    CHECK((f.cpu.cpsr() & psr::kN) != 0);
+    CHECK((f.cpu.cpsr() & psr::kC) == 0);  // borrow
+    f.run(1);
+    CHECK_FALSE(f.cpu.thumb());
+    CHECK(f.cpu.mode() == Mode::Supervisor);
+    CHECK(f.cpu.reg(14) == 0x106);  // next Thumb instruction
+    CHECK((f.cpu.spsr(kBankSvc) & psr::kT) != 0);
+}

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 
+#include "gba/cpu/alu.hpp"
 #include "gba/cpu/cpu_bus.hpp"
 
 namespace ezy::gba {
@@ -35,7 +36,7 @@ enum Bank : std::size_t { kBankUser, kBankFiq, kBankSvc, kBankAbt, kBankIrq, kBa
 
 [[nodiscard]] Bank bank_of(std::uint32_t mode);
 
-// The ARM7TDMI. One step() executes one instruction (ARM for now; Thumb comes next).
+// The ARM7TDMI. One step() executes one instruction, ARM or Thumb depending on CPSR.T.
 //
 // Design:
 // - Banking by copying (option A): r_ is always the visible register set; switching mode
@@ -99,6 +100,18 @@ private:
     void arm_swap(std::uint32_t op);
     void arm_swi(std::uint32_t op);
     void arm_undefined(std::uint32_t op);
+
+    // --- Helpers shared by ARM and Thumb (arm.cpp) ---
+    void set_cv(const alu::AddResult& sum);
+    [[nodiscard]] std::uint32_t load_word(std::uint32_t addr);         // LDR, rotated if misaligned
+    [[nodiscard]] std::uint32_t load_half(std::uint32_t addr);         // LDRH, rotated if odd
+    [[nodiscard]] std::uint32_t load_signed_byte(std::uint32_t addr);  // LDRSB
+    [[nodiscard]] std::uint32_t load_signed_half(std::uint32_t addr);  // LDRSH (LDRSB if odd)
+    // LDM/STM, encoded as the ARM instruction. PC is stored as r15 + pc_store_offset.
+    void block_transfer(std::uint32_t op, std::uint32_t pc_store_offset);
+
+    // --- Thumb instructions (thumb.cpp) ---
+    void execute_thumb(std::uint16_t op);
 
     CpuBus& bus_;
     std::array<std::uint32_t, 16> r_{};

@@ -66,11 +66,11 @@ void Arm7tdmi::jump(std::uint32_t addr) {
 void Arm7tdmi::step() {
     flushed_ = false;
     if (thumb()) {
-        // Thumb execution is exercise 3.3. Until then the pipeline still advances, so a
-        // stray BX into Thumb doesn't hang the emulator.
+        const auto op = static_cast<std::uint16_t>(pipeline_[0]);
         pipeline_[0] = pipeline_[1];
         pipeline_[1] = bus_.read16(r_[15] & ~1U, static_cast<Access>(kCode | kSeq));
-        r_[15] += 2;
+        execute_thumb(op);
+        if (!flushed_) r_[15] += 2;
         return;
     }
 
@@ -86,8 +86,9 @@ bool Arm7tdmi::condition_passed(std::uint32_t cond) const {
 }
 
 void Arm7tdmi::flush() {
-    // Like the hardware, r15 itself keeps whatever low bits were written; only the fetch
-    // addresses are aligned.
+    // r15 keeps whatever low bits were written; only the fetch addresses are aligned. The
+    // instructions that clear bit 0 (BX, Thumb BL/POP/hi-register writes) do so themselves.
+    // This matches NanoBoyAdvance and the SingleStepTests.
     if (thumb()) {
         pipeline_[0] = bus_.read16(r_[15] & ~1U, kCode);
         pipeline_[1] = bus_.read16((r_[15] & ~1U) + 2, static_cast<Access>(kCode | kSeq));
