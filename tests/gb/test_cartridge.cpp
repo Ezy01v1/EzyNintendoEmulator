@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string_view>
 #include <variant>
@@ -358,4 +359,86 @@ TEST_CASE("RTC .sav with a wrong footer size is rejected") {
     auto cart = make_mbc3(0x10);
     const std::vector<std::uint8_t> sav(32 * 1024 + 10, 0);
     CHECK_FALSE(cart.load_save_data(sav));
+}
+
+// --- MBC5 ---
+
+namespace {
+
+// 8 MiB ROM (512 banks, 16-bit bank number in each bank's first two bytes), 128 KiB RAM.
+Cartridge make_mbc5(std::uint8_t type = 0x1B) {
+    auto rom = make_rom("MBC5", type, 0x08, 0x04);
+    rom.resize(8 * 1024 * 1024);
+    for (std::size_t bank = 1; bank < 512; ++bank) {
+        rom[bank * 0x4000] = static_cast<std::uint8_t>(bank & 0xFF);
+        rom[bank * 0x4000 + 1] = static_cast<std::uint8_t>(bank >> 8);
+    }
+    return ezy::gb::test::make_cartridge(rom);
+}
+
+int rom_bank_at_4000(const Cartridge& cart) { return cart.read_rom(0x4000) | (cart.read_rom(0x4001) << 8); }
+
+}  // namespace
+
+TEST_CASE("MBC5 maps all 512 ROM banks with a 9-bit bank number") {
+    auto cart = make_mbc5();
+    REQUIRE(std::holds_alternative<Mbc5>(cart.mbc()));
+    CHECK(rom_bank_at_4000(cart) == 1);  // power-on bank
+    for (int bank = 1; bank < 512; ++bank) {
+        cart.write_rom(0x2000, static_cast<std::uint8_t>(bank & 0xFF));
+        cart.write_rom(0x3000, static_cast<std::uint8_t>(bank >> 8));
+        CHECK(rom_bank_at_4000(cart) == bank);
+    }
+}
+
+TEST_CASE("MBC5 bank 0 is selectable and the high bit is independent") {
+    auto cart = make_mbc5();
+    cart.write_rom(0x2000, 0x00);
+    CHECK(cart.read_rom(0x4000) == cart.read_rom(0x0000));  // bank 0, not 1
+    cart.write_rom(0x2000, 0x2C);
+    cart.write_rom(0x3FFF, 0x01);
+    CHECK(rom_bank_at_4000(cart) == 0x12C);
+    cart.write_rom(0x2FFF, 0x00);  // low bits only: bank 0x100
+    CHECK(rom_bank_at_4000(cart) == 0x100);
+    cart.write_rom(0x3000, 0xFE);  // only bit 0 counts: back to bank 0
+    CHECK(cart.read_rom(0x4000) == cart.read_rom(0x0000));
+}
+
+TEST_CASE("MBC5 RAM enable needs exactly 0x0A") {
+    auto cart = make_mbc5();
+    for (const std::uint8_t value : std::array<std::uint8_t, 3>{0x1A, 0x8A, 0xFA}) {
+        cart.write_rom(0x0000, value);
+        CHECK(cart.read_ram(0xA000) == 0xFF);
+    }
+    cart.write_rom(0x0000, 0x0A);
+    CHECK(cart.read_ram(0xA000) == 0x00);
+}
+
+TEST_CASE("MBC5 has 16 separate RAM banks") {
+    auto cart = make_mbc5();
+    REQUIRE(cart.ram().size() == 128 * 1024);
+    cart.write_rom(0x0000, 0x0A);
+    for (std::uint8_t bank = 0; bank < 16; ++bank) {
+        cart.write_rom(0x4000, bank);
+        cart.write_ram(0xA042, static_cast<std::uint8_t>(0x80 + bank));
+    }
+    for (std::uint8_t bank = 0; bank < 16; ++bank) {
+        cart.write_rom(0x4000, bank);
+        CHECK(cart.read_ram(0xA042) == 0x80 + bank);
+    }
+    CHECK(cart.has_battery());
+    CHECK_FALSE(cart.rumble_active());
+}
+
+TEST_CASE("MBC5 rumble uses bit 3 of the RAM bank register") {
+    auto cart = make_mbc5(0x1E);
+    CHECK(cart.has_battery());
+    cart.write_rom(0x0000, 0x0A);
+    cart.write_rom(0x4000, 0x01);
+    cart.write_ram(0xA000, 0x11);
+    cart.write_rom(0x4000, 0x09);  // bank 1 + motor on
+    CHECK(cart.rumble_active());
+    CHECK(cart.read_ram(0xA000) == 0x11);
+    cart.write_rom(0x4000, 0x01);
+    CHECK_FALSE(cart.rumble_active());
 }

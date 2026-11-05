@@ -165,4 +165,41 @@ bool Mbc3::write_ram(std::uint16_t addr, std::uint8_t value, std::span<std::uint
     return true;
 }
 
+// --- MBC5 ---
+
+std::size_t Mbc5::rom_offset(std::uint16_t addr, std::size_t rom_size) const {
+    if (addr < 0x4000) return addr;  // always bank 0
+    const std::size_t bank_count = std::max<std::size_t>(1, rom_size / kRomBankSize);
+    return (std::size_t{rom_bank} % bank_count) * kRomBankSize + (addr & 0x3FFF);
+}
+
+void Mbc5::write_control(std::uint16_t addr, std::uint8_t value) {
+    if (addr < 0x2000) {
+        ram_enabled = value == 0x0A;  // MBC5 compares all 8 bits, not just the low nibble
+    } else if (addr < 0x3000) {
+        rom_bank = static_cast<std::uint16_t>((rom_bank & 0x100) | value);
+    } else if (addr < 0x4000) {
+        rom_bank = static_cast<std::uint16_t>((rom_bank & 0xFF) | ((value & 0x01) << 8));
+    } else if (addr < 0x6000) {
+        if (has_rumble) {
+            rumble_on = (value & 0x08) != 0;
+            ram_bank = value & 0x07;
+        } else {
+            ram_bank = value & 0x0F;
+        }
+    }
+    // 0x6000-0x7FFF: unused.
+}
+
+std::uint8_t Mbc5::read_ram(std::uint16_t addr, std::span<const std::uint8_t> ram) const {
+    if (!ram_enabled || ram.empty()) return 0xFF;
+    return ram[ram_bank_offset(ram_bank, addr, ram.size())];
+}
+
+bool Mbc5::write_ram(std::uint16_t addr, std::uint8_t value, std::span<std::uint8_t> ram) {
+    if (!ram_enabled || ram.empty()) return false;
+    ram[ram_bank_offset(ram_bank, addr, ram.size())] = value;
+    return true;
+}
+
 }  // namespace ezy::gb

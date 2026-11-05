@@ -91,6 +91,19 @@ struct Mbc3 {
     Rtc rtc;
 };
 
-using Mbc = std::variant<NoMbc, Mbc1, Mbc3>;
+struct Mbc5 {
+    [[nodiscard]] std::size_t rom_offset(std::uint16_t addr, std::size_t rom_size) const;
+    void write_control(std::uint16_t addr, std::uint8_t value);
+    [[nodiscard]] std::uint8_t read_ram(std::uint16_t addr, std::span<const std::uint8_t> ram) const;
+    bool write_ram(std::uint16_t addr, std::uint8_t value, std::span<std::uint8_t> ram);
+
+    std::uint16_t rom_bank = 1;  // 9 bits; unlike MBC1/MBC3, bank 0 is a valid choice
+    std::uint8_t ram_bank = 0;   // 4 bits (3 on rumble carts)
+    bool ram_enabled = false;
+    bool has_rumble = false;     // bit 3 of the RAM bank register drives the motor instead
+    bool rumble_on = false;
+};
+
+using Mbc = std::variant<NoMbc, Mbc1, Mbc3, Mbc5>;
 
 }  // namespace ezy::gb

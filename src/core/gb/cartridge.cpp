@@ -75,6 +75,9 @@ std::string_view cart_type_name(std::uint8_t type) {
         case 0x19: return "MBC5";
         case 0x1A: return "MBC5+RAM";
         case 0x1B: return "MBC5+RAM+BATTERY";
+        case 0x1C: return "MBC5+RUMBLE";
+        case 0x1D: return "MBC5+RUMBLE+RAM";
+        case 0x1E: return "MBC5+RUMBLE+RAM+BATTERY";
         default: return "UNKNOWN";
     }
 }
@@ -86,6 +89,8 @@ Mbc make_mbc(std::uint8_t cart_type) {
         case 0x01: case 0x02: case 0x03: return Mbc1{};
         case 0x0F: case 0x10: return Mbc3{.has_rtc = true};
         case 0x11: case 0x12: case 0x13: return Mbc3{};
+        case 0x19: case 0x1A: case 0x1B: return Mbc5{};
+        case 0x1C: case 0x1D: case 0x1E: return Mbc5{.has_rumble = true};
         default: return NoMbc{};  // ROM ONLY, and MBCs not implemented yet
     }
 }
@@ -148,6 +153,11 @@ void Cartridge::tick(std::uint32_t t_cycles) {
             if constexpr (requires { m.tick(t_cycles); }) m.tick(t_cycles);
         },
         mbc_);
+}
+
+bool Cartridge::rumble_active() const {
+    const auto* mbc5 = std::get_if<Mbc5>(&mbc_);
+    return mbc5 != nullptr && mbc5->rumble_on;
 }
 
 bool Cartridge::has_rtc() const {

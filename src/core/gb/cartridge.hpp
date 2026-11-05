@@ -61,6 +61,8 @@ public:
 
     [[nodiscard]] bool has_battery() const;
     [[nodiscard]] bool has_rtc() const;
+    // MBC5+RUMBLE: whether the game currently has the motor on (the frontend may vibrate).
+    [[nodiscard]] bool rumble_active() const;
     [[nodiscard]] std::span<const std::uint8_t> ram() const { return ram_; }
 
     // Battery-backed state persists between sessions as a .sav image: the raw RAM, then,
