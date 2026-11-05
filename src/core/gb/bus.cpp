@@ -39,7 +39,7 @@ void Bus::advance() {
 std::uint8_t Bus::peek(std::uint16_t addr) const {
     if (addr < 0x8000) return cartridge_.read_rom(addr);
     if (addr < 0xA000) return ppu_.read_vram(addr);
-    if (addr < 0xC000) return 0xFF;  // external RAM: not implemented until MBCs
+    if (addr < 0xC000) return cartridge_.read_ram(addr);
     if (addr < 0xE000) return wram_[addr - 0xC000];
     if (addr < 0xFE00) return wram_[addr - 0xE000];  // echo RAM mirrors C000-DDFF
     if (addr < 0xFEA0) return ppu_.read_oam(addr);
@@ -52,7 +52,7 @@ std::uint8_t Bus::peek(std::uint16_t addr) const {
 void Bus::poke(std::uint16_t addr, std::uint8_t value) {
     if (addr < 0x8000) { cartridge_.write_rom(addr, value); return; }  // MBC registers
     if (addr < 0xA000) { ppu_.write_vram(addr, value); return; }
-    if (addr < 0xC000) return;  // external RAM: not implemented until MBCs
+    if (addr < 0xC000) { cartridge_.write_ram(addr, value); return; }
     if (addr < 0xE000) { wram_[addr - 0xC000] = value; return; }
     if (addr < 0xFE00) { wram_[addr - 0xE000] = value; return; }
     if (addr < 0xFEA0) { ppu_.write_oam(addr, value); return; }

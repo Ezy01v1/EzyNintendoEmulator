@@ -3,6 +3,9 @@
 #include <imgui.h>
 
 #include <array>
+#include <fstream>
+#include <iostream>
+#include <iterator>
 #include <string>
 #include <utility>
 
@@ -13,6 +16,9 @@ namespace ezy::frontend {
 namespace {
 
 using gb::Button;
+
+// How often battery RAM is flushed to disk while running, if it changed (~1 s).
+constexpr int kFlushIntervalFrames = 60;
 
 // The 4 shades of the original DMG screen, lightest to darkest.
 constexpr std::array<std::uint32_t, 4> kShades = {0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820};
@@ -83,10 +89,67 @@ void draw_video(const gb::GameBoy& gameboy) {
 
 }  // namespace
 
-std::unique_ptr<GameBoySystem> GameBoySystem::create(std::span<const std::uint8_t> rom) {
+std::unique_ptr<GameBoySystem> GameBoySystem::create(std::span<const std::uint8_t> rom,
+                                                     std::filesystem::path save_path) {
     auto gameboy = gb::GameBoy::create(rom);
     if (!gameboy) return nullptr;
-    return std::unique_ptr<GameBoySystem>(new GameBoySystem({rom.begin(), rom.end()}, std::move(gameboy)));
+    std::unique_ptr<GameBoySystem> system(
+        new GameBoySystem({rom.begin(), rom.end()}, std::move(gameboy), std::move(save_path)));
+    system->load_save();
+    return system;
+}
+
+bool GameBoySystem::persists_save() const {
+    const gb::Cartridge& cart = gameboy_->bus().cartridge();
+    return !save_path_.empty() && cart.has_battery() && !cart.save_data().empty();
+}
+
+void GameBoySystem::load_save() {
+    if (!persists_save()) return;
+    std::ifstream file(save_path_, std::ios::binary);
+    if (!file) return;  // first run: no save yet
+    const std::vector<std::uint8_t> data(std::istreambuf_iterator<char>(file), {});
+    if (!gameboy_->bus().cartridge().load_save_data(data)) {
+        std::cerr << "Warning: " << save_path_.string() << " has " << data.size()
+                  << " bytes, expected " << gameboy_->bus().cartridge().save_data().size() << "\n";
+    }
+}
+
+void GameBoySystem::flush_save() {
+    frames_since_flush_ = 0;
+    if (!persists_save()) return;
+    gb::Cartridge& cart = gameboy_->bus().cartridge();
+    if (!cart.save_dirty()) return;
+    // Write to a temp file and rename, so a crash mid-write never corrupts the old save.
+    std::filesystem::path tmp = save_path_;
+    tmp += ".tmp";
+    {
+        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+        const auto data = cart.save_data();
+        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        if (!file) {
+            std::cerr << "Could not write " << tmp.string() << "\n";
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, save_path_, ec);
+    if (ec) {
+        std::cerr << "Could not replace " << save_path_.string() << ": " << ec.message() << "\n";
+        return;
+    }
+    cart.clear_save_dirty();
+}
+
+void GameBoySystem::run_frame() {
+    gameboy_->run_frame();
+    if (++frames_since_flush_ >= kFlushIntervalFrames) flush_save();
+}
+
+void GameBoySystem::reset() {
+    flush_save();
+    gameboy_ = gb::GameBoy::create(rom_);
+    load_save();
 }
 
 void GameBoySystem::handle_key(SDL_Scancode scancode, bool pressed) {

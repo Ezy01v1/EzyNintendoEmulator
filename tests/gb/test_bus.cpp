@@ -81,3 +81,12 @@ TEST_CASE("read/write/tick cost one M-cycle; peek/poke are free") {
     CHECK(bus.peek(0xC000) == 2);
     CHECK(bus.t_cycles() == 12);
 }
+
+TEST_CASE("bus routes 0xA000-0xBFFF to cartridge RAM") {
+    Bus bus(ezy::gb::test::make_cartridge(ezy::gb::test::make_rom("BUSRAM", 0x03, 0x00, 0x02)));
+    bus.poke(0xA000, 0x99);
+    CHECK(bus.peek(0xA000) == 0xFF);  // disabled
+    bus.poke(0x0000, 0x0A);
+    bus.poke(0xA000, 0x99);
+    CHECK(bus.peek(0xA000) == 0x99);
+}

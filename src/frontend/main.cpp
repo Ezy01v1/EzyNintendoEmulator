@@ -42,7 +42,9 @@ std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
 std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom) {
     std::string ext = std::filesystem::path(path).extension().string();
     std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (ext == ".gb" || ext == ".gbc") return ezy::frontend::GameBoySystem::create(rom);
+    if (ext == ".gb" || ext == ".gbc") {
+        return ezy::frontend::GameBoySystem::create(rom, std::filesystem::path(path).replace_extension(".sav"));
+    }
     return ezy::frontend::Chip8System::create(rom);
 }
 

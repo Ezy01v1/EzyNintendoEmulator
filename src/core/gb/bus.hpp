@@ -44,6 +44,7 @@ public:
     [[nodiscard]] const std::string& serial_output() const { return serial_output_; }
 
     [[nodiscard]] const Cartridge& cartridge() const { return cartridge_; }
+    [[nodiscard]] Cartridge& cartridge() { return cartridge_; }
     [[nodiscard]] Ppu& ppu() { return ppu_; }
     [[nodiscard]] const Ppu& ppu() const { return ppu_; }
 
