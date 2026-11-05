@@ -3,6 +3,7 @@
 #include <imgui.h>
 
 #include <array>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -19,6 +20,11 @@ using gb::Button;
 
 // How often battery RAM is flushed to disk while running, if it changed (~1 s).
 constexpr int kFlushIntervalFrames = 60;
+
+std::int64_t unix_now() {
+    using namespace std::chrono;
+    return duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+}
 
 // The 4 shades of the original DMG screen, lightest to darkest.
 constexpr std::array<std::uint32_t, 4> kShades = {0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820};
@@ -101,7 +107,7 @@ std::unique_ptr<GameBoySystem> GameBoySystem::create(std::span<const std::uint8_
 
 bool GameBoySystem::persists_save() const {
     const gb::Cartridge& cart = gameboy_->bus().cartridge();
-    return !save_path_.empty() && cart.has_battery() && !cart.save_data().empty();
+    return !save_path_.empty() && cart.has_battery() && (!cart.ram().empty() || cart.has_rtc());
 }
 
 void GameBoySystem::load_save() {
@@ -115,17 +121,17 @@ void GameBoySystem::load_save() {
     }
 }
 
-void GameBoySystem::flush_save() {
+void GameBoySystem::flush_save(bool force) {
     frames_since_flush_ = 0;
     if (!persists_save()) return;
     gb::Cartridge& cart = gameboy_->bus().cartridge();
-    if (!cart.save_dirty()) return;
+    if (!cart.save_dirty() && !force) return;
     // Write to a temp file and rename, so a crash mid-write never corrupts the old save.
     std::filesystem::path tmp = save_path_;
     tmp += ".tmp";
     {
         std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        const auto data = cart.save_data();
+        const auto data = cart.save_data(unix_now());
         file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
         if (!file) {
             std::cerr << "Could not write " << tmp.string() << "\n";
@@ -147,7 +153,7 @@ void GameBoySystem::run_frame() {
 }
 
 void GameBoySystem::reset() {
-    flush_save();
+    flush_save(/*force=*/gameboy_->bus().cartridge().has_rtc());
     gameboy_ = gb::GameBoy::create(rom_);
     load_save();
 }

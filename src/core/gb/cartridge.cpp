@@ -84,9 +84,23 @@ namespace {
 Mbc make_mbc(std::uint8_t cart_type) {
     switch (cart_type) {
         case 0x01: case 0x02: case 0x03: return Mbc1{};
-        case 0x0F: case 0x10: case 0x11: case 0x12: case 0x13: return Mbc3{};
+        case 0x0F: case 0x10: return Mbc3{.has_rtc = true};
+        case 0x11: case 0x12: case 0x13: return Mbc3{};
         default: return NoMbc{};  // ROM ONLY, and MBCs not implemented yet
     }
+}
+
+constexpr std::size_t kRtcFooterSize = 48;
+constexpr std::size_t kRtcFooterSize32 = 44;  // older variant with a 32-bit timestamp
+
+void put_le(std::vector<std::uint8_t>& out, std::uint64_t value, int bytes) {
+    for (int i = 0; i < bytes; ++i) out.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+}
+
+std::uint64_t get_le(std::span<const std::uint8_t> in, std::size_t pos, int bytes) {
+    std::uint64_t value = 0;
+    for (int i = 0; i < bytes; ++i) value |= std::uint64_t{in[pos + i]} << (8 * i);
+    return value;
 }
 
 }  // namespace
@@ -128,10 +142,50 @@ bool Cartridge::has_battery() const {
     }
 }
 
-bool Cartridge::load_save_data(std::span<const std::uint8_t> data) {
+void Cartridge::tick(std::uint32_t t_cycles) {
+    std::visit(
+        [&](auto& m) {
+            if constexpr (requires { m.tick(t_cycles); }) m.tick(t_cycles);
+        },
+        mbc_);
+}
+
+bool Cartridge::has_rtc() const {
+    const auto* mbc3 = std::get_if<Mbc3>(&mbc_);
+    return mbc3 != nullptr && mbc3->has_rtc;
+}
+
+std::vector<std::uint8_t> Cartridge::save_data(std::int64_t unix_now) const {
+    std::vector<std::uint8_t> out(ram_.begin(), ram_.end());
+    if (const auto* mbc3 = std::get_if<Mbc3>(&mbc_); mbc3 && mbc3->has_rtc) {
+        for (const auto r : mbc3->rtc.regs) put_le(out, r, 4);
+        for (const auto r : mbc3->rtc.latched) put_le(out, r, 4);
+        put_le(out, static_cast<std::uint64_t>(unix_now), 8);
+    }
+    return out;
+}
+
+bool Cartridge::load_save_data(std::span<const std::uint8_t> data, std::int64_t unix_now) {
     const std::size_t n = std::min(data.size(), ram_.size());
     std::copy_n(data.begin(), n, ram_.begin());
-    return data.size() == ram_.size();
+    if (data.size() == ram_.size()) return true;
+
+    auto* mbc3 = std::get_if<Mbc3>(&mbc_);
+    const std::size_t footer = data.size() - n;
+    if (!mbc3 || !mbc3->has_rtc || data.size() < ram_.size() ||
+        (footer != kRtcFooterSize && footer != kRtcFooterSize32)) {
+        return false;
+    }
+    const auto rtc_bytes = data.subspan(ram_.size());
+    Rtc& rtc = mbc3->rtc;
+    for (std::size_t i = 0; i < 5; ++i) {
+        const auto reg = static_cast<std::uint8_t>(0x08 + i);
+        rtc.regs[i] = Rtc::mask(reg, static_cast<std::uint8_t>(get_le(rtc_bytes, i * 4, 4)));
+        rtc.latched[i] = Rtc::mask(reg, static_cast<std::uint8_t>(get_le(rtc_bytes, 20 + i * 4, 4)));
+    }
+    const auto saved_at = static_cast<std::int64_t>(get_le(rtc_bytes, 40, footer == kRtcFooterSize ? 8 : 4));
+    if (unix_now > saved_at) rtc.advance_seconds(static_cast<std::uint64_t>(unix_now - saved_at));
+    return true;
 }
 
 }  // namespace ezy::gb

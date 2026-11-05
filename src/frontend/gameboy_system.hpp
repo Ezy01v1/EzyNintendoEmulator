@@ -17,7 +17,8 @@ public:
     // external RAM is loaded from save_path (when it exists) and written back to it.
     [[nodiscard]] static std::unique_ptr<GameBoySystem> create(std::span<const std::uint8_t> rom,
                                                                std::filesystem::path save_path = {});
-    ~GameBoySystem() override { flush_save(); }
+    // The clock keeps ticking without game writes, so RTC carts always save on exit.
+    ~GameBoySystem() override { flush_save(/*force=*/gameboy_->bus().cartridge().has_rtc()); }
     GameBoySystem(const GameBoySystem&) = delete;
     GameBoySystem& operator=(const GameBoySystem&) = delete;
 
@@ -42,7 +43,8 @@ private:
 
     [[nodiscard]] bool persists_save() const;
     void load_save();
-    void flush_save();  // writes the .sav if RAM changed since the last write
+    // Writes the .sav if save state changed since the last write (or always, if forced).
+    void flush_save(bool force = false);
 
     std::vector<std::uint8_t> rom_;
     std::unique_ptr<gb::GameBoy> gameboy_;

@@ -31,6 +31,7 @@ void Bus::tick() { advance(); }
 void Bus::advance() {
     t_cycles_ += 4;
     timer_.tick();
+    cartridge_.tick(4);
     if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
     ppu_.tick();
     request_interrupt(ppu_.take_interrupts());

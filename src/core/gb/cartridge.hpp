@@ -56,13 +56,23 @@ public:
     [[nodiscard]] std::uint8_t read_ram(std::uint16_t addr) const;
     void write_ram(std::uint16_t addr, std::uint8_t value);
 
-    // Battery-backed RAM persists between sessions as a raw .sav image.
+    // Advances MBC hardware that runs on its own (the MBC3 clock).
+    void tick(std::uint32_t t_cycles);
+
     [[nodiscard]] bool has_battery() const;
-    [[nodiscard]] std::span<const std::uint8_t> save_data() const { return ram_; }
-    // Copies min(data.size(), RAM size) bytes; the rest of the RAM keeps its contents.
-    // Returns false if the size does not match the cartridge RAM exactly.
-    bool load_save_data(std::span<const std::uint8_t> data);
-    // Set by every write to external RAM, until cleared by whoever persists it.
+    [[nodiscard]] bool has_rtc() const;
+    [[nodiscard]] std::span<const std::uint8_t> ram() const { return ram_; }
+
+    // Battery-backed state persists between sessions as a .sav image: the raw RAM, then,
+    // for cartridges with a clock, the 48-byte RTC footer used by BGB/VBA/mGBA (live and
+    // latched registers as u32 LE, plus the unix time of the save as u64 LE).
+    // The core never reads the clock itself: callers pass the current unix time.
+    [[nodiscard]] std::vector<std::uint8_t> save_data(std::int64_t unix_now = 0) const;
+    // Copies min(data.size(), RAM size) bytes of RAM; the rest keeps its contents. If an RTC
+    // footer is present, restores the clock and adds the time elapsed since the save.
+    // Returns false if the size is not one this cartridge would have written.
+    bool load_save_data(std::span<const std::uint8_t> data, std::int64_t unix_now = 0);
+    // Set by every write to external RAM or the RTC, until cleared by whoever persists it.
     [[nodiscard]] bool save_dirty() const { return save_dirty_; }
     void clear_save_dirty() { save_dirty_ = false; }
 

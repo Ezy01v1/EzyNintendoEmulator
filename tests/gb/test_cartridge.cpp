@@ -143,7 +143,7 @@ TEST_CASE("save data round-trips into a fresh cartridge") {
         cart.write_rom(0x4000, bank);
         cart.write_ram(0xA000, static_cast<std::uint8_t>(0x10 + bank));
     }
-    const std::vector<std::uint8_t> sav(cart.save_data().begin(), cart.save_data().end());
+    const std::vector<std::uint8_t> sav = cart.save_data();
 
     auto fresh = make_mbc1_ram(0x03);
     CHECK(fresh.load_save_data(sav));
@@ -204,4 +204,158 @@ TEST_CASE("MBC3 RAM banks are separate and gated by enable") {
     }
     CHECK(cart.save_data()[3 * 0x2000 + 0x123] == 0xC3);
     CHECK(cart.save_dirty());
+}
+
+// --- MBC3 RTC ---
+
+namespace {
+
+constexpr std::uint32_t kSecond = Rtc::kCyclesPerSecond;
+
+// MBC3+TIMER+RAM+BATTERY with RAM and RTC enabled.
+Cartridge make_rtc_cart() {
+    auto cart = make_mbc3(0x10);
+    cart.write_rom(0x0000, 0x0A);
+    return cart;
+}
+
+void latch(Cartridge& cart) {
+    cart.write_rom(0x6000, 0x00);
+    cart.write_rom(0x6000, 0x01);
+}
+
+std::uint8_t read_rtc(Cartridge& cart, std::uint8_t reg) {
+    cart.write_rom(0x4000, reg);
+    return cart.read_ram(0xA000);
+}
+
+void write_rtc(Cartridge& cart, std::uint8_t reg, std::uint8_t value) {
+    cart.write_rom(0x4000, reg);
+    cart.write_ram(0xA000, value);
+}
+
+// Ticks in M-cycle steps like the bus does.
+void run_cycles(Cartridge& cart, std::uint64_t t_cycles) {
+    for (std::uint64_t i = 0; i < t_cycles / 4; ++i) cart.tick(4);
+}
+
+}  // namespace
+
+TEST_CASE("RTC registers are only visible on MBC3+TIMER carts") {
+    auto plain = make_mbc3(0x13);
+    CHECK_FALSE(plain.has_rtc());
+    plain.write_rom(0x0000, 0x0A);
+    write_rtc(plain, 0x08, 30);
+    CHECK(read_rtc(plain, 0x08) == 0xFF);
+
+    auto cart = make_rtc_cart();
+    CHECK(cart.has_rtc());
+    write_rtc(cart, 0x08, 30);
+    latch(cart);
+    CHECK(read_rtc(cart, 0x08) == 30);
+    CHECK(cart.save_dirty());
+}
+
+TEST_CASE("RTC advances one second per 4194304 cycles, reads need a latch") {
+    auto cart = make_rtc_cart();
+    run_cycles(cart, kSecond - 4);
+    latch(cart);
+    CHECK(read_rtc(cart, 0x08) == 0);
+    run_cycles(cart, 4);
+    CHECK(read_rtc(cart, 0x08) == 0);  // still the old latched copy
+    latch(cart);
+    CHECK(read_rtc(cart, 0x08) == 1);
+}
+
+TEST_CASE("RTC latch needs 0x00 then 0x01") {
+    auto cart = make_rtc_cart();
+    run_cycles(cart, kSecond);
+    cart.write_rom(0x6000, 0x01);
+    CHECK(read_rtc(cart, 0x08) == 0);
+    cart.write_rom(0x6000, 0x00);
+    cart.write_rom(0x6000, 0x01);
+    CHECK(read_rtc(cart, 0x08) == 1);
+}
+
+TEST_CASE("RTC carries seconds, minutes, hours and days, and sets day carry") {
+    auto cart = make_rtc_cart();
+    write_rtc(cart, 0x08, 59);
+    write_rtc(cart, 0x09, 59);
+    write_rtc(cart, 0x0A, 23);
+    write_rtc(cart, 0x0B, 0xFF);
+    write_rtc(cart, 0x0C, 0x01);  // day 511
+    run_cycles(cart, kSecond);
+    latch(cart);
+    CHECK(read_rtc(cart, 0x08) == 0);
+    CHECK(read_rtc(cart, 0x09) == 0);
+    CHECK(read_rtc(cart, 0x0A) == 0);
+    CHECK(read_rtc(cart, 0x0B) == 0);
+    CHECK(read_rtc(cart, 0x0C) == Rtc::kDayCarry);  // day 0, carry set
+}
+
+TEST_CASE("RTC day counter crosses into bit 8") {
+    auto cart = make_rtc_cart();
+    write_rtc(cart, 0x08, 59);
+    write_rtc(cart, 0x09, 59);
+    write_rtc(cart, 0x0A, 23);
+    write_rtc(cart, 0x0B, 0xFF);
+    run_cycles(cart, kSecond);
+    latch(cart);
+    CHECK(read_rtc(cart, 0x0B) == 0);
+    CHECK(read_rtc(cart, 0x0C) == 0x01);
+}
+
+TEST_CASE("RTC out-of-range seconds wrap at 64 without carrying") {
+    auto cart = make_rtc_cart();
+    write_rtc(cart, 0x08, 63);
+    run_cycles(cart, kSecond);
+    latch(cart);
+    CHECK(read_rtc(cart, 0x08) == 0);
+    CHECK(read_rtc(cart, 0x09) == 0);
+}
+
+TEST_CASE("RTC halt stops the clock") {
+    auto cart = make_rtc_cart();
+    write_rtc(cart, 0x0C, Rtc::kHalt);
+    run_cycles(cart, 3ULL * kSecond);
+    latch(cart);
+    CHECK(read_rtc(cart, 0x08) == 0);
+    write_rtc(cart, 0x0C, 0x00);
+    run_cycles(cart, kSecond);
+    latch(cart);
+    CHECK(read_rtc(cart, 0x08) == 1);
+}
+
+TEST_CASE("RTC .sav footer round-trips and adds elapsed wall time") {
+    auto cart = make_rtc_cart();
+    write_rtc(cart, 0x08, 10);
+    write_rtc(cart, 0x09, 20);
+    write_rtc(cart, 0x0A, 3);
+    latch(cart);
+    cart.write_rom(0x4000, 0x00);
+    cart.write_ram(0xA000, 0x5A);  // a RAM byte
+
+    constexpr std::int64_t kSavedAt = 1'700'000'000;
+    const auto sav = cart.save_data(kSavedAt);
+    REQUIRE(sav.size() == 32 * 1024 + 48);
+    CHECK(sav[32 * 1024 + 0] == 10);   // seconds, u32 LE
+    CHECK(sav[32 * 1024 + 4] == 20);   // minutes, u32 LE
+    CHECK(sav[32 * 1024 + 20] == 10);  // latched seconds
+
+    // Reload 1 day, 2 hours and 5 seconds later.
+    auto fresh = make_mbc3(0x10);
+    CHECK(fresh.load_save_data(sav, kSavedAt + 86400 + 2 * 3600 + 5));
+    fresh.write_rom(0x0000, 0x0A);
+    CHECK(fresh.read_ram(0xA000) == 0x5A);
+    latch(fresh);
+    CHECK(read_rtc(fresh, 0x08) == 15);
+    CHECK(read_rtc(fresh, 0x09) == 20);
+    CHECK(read_rtc(fresh, 0x0A) == 5);
+    CHECK(read_rtc(fresh, 0x0B) == 1);
+}
+
+TEST_CASE("RTC .sav with a wrong footer size is rejected") {
+    auto cart = make_mbc3(0x10);
+    const std::vector<std::uint8_t> sav(32 * 1024 + 10, 0);
+    CHECK_FALSE(cart.load_save_data(sav));
 }
