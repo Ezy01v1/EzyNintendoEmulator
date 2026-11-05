@@ -57,4 +57,35 @@ bool Mbc1::write_ram(std::uint16_t addr, std::uint8_t value, std::span<std::uint
     return true;
 }
 
+// --- MBC3 ---
+
+std::size_t Mbc3::rom_offset(std::uint16_t addr, std::size_t rom_size) const {
+    if (addr < 0x4000) return addr;  // always bank 0
+    const std::size_t bank_count = std::max<std::size_t>(1, rom_size / kRomBankSize);
+    return (std::size_t{rom_bank} % bank_count) * kRomBankSize + (addr & 0x3FFF);
+}
+
+void Mbc3::write_control(std::uint16_t addr, std::uint8_t value) {
+    if (addr < 0x2000) {
+        ram_enabled = (value & 0x0F) == 0x0A;
+    } else if (addr < 0x4000) {
+        rom_bank = value & 0x7F;
+        if (rom_bank == 0) rom_bank = 1;
+    } else if (addr < 0x6000) {
+        ram_select = value & 0x0F;
+    }
+    // 0x6000-0x7FFF: RTC latch (no RTC yet).
+}
+
+std::uint8_t Mbc3::read_ram(std::uint16_t addr, std::span<const std::uint8_t> ram) const {
+    if (!ram_enabled || ram_select > 0x03 || ram.empty()) return 0xFF;
+    return ram[ram_bank_offset(ram_select, addr, ram.size())];
+}
+
+bool Mbc3::write_ram(std::uint16_t addr, std::uint8_t value, std::span<std::uint8_t> ram) {
+    if (!ram_enabled || ram_select > 0x03 || ram.empty()) return false;
+    ram[ram_bank_offset(ram_select, addr, ram.size())] = value;
+    return true;
+}
+
 }  // namespace ezy::gb

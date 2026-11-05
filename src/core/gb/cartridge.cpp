@@ -84,6 +84,7 @@ namespace {
 Mbc make_mbc(std::uint8_t cart_type) {
     switch (cart_type) {
         case 0x01: case 0x02: case 0x03: return Mbc1{};
+        case 0x0F: case 0x10: case 0x11: case 0x12: case 0x13: return Mbc3{};
         default: return NoMbc{};  // ROM ONLY, and MBCs not implemented yet
     }
 }

@@ -45,6 +45,17 @@ private:
     [[nodiscard]] std::size_t ram_offset(std::uint16_t addr, std::size_t ram_size) const;
 };
 
-using Mbc = std::variant<NoMbc, Mbc1>;
+struct Mbc3 {
+    [[nodiscard]] std::size_t rom_offset(std::uint16_t addr, std::size_t rom_size) const;
+    void write_control(std::uint16_t addr, std::uint8_t value);
+    [[nodiscard]] std::uint8_t read_ram(std::uint16_t addr, std::span<const std::uint8_t> ram) const;
+    bool write_ram(std::uint16_t addr, std::uint8_t value, std::span<std::uint8_t> ram);
+
+    std::uint8_t rom_bank = 1;  // 7 bits, 0 is treated as 1
+    std::uint8_t ram_select = 0;  // 0x00-0x03: RAM bank, 0x08-0x0C: RTC register
+    bool ram_enabled = false;  // also gates the RTC registers
+};
+
+using Mbc = std::variant<NoMbc, Mbc1, Mbc3>;
 
 }  // namespace ezy::gb

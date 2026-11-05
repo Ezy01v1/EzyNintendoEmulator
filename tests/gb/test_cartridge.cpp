@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "gb/cartridge.hpp"
@@ -156,4 +157,51 @@ TEST_CASE("load_save_data reports a size mismatch but keeps what fits") {
     CHECK_FALSE(cart.load_save_data(short_sav));
     CHECK(cart.save_data()[15] == 0xAB);
     CHECK(cart.save_data()[16] == 0x00);
+}
+
+// --- MBC3 ---
+
+namespace {
+
+// MBC3+RAM+BATTERY, 2 MiB ROM (128 banks, bank number in each bank's first byte), 32 KiB RAM.
+Cartridge make_mbc3(std::uint8_t type = 0x13) {
+    auto rom = make_rom("MBC3", type, 0x06, 0x03);
+    rom.resize(2 * 1024 * 1024);
+    for (std::size_t bank = 0; bank < 128; ++bank) rom[bank * 0x4000] = static_cast<std::uint8_t>(bank);
+    rom[0] = 0;  // keep bank 0 header bytes untouched (0x0000 is outside the header)
+    return ezy::gb::test::make_cartridge(rom);
+}
+
+}  // namespace
+
+TEST_CASE("MBC3 maps all 128 ROM banks, bank 0 selects 1") {
+    auto cart = make_mbc3();
+    REQUIRE(std::holds_alternative<Mbc3>(cart.mbc()));
+    CHECK(cart.read_rom(0x0000) == 0);
+    for (int bank = 1; bank < 128; ++bank) {
+        cart.write_rom(0x2000, static_cast<std::uint8_t>(bank));
+        CHECK(cart.read_rom(0x4000) == bank);
+        CHECK(cart.read_rom(0x0000) == 0);  // no MBC1-style upper bits in bank 0 area
+    }
+    cart.write_rom(0x2000, 0x00);
+    CHECK(cart.read_rom(0x4000) == 1);
+    cart.write_rom(0x3FFF, 0xA0);  // only 7 bits: 0x20
+    CHECK(cart.read_rom(0x4000) == 0x20);
+}
+
+TEST_CASE("MBC3 RAM banks are separate and gated by enable") {
+    auto cart = make_mbc3();
+    cart.write_ram(0xA000, 0x11);
+    CHECK(cart.read_ram(0xA000) == 0xFF);
+    cart.write_rom(0x0000, 0x0A);
+    for (std::uint8_t bank = 0; bank < 4; ++bank) {
+        cart.write_rom(0x4000, bank);
+        cart.write_ram(0xA123, static_cast<std::uint8_t>(0xC0 + bank));
+    }
+    for (std::uint8_t bank = 0; bank < 4; ++bank) {
+        cart.write_rom(0x4000, bank);
+        CHECK(cart.read_ram(0xA123) == 0xC0 + bank);
+    }
+    CHECK(cart.save_data()[3 * 0x2000 + 0x123] == 0xC3);
+    CHECK(cart.save_dirty());
 }
