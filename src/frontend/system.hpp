@@ -26,7 +26,12 @@ public:
 
     virtual void handle_key(SDL_Scancode scancode, bool pressed) = 0;
     virtual void render(std::span<std::uint32_t> argb_pixels) const = 0;
-    [[nodiscard]] virtual bool sound_active() const = 0;
+    [[nodiscard]] virtual bool sound_active() const = 0;  // for the shared beeper
+
+    // Systems with a real sound chip produce interleaved stereo float samples instead.
+    [[nodiscard]] virtual int audio_sample_rate() const { return 0; }  // 0: uses the beeper
+    [[nodiscard]] virtual std::span<const float> audio_samples() const { return {}; }
+    virtual void clear_audio_samples() {}
 
     virtual void draw_debug_windows() = 0;  // console-specific ImGui windows
 };

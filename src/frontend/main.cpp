@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "audio_out.hpp"
 #include "beeper.hpp"
 #include "chip8_system.hpp"
 #include "debugger.hpp"
@@ -103,7 +104,9 @@ int main(int argc, char* argv[]) {
 
     {
         ezy::frontend::Beeper beeper;
-        if (!beeper.open()) {
+        ezy::frontend::AudioOut audio;
+        const bool own_audio = system->audio_sample_rate() > 0;
+        if (!(own_audio ? audio.open(system->audio_sample_rate()) : beeper.open())) {
             std::cerr << "Audio unavailable, continuing without sound: " << SDL_GetError() << '\n';
         }
 
@@ -156,7 +159,16 @@ int main(int argc, char* argv[]) {
                     accumulator -= frame_seconds;
                 }
             }
-            beeper.update(!run.paused && system->sound_active());
+            if (own_audio) {
+                if (run.paused) {
+                    audio.clear();
+                } else {
+                    audio.push(system->audio_samples());
+                }
+                system->clear_audio_samples();
+            } else {
+                beeper.update(!run.paused && system->sound_active());
+            }
 
             system->render(pixels);
             SDL_UpdateTexture(texture, nullptr, pixels.data(),
