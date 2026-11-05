@@ -79,43 +79,42 @@ std::string_view cart_type_name(std::uint8_t type) {
     }
 }
 
+namespace {
+
+Mbc make_mbc(std::uint8_t cart_type) {
+    switch (cart_type) {
+        case 0x01: case 0x02: case 0x03: return Mbc1{};
+        default: return NoMbc{};  // ROM ONLY, and MBCs not implemented yet
+    }
+}
+
+}  // namespace
+
 std::optional<Cartridge> Cartridge::load(std::span<const std::uint8_t> rom) {
     auto header = parse_header(rom);
     if (!header) {
         return std::nullopt;
     }
-    return Cartridge(std::vector<std::uint8_t>(rom.begin(), rom.end()), std::move(*header));
+    const Mbc mbc = make_mbc(header->cart_type);
+    return Cartridge(std::vector<std::uint8_t>(rom.begin(), rom.end()), std::move(*header), mbc);
 }
 
 std::uint8_t Cartridge::read_rom(std::uint16_t addr) const {
-    std::size_t offset = addr;
-    if (is_mbc1()) {
-        constexpr std::size_t kBankSize = 0x4000;
-        const std::size_t bank_count = std::max<std::size_t>(1, rom_.size() / kBankSize);
-        std::size_t bank = 0;
-        if (addr < 0x4000) {
-            bank = advanced_mode_ ? std::size_t{bank_high_} << 5 : 0;
-        } else {
-            bank = (std::size_t{bank_high_} << 5) | bank_low_;
-        }
-        offset = (bank % bank_count) * kBankSize + (addr & 0x3FFF);
-    }
+    const std::size_t offset = std::visit([&](const auto& m) { return m.rom_offset(addr, rom_.size()); }, mbc_);
     // Reads past the end of a short ROM return open-bus 0xFF.
     return offset < rom_.size() ? rom_[offset] : 0xFF;
 }
 
 void Cartridge::write_rom(std::uint16_t addr, std::uint8_t value) {
-    if (!is_mbc1()) return;  // ROM ONLY: writes are ignored
-    if (addr < 0x2000) {
-        ram_enabled_ = (value & 0x0F) == 0x0A;
-    } else if (addr < 0x4000) {
-        bank_low_ = value & 0x1F;
-        if (bank_low_ == 0) bank_low_ = 1;
-    } else if (addr < 0x6000) {
-        bank_high_ = value & 0x03;
-    } else {
-        advanced_mode_ = (value & 0x01) != 0;
-    }
+    std::visit([&](auto& m) { m.write_control(addr, value); }, mbc_);
+}
+
+std::uint8_t Cartridge::read_ram(std::uint16_t addr) const {
+    return std::visit([&](const auto& m) { return m.read_ram(addr, ram_); }, mbc_);
+}
+
+void Cartridge::write_ram(std::uint16_t addr, std::uint8_t value) {
+    if (std::visit([&](auto& m) { return m.write_ram(addr, value, ram_); }, mbc_)) save_dirty_ = true;
 }
 
 bool Cartridge::has_battery() const {
@@ -126,29 +125,6 @@ bool Cartridge::has_battery() const {
         default:
             return false;
     }
-}
-
-std::optional<std::size_t> Cartridge::ram_offset(std::uint16_t addr) const {
-    if (!is_mbc1() || !ram_enabled_ || ram_.empty()) return std::nullopt;
-    constexpr std::size_t kBankSize = 0x2000;
-    const std::size_t local = addr & 0x1FFF;
-    // RAM smaller than one bank (2 KiB) mirrors inside the window.
-    if (ram_.size() < kBankSize) return local % ram_.size();
-    const std::size_t bank_count = ram_.size() / kBankSize;
-    const std::size_t bank = advanced_mode_ ? bank_high_ % bank_count : 0;
-    return bank * kBankSize + local;
-}
-
-std::uint8_t Cartridge::read_ram(std::uint16_t addr) const {
-    const auto offset = ram_offset(addr);
-    return offset ? ram_[*offset] : 0xFF;
-}
-
-void Cartridge::write_ram(std::uint16_t addr, std::uint8_t value) {
-    const auto offset = ram_offset(addr);
-    if (!offset) return;
-    ram_[*offset] = value;
-    save_dirty_ = true;
 }
 
 bool Cartridge::load_save_data(std::span<const std::uint8_t> data) {
