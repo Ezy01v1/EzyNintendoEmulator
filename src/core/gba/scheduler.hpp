@@ -17,6 +17,7 @@ enum class EventType : std::uint8_t {
     Timer1,
     Timer2,
     Timer3,
+    ApuSample,  // every 512 cycles: catch the sound channels up and output one sample
     Count,
 };
 

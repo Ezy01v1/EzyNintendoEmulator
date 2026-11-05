@@ -37,6 +37,7 @@ Gba::Gba(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios, 
         cpu_.reset();  // the BIOS runs from 0x00000000 and jumps to the cartridge itself
     }
     bus_.ppu().start();
+    bus_.apu().start();
 }
 
 // The state the BIOS leaves when it hands over to the cartridge: System mode, ARM state,
@@ -68,6 +69,7 @@ void Gba::dispatch_due_events() {
             case EventType::Timer1: bus_.timers().on_overflow(1, event->when); break;
             case EventType::Timer2: bus_.timers().on_overflow(2, event->when); break;
             case EventType::Timer3: bus_.timers().on_overflow(3, event->when); break;
+            case EventType::ApuSample: bus_.apu().on_sample(event->when); break;
             case EventType::Count: break;
         }
     }

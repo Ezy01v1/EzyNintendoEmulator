@@ -88,7 +88,10 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     std::cout << "Title: " << gba->header().title << " (" << gba->header().game_code << ")\n";
-    for (int i = 0; i < frames; ++i) gba->run_frame();
+    for (int i = 0; i < frames; ++i) {
+        gba->run_frame();
+        gba->bus().apu().clear_samples();  // no audio output here: don't let samples pile up
+    }
     if (!write_bmp(argv[3], gba->bus().ppu().framebuffer(), ezy::gba::kScreenWidth, ezy::gba::kScreenHeight)) {
         std::cerr << "Could not write " << argv[3] << '\n';
         return 2;

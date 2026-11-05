@@ -21,9 +21,20 @@ namespace ezy::gba {
 // Simplifications: the counter starts on the cycle the enable bit is written (hardware:
 // 2 cycles later), and prescaled timers count from their own start, not from the global
 // prescaler phase.
+// Told about every overflow (the sound FIFOs are clocked by timers 0 and 1).
+class TimerOverflowHook {
+public:
+    virtual void on_timer_overflow(int index) = 0;
+
+protected:
+    ~TimerOverflowHook() = default;
+};
+
 class Timers {
 public:
     Timers(std::span<std::uint8_t> io, Scheduler* scheduler) : io_(io), scheduler_(scheduler) {}
+
+    void set_overflow_hook(TimerOverflowHook* hook) { hook_ = hook; }
 
     // The bus calls this after any I/O write touching 0x100-0x10F.
     void after_io_write(std::size_t offset, std::size_t size);
@@ -53,6 +64,7 @@ private:
     std::span<std::uint8_t> io_;
     Scheduler* scheduler_;
     std::array<Timer, 4> timers_{};
+    TimerOverflowHook* hook_ = nullptr;
 };
 
 }  // namespace ezy::gba

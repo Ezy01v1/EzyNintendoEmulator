@@ -60,13 +60,18 @@ void draw_cpu(const gba::Gba& gba) {
 }
 
 void draw_video(const gba::Gba& gba) {
-    debug_ui::place_window(800, 440, 470, 200);
+    debug_ui::place_window(800, 440, 470, 250);
     ImGui::Begin("PPU / Cartridge");
     const gba::Bus& bus = gba.bus();
     ImGui::Text("DISPCNT %04X  mode %d", bus.read16(0x04000000), bus.read16(0x04000000) & 7);
     ImGui::Text("DISPSTAT %04X  VCOUNT %3d", bus.read16(0x04000004), bus.ppu().vcount());
     ImGui::Text("IE %04X  IF %04X  IME %d", bus.interrupt_enable(), bus.interrupt_flags(),
                 bus.interrupt_master_enable() ? 1 : 0);
+    const gba::Apu& apu = bus.apu();
+    ImGui::SeparatorText("Sound");
+    ImGui::Text("%s  PSG %c%c%c%c  FIFO A %2d  B %2d", apu.enabled() ? "on " : "off", apu.channel_on(0) ? '1' : '-',
+                apu.channel_on(1) ? '2' : '-', apu.channel_on(2) ? '3' : '-', apu.channel_on(3) ? '4' : '-',
+                apu.fifo_size(0), apu.fifo_size(1));
     ImGui::SeparatorText("Cartridge");
     ImGui::Text("%s  (%s)", gba.header().title.c_str(), gba.header().game_code.c_str());
     const gba::Backup& backup = bus.backup();

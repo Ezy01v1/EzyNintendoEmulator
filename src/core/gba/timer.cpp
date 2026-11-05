@@ -90,6 +90,7 @@ void Timers::overflow(int index, std::uint64_t when) {
     t.start = when;  // from the cycle it was due, so lateness doesn't accumulate
     if ((t.control & 0x40) != 0) request_irq(static_cast<std::uint16_t>(1U << (3 + index)));
     if (runs_on_clock(index)) schedule_overflow(index);
+    if (hook_ != nullptr) hook_->on_timer_overflow(index);
 
     // Count-up: the next timer advances by one per overflow of this one.
     if (index < 3) {

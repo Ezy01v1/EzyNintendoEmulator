@@ -35,7 +35,10 @@ public:
 
     void handle_key(SDL_Scancode scancode, bool pressed) override;
     void render(std::span<std::uint32_t> argb_pixels) const override;
-    [[nodiscard]] bool sound_active() const override { return false; }  // GBA sound comes later
+    [[nodiscard]] bool sound_active() const override { return false; }  // uses the APU, not the beeper
+    [[nodiscard]] int audio_sample_rate() const override { return gba::Apu::kSampleRate; }
+    [[nodiscard]] std::span<const float> audio_samples() const override { return gba_->bus().apu().samples(); }
+    void clear_audio_samples() override { gba_->bus().apu().clear_samples(); }
 
     void draw_debug_windows() override;
 

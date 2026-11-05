@@ -10,6 +10,7 @@
 #include "gba/backup.hpp"
 #include "gba/cpu/cpu_bus.hpp"
 #include "gba/ppu.hpp"
+#include "gba/apu.hpp"
 #include "gba/timer.hpp"
 #include "gba/scheduler.hpp"
 
@@ -50,7 +51,7 @@ inline constexpr std::size_t kSramSize = 64 * 1024;  // the save chip's address 
 // Not modelled yet: the ROM prefetch buffer, the non-sequential penalty at 128 KiB ROM
 // boundaries, I/O register side effects (plain storage for now), BIOS read protection,
 // real open-bus values outside the ROM.
-class Bus final : public CpuBus {
+class Bus final : public CpuBus, private TimerOverflowHook {
 public:
     static constexpr std::uint32_t kWaitcnt = 0x04000204;
 
@@ -67,6 +68,8 @@ public:
     // The cartridge's save chip, chosen from the ROM's backup ID string.
     [[nodiscard]] Backup& backup() { return backup_; }
     [[nodiscard]] const Backup& backup() const { return backup_; }
+    [[nodiscard]] Apu& apu() { return apu_; }
+    [[nodiscard]] const Apu& apu() const { return apu_; }
     [[nodiscard]] Timers& timers() { return timers_; }
     [[nodiscard]] const Timers& timers() const { return timers_; }
 
@@ -124,7 +127,10 @@ private:
 
     void after_dma_control_write(int index, std::uint16_t old_control);
     void trigger_dma(DmaTiming timing);
-    void run_dma(int index);
+    // `sound_fifo`: a FIFO refill (special timing on DMA 1/2): 4 words, destination fixed.
+    void run_dma(int index, bool sound_fifo = false);
+    void on_timer_overflow(int index) override;  // feeds the sound FIFOs
+    void trigger_fifo_dma(int fifo);
     [[nodiscard]] std::uint16_t dma_control(int index) const;
 
     [[nodiscard]] bool is_eeprom_address(std::uint32_t addr) const;
@@ -159,6 +165,7 @@ private:
     bool dma_running_ = false;
     Ppu ppu_;  // last: these hold views of the memory above
     Timers timers_;
+    Apu apu_;
 };
 
 // LDR from a misaligned address reads the aligned word and rotates it right by

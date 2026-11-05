@@ -48,12 +48,15 @@ Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios, Sche
       backup_(detect_backup_type(rom_)),
       scheduler_(scheduler),
       ppu_(io_, palette_, vram_, oam_, scheduler),
-      timers_(io_, scheduler) {
+      timers_(io_, scheduler),
+      apu_(io_, scheduler) {
+    timers_.set_overflow_hook(this);
     std::copy_n(bios.begin(), std::min(bios.size(), kBiosSize), bios_.begin());
     set_keys(0);
     // Reset values: BG2/BG3 PA and PD are 1.0 (identity), so the bitmap modes, which go
     // through BG2's affine transform, show the frame buffer unscaled.
     for (const std::uint32_t at : {0x020U, 0x026U, 0x030U, 0x036U}) io_[at + 1] = 0x01;
+    io_[0x089] = 0x02;  // SOUNDBIAS = 0x200: the DAC's midpoint
 }
 
 namespace {
@@ -69,6 +72,8 @@ constexpr std::uint32_t kIoPpuStatusFirst = 0x004;  // DISPSTAT
 constexpr std::uint32_t kIoPpuStatusLast = 0x007;   // VCOUNT high byte
 constexpr std::uint32_t kIoBg2Ref = 0x028;  // BG2X, BG2Y (BG3X/Y follow 0x10 later)
 constexpr std::uint32_t kIoBg3Ref = 0x038;
+constexpr std::uint32_t kIoSoundFirst = 0x060;  // SOUND1CNT_L
+constexpr std::uint32_t kIoSoundLast = 0x0A7;   // FIFO_B
 
 constexpr bool overlaps(std::size_t offset, std::size_t size, std::uint32_t first, std::uint32_t last) {
     return offset <= last && offset + size > first;
@@ -212,6 +217,7 @@ void Bus::write(std::uint32_t addr, T value) {
     }
     if (overlaps(offset, sizeof(T), kIoHaltcnt, kIoHaltcnt)) halted_ = true;
     if (overlaps(offset, sizeof(T), kIoTimerFirst, kIoTimerLast)) timers_.after_io_write(offset, sizeof(T));
+    if (overlaps(offset, sizeof(T), kIoSoundFirst, kIoSoundLast)) apu_.after_io_write(offset, sizeof(T));
     for (int i = 0; i < 4; ++i) {
         const std::uint32_t control = kIoDmaBase + static_cast<std::uint32_t>(i) * kDmaStride + 10;
         if (overlaps(offset, sizeof(T), control, control + 1)) after_dma_control_write(i, old_dma[static_cast<std::size_t>(i)]);
@@ -346,14 +352,14 @@ void Bus::trigger_dma(DmaTiming timing) {
 }
 
 // Runs a whole transfer at once (the CPU is stalled during it anyway), charging every
-// access plus 2 cycles of start-up. Special timing (sound FIFO, video capture) isn't
-// emulated yet, so those channels never fire.
-void Bus::run_dma(int index) {
+// access plus 2 cycles of start-up. Special timing on DMA 1/2 is the sound FIFO refill
+// (trigger_fifo_dma); on DMA 3 (video capture) it isn't emulated, so it never fires.
+void Bus::run_dma(int index, bool sound_fifo) {
     if (dma_running_) return;  // a DMA writing DMA registers doesn't start another one
     dma_running_ = true;
     DmaChannel& ch = dma_[static_cast<std::size_t>(index)];
     const std::uint16_t control = dma_control(index);
-    const bool word = (control & kDmaWord) != 0;
+    const bool word = sound_fifo || (control & kDmaWord) != 0;
     const std::uint32_t unit = word ? 4 : 2;
     const auto step = [unit](std::uint32_t mode) -> std::int32_t {
         switch (mode) {
@@ -362,7 +368,8 @@ void Bus::run_dma(int index) {
             default: return 0;                                         // fixed
         }
     };
-    const std::int32_t dst_step = step((control >> 5) & 3);
+    const std::int32_t dst_step = sound_fifo ? 0 : step((control >> 5) & 3);
+    if (sound_fifo) ch.count = 4;  // 16 bytes, whatever the count register says
     const std::int32_t src_step = step((control >> 7) & 3);
 
     // EEPROM requests are 9/17 (read) or 73/81 (write) halfwords long: that tells its size.
@@ -398,6 +405,25 @@ void Bus::run_dma(int index) {
         io_[base + 11] = static_cast<std::uint8_t>(io_[base + 11] & ~(kDmaEnable >> 8));  // done: clear enable
     }
     dma_running_ = false;
+}
+
+void Bus::on_timer_overflow(int index) {
+    if (index > 1) return;  // only timers 0 and 1 clock the FIFOs
+    const unsigned refill = apu_.on_timer_overflow(index);
+    if ((refill & 1U) != 0) trigger_fifo_dma(0);
+    if ((refill & 2U) != 0) trigger_fifo_dma(1);
+}
+
+// FIFO A/B is refilled by whichever of DMA 1/2 is armed with special timing and points at it.
+void Bus::trigger_fifo_dma(int fifo) {
+    const std::uint32_t fifo_addr = 0x040000A0 + static_cast<std::uint32_t>(fifo) * 4;
+    for (int i = 1; i <= 2; ++i) {
+        const std::uint16_t control = dma_control(i);
+        if ((control & kDmaEnable) == 0 || static_cast<DmaTiming>((control >> 12) & 3) != DmaTiming::Special) continue;
+        if (dma_[static_cast<std::size_t>(i)].dst != fifo_addr) continue;
+        run_dma(i, /*sound_fifo=*/true);
+        return;
+    }
 }
 
 }  // namespace ezy::gba
