@@ -46,8 +46,38 @@ Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios, Sche
       ewram_(kEwramSize, 0),
       vram_(kVramSize, 0),
       sram_(kSramSize, 0xFF),  // erased flash/SRAM reads back as 0xFF
-      scheduler_(scheduler) {
+      scheduler_(scheduler),
+      ppu_(io_, palette_, vram_, scheduler) {
     std::copy_n(bios.begin(), std::min(bios.size(), kBiosSize), bios_.begin());
+    set_keys(0);
+}
+
+namespace {
+
+constexpr std::uint32_t kIoIf = 0x202;
+constexpr std::uint32_t kIoKeyinput = 0x130;
+constexpr std::uint32_t kIoPpuStatusFirst = 0x004;  // DISPSTAT
+constexpr std::uint32_t kIoPpuStatusLast = 0x007;   // VCOUNT high byte
+
+constexpr bool overlaps(std::size_t offset, std::size_t size, std::uint32_t first, std::uint32_t last) {
+    return offset <= last && offset + size > first;
+}
+
+}  // namespace
+
+void Bus::request_interrupt(std::uint16_t bits) {
+    io_[kIoIf] = static_cast<std::uint8_t>(io_[kIoIf] | bits);
+    io_[kIoIf + 1] = static_cast<std::uint8_t>(io_[kIoIf + 1] | (bits >> 8));
+}
+
+std::uint16_t Bus::interrupt_enable() const { return static_cast<std::uint16_t>(io_[0x200] | (io_[0x201] << 8)); }
+std::uint16_t Bus::interrupt_flags() const { return static_cast<std::uint16_t>(io_[kIoIf] | (io_[kIoIf + 1] << 8)); }
+
+void Bus::set_keys(std::uint16_t pressed) {
+    keys_pressed_ = pressed & 0x03FF;
+    const auto keyinput = static_cast<std::uint16_t>(~keys_pressed_ & 0x03FF);
+    io_[kIoKeyinput] = static_cast<std::uint8_t>(keyinput);
+    io_[kIoKeyinput + 1] = static_cast<std::uint8_t>(keyinput >> 8);
 }
 
 template <typename Self>
@@ -137,7 +167,20 @@ void Bus::write(std::uint32_t addr, T value) {
     std::size_t offset = 0;
     const auto memory = resolve(*this, addr, offset);
     if (memory.empty()) return;
+
+    if (region != kIo) {
+        std::memcpy(memory.data() + offset, &value, sizeof(T));
+        return;
+    }
+    // I/O: plain storage, plus the registers with side effects.
+    const std::array<std::uint8_t, 2> old_if = {io_[kIoIf], io_[kIoIf + 1]};
     std::memcpy(memory.data() + offset, &value, sizeof(T));
+    for (std::uint32_t b = kIoIf; b <= kIoIf + 1; ++b) {
+        // IF: writing 1 to a bit acknowledges (clears) that interrupt.
+        if (overlaps(offset, sizeof(T), b, b)) io_[b] = static_cast<std::uint8_t>(old_if[b - kIoIf] & ~io_[b]);
+    }
+    if (overlaps(offset, sizeof(T), kIoKeyinput, kIoKeyinput + 1)) set_keys(keys_pressed_);  // read-only
+    if (overlaps(offset, sizeof(T), kIoPpuStatusFirst, kIoPpuStatusLast)) ppu_.after_io_write();
 }
 
 std::uint8_t Bus::read8(std::uint32_t addr) const { return read<std::uint8_t>(addr); }

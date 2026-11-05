@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "gba/cpu/cpu_bus.hpp"
+#include "gba/ppu.hpp"
 #include "gba/scheduler.hpp"
 
 namespace ezy::gba {
@@ -36,6 +37,9 @@ inline constexpr std::size_t kSramSize = 64 * 1024;
 //   charges the access's cost in cycles to the Scheduler, using the waitstate table
 //   (GBATEK "GBA Memory Map") and WAITCNT for the cartridge.
 //
+// I/O side effects so far: DISPSTAT/VCOUNT read-only bits (PPU), IF write-1-to-clear,
+// KEYINPUT read-only. Everything else in I/O is plain storage.
+//
 // Not modelled yet: the ROM prefetch buffer, the non-sequential penalty at 128 KiB ROM
 // boundaries, I/O register side effects (plain storage for now), BIOS read protection,
 // real open-bus values outside the ROM.
@@ -47,6 +51,22 @@ public:
     // scheduler, CPU accesses are simply not timed.
     explicit Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios = {},
                  Scheduler* scheduler = nullptr);
+    // The PPU keeps views into this object's memory, so it must stay where it is.
+    Bus(const Bus&) = delete;
+    Bus& operator=(const Bus&) = delete;
+
+    [[nodiscard]] Ppu& ppu() { return ppu_; }
+    [[nodiscard]] const Ppu& ppu() const { return ppu_; }
+
+    // Interrupts: IE (0x200), IF (0x202, writing 1 clears a bit), IME (0x208).
+    void request_interrupt(std::uint16_t bits);
+    [[nodiscard]] std::uint16_t interrupt_enable() const;
+    [[nodiscard]] std::uint16_t interrupt_flags() const;
+    [[nodiscard]] bool interrupt_master_enable() const { return (io_[0x208] & 1) != 0; }
+
+    // KEYINPUT (0x130) is active-low: a 0 bit means pressed. `pressed` uses the same bit
+    // layout (A, B, Select, Start, Right, Left, Up, Down, R, L) with 1 = pressed.
+    void set_keys(std::uint16_t pressed);
 
     [[nodiscard]] std::uint8_t read8(std::uint32_t addr) const;
     [[nodiscard]] std::uint16_t read16(std::uint32_t addr) const;
@@ -93,6 +113,8 @@ private:
     std::array<std::uint8_t, kOamSize> oam_{};
     std::vector<std::uint8_t> sram_;
     Scheduler* scheduler_ = nullptr;
+    std::uint16_t keys_pressed_ = 0;
+    Ppu ppu_;  // last: it holds views of the memory above
 };
 
 // LDR from a misaligned address reads the aligned word and rotates it right by

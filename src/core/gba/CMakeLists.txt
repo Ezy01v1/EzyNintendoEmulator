@@ -1,3 +1,3 @@
-add_library(ezy_gba STATIC cartridge.cpp bus.cpp cpu/arm7tdmi.cpp cpu/arm.cpp cpu/thumb.cpp scheduler.cpp gba.cpp)
+add_library(ezy_gba STATIC cartridge.cpp bus.cpp cpu/arm7tdmi.cpp cpu/arm.cpp cpu/thumb.cpp scheduler.cpp ppu.cpp gba.cpp)
 target_include_directories(ezy_gba PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(ezy_gba PRIVATE ezy_warnings)

@@ -30,7 +30,7 @@ Gba::Gba(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios, 
     } else {
         cpu_.reset();  // the BIOS runs from 0x00000000 and jumps to the cartridge itself
     }
-    scheduler_.schedule_in(EventType::FrameEnd, kCyclesPerFrame);
+    bus_.ppu().start();
 }
 
 // The state the BIOS leaves when it hands over to the cartridge: System mode, ARM state,
@@ -46,18 +46,17 @@ void Gba::boot_without_bios() {
 void Gba::dispatch_due_events() {
     while (const auto event = scheduler_.pop_due()) {
         switch (event->type) {
-            case EventType::FrameEnd: on_frame_end(event->when); break;
+            case EventType::PpuHDrawEnd: bus_.ppu().on_hdraw_end(event->when); break;
+            case EventType::PpuHBlankEnd:
+                bus_.ppu().on_hblank_end(event->when);
+                if (bus_.ppu().take_frame_done()) {
+                    ++frames_;
+                    frame_done_ = true;
+                }
+                break;
             case EventType::Count: break;
         }
     }
-}
-
-// Reschedule from the time it was due, not from now(), so a late dispatch (the last
-// instruction overran the boundary) doesn't stretch the following frames.
-void Gba::on_frame_end(std::uint64_t when) {
-    ++frames_;
-    frame_done_ = true;
-    scheduler_.schedule(EventType::FrameEnd, when + kCyclesPerFrame);
 }
 
 void Gba::run_until(std::uint64_t cycle) {

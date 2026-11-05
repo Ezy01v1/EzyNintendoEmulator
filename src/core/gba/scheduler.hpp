@@ -11,7 +11,8 @@ namespace ezy::gba {
 // scheduler a small fixed array (cheap, cache friendly, trivially serialisable for save
 // states) and makes rescheduling/cancelling a single store.
 enum class EventType : std::uint8_t {
-    FrameEnd,  // placeholder frame boundary until the PPU drives timing
+    PpuHDrawEnd,   // cycle 960 of a line: HBlank starts, the line is rendered
+    PpuHBlankEnd,  // cycle 1232: next line (VCOUNT++), VBlank on line 160
     Count,
 };
 

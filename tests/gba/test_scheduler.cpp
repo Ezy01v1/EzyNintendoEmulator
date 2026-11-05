@@ -13,9 +13,8 @@ using namespace ezy::gba;
 
 namespace {
 
-// Only FrameEnd exists so far; ordering and tie-breaking between types get tested once the
-// PPU adds its events.
-constexpr EventType kA = EventType::FrameEnd;
+constexpr EventType kA = EventType::PpuHDrawEnd;
+constexpr EventType kB = EventType::PpuHBlankEnd;
 
 }  // namespace
 
@@ -45,6 +44,23 @@ TEST_CASE("scheduler: rescheduling replaces, cancel removes") {
     s.cancel(kA);
     s.advance(100);
     CHECK_FALSE(s.pop_due());
+}
+
+TEST_CASE("scheduler pops in time order, ties by type") {
+    Scheduler s;
+    s.schedule(kB, 30);
+    s.schedule(kA, 40);
+    s.advance(50);
+    auto first = s.pop_due();
+    REQUIRE(first);
+    CHECK(first->type == kB);
+    CHECK(s.pop_due()->type == kA);
+
+    s.schedule(kB, 60);
+    s.schedule(kA, 60);
+    s.advance(20);
+    CHECK(s.pop_due()->type == kA);  // same time: lower type first
+    CHECK(s.pop_due()->type == kB);
 }
 
 TEST_CASE("scheduler: a late event keeps its original time") {
@@ -138,18 +154,18 @@ TEST_CASE("Gba boots without a BIOS in the state the BIOS leaves") {
     CHECK(cpu.banked(kBankIrq, 5) == 0x03007FA0);
 }
 
-TEST_CASE("Gba frames are 280896 cycles and lateness does not accumulate") {
+TEST_CASE("Gba frames end at VBlank, 280896 cycles apart, without accumulating lateness") {
     const auto gba = Gba::create(loop_rom());
     REQUIRE(gba);
+    // The first frame starts at line 0, so it ends when line 160 starts.
     gba->run_frame();
+    constexpr std::uint64_t kFirst = 160ULL * kCyclesPerLine;
     CHECK(gba->frame_count() == 1);
-    // B . from ROM costs a few cycles (fetches with waitstates), so the frame can only
-    // overrun by less than one instruction.
-    const std::uint64_t after_one = gba->scheduler().now();
-    CHECK(after_one >= kCyclesPerFrame);
-    CHECK(after_one < kCyclesPerFrame + 32);
+    CHECK(gba->bus().ppu().vcount() == 160);
+    CHECK(gba->scheduler().now() >= kFirst);
+    CHECK(gba->scheduler().now() < kFirst + 32);  // overrun: less than one instruction
     for (int i = 0; i < 9; ++i) gba->run_frame();
     CHECK(gba->frame_count() == 10);
-    CHECK(gba->scheduler().now() >= 10ULL * kCyclesPerFrame);
-    CHECK(gba->scheduler().now() < 10ULL * kCyclesPerFrame + 32);
+    CHECK(gba->scheduler().now() >= kFirst + 9ULL * kCyclesPerFrame);
+    CHECK(gba->scheduler().now() < kFirst + 9ULL * kCyclesPerFrame + 32);
 }

@@ -7,12 +7,13 @@
 #include "gba/bus.hpp"
 #include "gba/cartridge.hpp"
 #include "gba/cpu/arm7tdmi.hpp"
+#include "gba/ppu.hpp"
 #include "gba/scheduler.hpp"
 
 namespace ezy::gba {
 
 inline constexpr std::uint32_t kCpuHz = 16'777'216;
-inline constexpr std::uint32_t kCyclesPerFrame = 280'896;  // 228 lines * 1232 cycles (~59.73 Hz)
+inline constexpr std::uint32_t kCyclesPerFrame = kCyclesPerLine * kLinesPerFrame;  // 280,896 (~59.73 Hz)
 
 // The whole console: what the frontend talks to (the GBA counterpart of gb::GameBoy).
 //
@@ -32,7 +33,7 @@ public:
 
     void step() { cpu_.step(); dispatch_due_events(); }
     void run_until(std::uint64_t cycle);
-    void run_frame();  // until the next frame boundary
+    void run_frame();  // until the next VBlank starts (the frame is complete)
 
     [[nodiscard]] Arm7tdmi& cpu() { return cpu_; }
     [[nodiscard]] const Arm7tdmi& cpu() const { return cpu_; }
@@ -48,7 +49,6 @@ private:
 
     void boot_without_bios();
     void dispatch_due_events();
-    void on_frame_end(std::uint64_t when);
 
     // Declaration order is construction order: the bus needs the scheduler, the CPU the bus.
     Scheduler scheduler_;
