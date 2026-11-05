@@ -40,12 +40,13 @@ constexpr std::size_t kVramObjStart = 0x10000;  // 8-bit writes to OBJ tiles are
 
 }  // namespace
 
-Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios)
+Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios, Scheduler* scheduler)
     : rom_(std::move(rom)),
       bios_(kBiosSize, 0),
       ewram_(kEwramSize, 0),
       vram_(kVramSize, 0),
-      sram_(kSramSize, 0xFF) {  // erased flash/SRAM reads back as 0xFF
+      sram_(kSramSize, 0xFF),  // erased flash/SRAM reads back as 0xFF
+      scheduler_(scheduler) {
     std::copy_n(bios.begin(), std::min(bios.size(), kBiosSize), bios_.begin());
 }
 
@@ -146,5 +147,68 @@ std::uint32_t Bus::read32(std::uint32_t addr) const { return read<std::uint32_t>
 void Bus::write8(std::uint32_t addr, std::uint8_t value) { write(addr, value); }
 void Bus::write16(std::uint32_t addr, std::uint16_t value) { write(addr, value); }
 void Bus::write32(std::uint32_t addr, std::uint32_t value) { write(addr, value); }
+
+// --- Timing ---
+
+namespace {
+
+// WAITCNT first-access (N) waitstates for SRAM and the three ROM windows: 4, 3, 2, 8.
+constexpr std::array<std::uint32_t, 4> kWaitN = {4, 3, 2, 8};
+// Second-access (S) waitstates per ROM window, for WAITCNT bit = 0 / 1.
+constexpr std::array<std::array<std::uint32_t, 2>, 3> kWaitS = {{{2, 1}, {4, 1}, {8, 1}}};
+
+}  // namespace
+
+std::uint32_t Bus::access_cycles(std::uint32_t addr, std::uint32_t size, Access access) const {
+    const std::uint32_t region = region_of(addr);
+    const bool wide = size == 4;
+    switch (region) {
+        case kEwram: return wide ? 6 : 3;  // 16-bit bus, 2 waitstates per halfword
+        case kPalette:
+        case kVram: return wide ? 2 : 1;   // 16-bit bus, no waitstates
+        default: break;
+    }
+    const auto waitcnt = static_cast<std::uint32_t>(io_[0x204] | (io_[0x205] << 8));
+    if (is_rom(region)) {
+        const std::uint32_t window = (region - kRomFirst) / 2;  // WS0, WS1, WS2
+        const std::uint32_t n = kWaitN[(waitcnt >> (2 + window * 3)) & 3];
+        const std::uint32_t s = kWaitS[window][(waitcnt >> (4 + window * 3)) & 1];
+        const std::uint32_t first = 1 + ((access & kSeq) != 0 ? s : n);
+        // 16-bit bus: a word is two halfword accesses, the second always sequential.
+        return wide ? first + 1 + s : first;
+    }
+    if (is_sram(region)) return 1 + kWaitN[waitcnt & 3];
+    return 1;  // BIOS, IWRAM, I/O, OAM (32-bit, no waitstates) and unmapped space
+}
+
+std::uint8_t Bus::read8(std::uint32_t addr, Access access) {
+    charge(access_cycles(addr, 1, access));
+    return read<std::uint8_t>(addr);
+}
+
+std::uint16_t Bus::read16(std::uint32_t addr, Access access) {
+    charge(access_cycles(addr, 2, access));
+    return read<std::uint16_t>(addr);
+}
+
+std::uint32_t Bus::read32(std::uint32_t addr, Access access) {
+    charge(access_cycles(addr, 4, access));
+    return read<std::uint32_t>(addr);
+}
+
+void Bus::write8(std::uint32_t addr, std::uint8_t value, Access access) {
+    charge(access_cycles(addr, 1, access));
+    write(addr, value);
+}
+
+void Bus::write16(std::uint32_t addr, std::uint16_t value, Access access) {
+    charge(access_cycles(addr, 2, access));
+    write(addr, value);
+}
+
+void Bus::write32(std::uint32_t addr, std::uint32_t value, Access access) {
+    charge(access_cycles(addr, 4, access));
+    write(addr, value);
+}
 
 }  // namespace ezy::gba
