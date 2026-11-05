@@ -2,6 +2,8 @@
 
 #include <vector>
 
+#include "gba/hle_bios.hpp"
+
 namespace ezy::gba {
 
 namespace {
@@ -13,6 +15,8 @@ constexpr std::uint32_t kStackSvc = 0x03007FE0;
 constexpr std::uint32_t kStackIrq = 0x03007FA0;
 constexpr std::uint32_t kStackUser = 0x03007F00;
 
+constexpr auto kHleBios = hle_bios_image();
+
 }  // namespace
 
 std::unique_ptr<Gba> Gba::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios) {
@@ -22,10 +26,12 @@ std::unique_ptr<Gba> Gba::create(std::span<const std::uint8_t> rom, std::span<co
 }
 
 Gba::Gba(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios, CartridgeHeader header)
-    : bus_(std::vector<std::uint8_t>(rom.begin(), rom.end()), bios, &scheduler_),
+    : bus_(std::vector<std::uint8_t>(rom.begin(), rom.end()), bios.empty() ? std::span(kHleBios) : bios,
+           &scheduler_),
       cpu_(bus_),
       header_(std::move(header)) {
     if (bios.empty()) {
+        cpu_.set_swi_hook(this);
         boot_without_bios();
     } else {
         cpu_.reset();  // the BIOS runs from 0x00000000 and jumps to the cartridge itself
@@ -57,6 +63,21 @@ void Gba::dispatch_due_events() {
             case EventType::Count: break;
         }
     }
+}
+
+void Gba::step() {
+    if (bus_.halted()) {
+        if (!bus_.interrupt_pending()) {
+            // Nothing can happen before the next event: skip straight to it.
+            if (const auto next = scheduler_.next_event_time()) scheduler_.advance_to(*next);
+            dispatch_due_events();
+            return;
+        }
+        bus_.set_halted(false);  // IE & IF wakes the CPU even with IME off
+    }
+    if (bus_.interrupt_master_enable() && bus_.interrupt_pending()) (void)cpu_.irq();
+    cpu_.step();
+    dispatch_due_events();
 }
 
 void Gba::run_until(std::uint64_t cycle) {

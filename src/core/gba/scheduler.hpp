@@ -29,6 +29,9 @@ public:
 
     [[nodiscard]] std::uint64_t now() const { return now_; }
     void advance(std::uint64_t cycles) { now_ += cycles; }
+    void advance_to(std::uint64_t cycle) {
+        if (cycle > now_) now_ = cycle;
+    }
 
     // Replaces any pending event of the same type.
     void schedule(EventType type, std::uint64_t when) { slots_[index(type)] = {true, when}; }

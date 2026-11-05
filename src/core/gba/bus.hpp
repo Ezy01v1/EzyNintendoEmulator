@@ -38,7 +38,7 @@ inline constexpr std::size_t kSramSize = 64 * 1024;
 //   (GBATEK "GBA Memory Map") and WAITCNT for the cartridge.
 //
 // I/O side effects so far: DISPSTAT/VCOUNT read-only bits (PPU), IF write-1-to-clear,
-// KEYINPUT read-only. Everything else in I/O is plain storage.
+// KEYINPUT read-only, HALTCNT. Everything else in I/O is plain storage.
 //
 // Not modelled yet: the ROM prefetch buffer, the non-sequential penalty at 128 KiB ROM
 // boundaries, I/O register side effects (plain storage for now), BIOS read protection,
@@ -67,6 +67,12 @@ public:
     // KEYINPUT (0x130) is active-low: a 0 bit means pressed. `pressed` uses the same bit
     // layout (A, B, Select, Start, Right, Left, Up, Down, R, L) with 1 = pressed.
     void set_keys(std::uint16_t pressed);
+
+    // HALTCNT (0x301): any write halts the CPU until (IE & IF) != 0 (IME doesn't matter).
+    // Stop mode (bit 7) is treated as Halt.
+    [[nodiscard]] bool halted() const { return halted_; }
+    void set_halted(bool halted) { halted_ = halted; }
+    [[nodiscard]] bool interrupt_pending() const { return (interrupt_enable() & interrupt_flags() & 0x3FFF) != 0; }
 
     [[nodiscard]] std::uint8_t read8(std::uint32_t addr) const;
     [[nodiscard]] std::uint16_t read16(std::uint32_t addr) const;
@@ -114,6 +120,7 @@ private:
     std::vector<std::uint8_t> sram_;
     Scheduler* scheduler_ = nullptr;
     std::uint16_t keys_pressed_ = 0;
+    bool halted_ = false;
     Ppu ppu_;  // last: it holds views of the memory above
 };
 

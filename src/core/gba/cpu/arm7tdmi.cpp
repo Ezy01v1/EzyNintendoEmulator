@@ -153,6 +153,14 @@ void Arm7tdmi::enter_exception(Mode mode, std::uint32_t vector, std::uint32_t re
     jump(vector);
 }
 
+bool Arm7tdmi::irq() {
+    if (flag(psr::kI)) return false;
+    // r15 is next + 8 (ARM) or next + 4 (Thumb); LR must be next + 4 either way.
+    const std::uint32_t return_addr = thumb() ? r_[15] : r_[15] - 4;
+    enter_exception(Mode::Irq, 0x18, return_addr);
+    return true;
+}
+
 void Arm7tdmi::set_nz(std::uint32_t result) {
     set_flag(psr::kN, (result & 0x80000000U) != 0);
     set_flag(psr::kZ, result == 0);

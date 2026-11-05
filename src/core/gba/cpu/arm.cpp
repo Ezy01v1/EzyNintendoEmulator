@@ -395,7 +395,10 @@ std::uint32_t Arm7tdmi::load_signed_half(std::uint32_t addr) {
 
 // --- Exceptions ---
 
-void Arm7tdmi::arm_swi(std::uint32_t /*op*/) { enter_exception(Mode::Supervisor, 0x08, r_[15] - 4); }
+void Arm7tdmi::arm_swi(std::uint32_t op) {
+    if (swi_hook_ != nullptr && swi_hook_->on_swi(static_cast<std::uint8_t>(op >> 16))) return;
+    enter_exception(Mode::Supervisor, 0x08, r_[15] - 4);
+}
 
 void Arm7tdmi::arm_undefined(std::uint32_t /*op*/) { enter_exception(Mode::Undefined, 0x04, r_[15] - 4); }
 

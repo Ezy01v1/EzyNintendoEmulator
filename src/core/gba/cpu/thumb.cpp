@@ -246,6 +246,7 @@ void Arm7tdmi::execute_thumb(std::uint16_t op16) {
 
     // Format 17: SWI   (before format 16, whose condition 0xF it occupies)
     if ((op & 0xFF00) == 0xDF00) {
+        if (swi_hook_ != nullptr && swi_hook_->on_swi(static_cast<std::uint8_t>(op))) return;
         enter_exception(Mode::Supervisor, 0x08, pc - 2);
         return;
     }

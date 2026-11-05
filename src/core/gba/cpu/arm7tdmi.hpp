@@ -36,6 +36,16 @@ enum Bank : std::size_t { kBankUser, kBankFiq, kBankSvc, kBankAbt, kBankIrq, kBa
 
 [[nodiscard]] Bank bank_of(std::uint32_t mode);
 
+// Lets the system emulate BIOS calls in C++ (HLE). Called when a SWI executes, with the
+// comment field the BIOS would read (ARM: bits 16-23, Thumb: bits 0-7). Return true if
+// handled: the SWI then completes like a normal instruction instead of entering
+// Supervisor mode at 0x08. The hook may change registers or jump.
+class SwiHook {
+public:
+    virtual ~SwiHook() = default;
+    virtual bool on_swi(std::uint8_t number) = 0;
+};
+
 // The ARM7TDMI. One step() executes one instruction, ARM or Thumb depending on CPSR.T.
 //
 // Design:
@@ -50,6 +60,14 @@ public:
 
     void reset();  // enter Supervisor at 0x00000000 with IRQ/FIQ masked, like power-on
     void step();   // execute one instruction
+
+    // Takes an IRQ exception now (between instructions): IRQ mode, vector 0x18, LR = the
+    // next instruction + 4 in both states, so handlers return with SUBS pc, lr, #4.
+    // The caller checks IME/IE/IF; this only checks CPSR.I and returns whether it entered.
+    bool irq();
+    void set_swi_hook(SwiHook* hook) { swi_hook_ = hook; }
+    // Address of the instruction that executes next (pipeline_[0]).
+    [[nodiscard]] std::uint32_t next_instruction_address() const { return r_[15] - (thumb() ? 4U : 8U); }
 
     // --- State access (debugger, tests, BIOS-less boot) ---
     [[nodiscard]] std::uint32_t reg(std::size_t n) const { return r_[n]; }
@@ -121,6 +139,7 @@ private:
     std::array<std::array<std::uint32_t, 2>, kBankCount> bank_r13_r14_{};
     std::array<std::uint32_t, 2> pipeline_{};
     bool flushed_ = false;  // set when the current instruction wrote r15
+    SwiHook* swi_hook_ = nullptr;
 };
 
 }  // namespace ezy::gba

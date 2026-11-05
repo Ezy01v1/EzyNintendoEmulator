@@ -1,4 +1,4 @@
-add_executable(ezy_gba_tests test_main.cpp test_cartridge.cpp test_bus.cpp test_arm.cpp test_scheduler.cpp test_ppu.cpp)
+add_executable(ezy_gba_tests test_main.cpp test_cartridge.cpp test_bus.cpp test_arm.cpp test_scheduler.cpp test_ppu.cpp test_irq.cpp)
 target_link_libraries(ezy_gba_tests PRIVATE ezy_gba doctest::doctest ezy_warnings)
 target_compile_definitions(ezy_gba_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
 add_test(NAME ezy_gba_tests COMMAND ezy_gba_tests)

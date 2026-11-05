@@ -56,6 +56,7 @@ namespace {
 
 constexpr std::uint32_t kIoIf = 0x202;
 constexpr std::uint32_t kIoKeyinput = 0x130;
+constexpr std::uint32_t kIoHaltcnt = 0x301;
 constexpr std::uint32_t kIoPpuStatusFirst = 0x004;  // DISPSTAT
 constexpr std::uint32_t kIoPpuStatusLast = 0x007;   // VCOUNT high byte
 
@@ -181,6 +182,7 @@ void Bus::write(std::uint32_t addr, T value) {
     }
     if (overlaps(offset, sizeof(T), kIoKeyinput, kIoKeyinput + 1)) set_keys(keys_pressed_);  // read-only
     if (overlaps(offset, sizeof(T), kIoPpuStatusFirst, kIoPpuStatusLast)) ppu_.after_io_write();
+    if (overlaps(offset, sizeof(T), kIoHaltcnt, kIoHaltcnt)) halted_ = true;
 }
 
 std::uint8_t Bus::read8(std::uint32_t addr) const { return read<std::uint8_t>(addr); }
