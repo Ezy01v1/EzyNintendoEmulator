@@ -1,5 +1,6 @@
-# Build output
+# Build output (machine-specific: each PC configures its own, see CMakePresets.json)
 build/
+build-*/
 out/
 
 # Editor
