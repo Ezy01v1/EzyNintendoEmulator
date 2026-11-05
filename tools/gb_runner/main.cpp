@@ -4,6 +4,11 @@
 //       Runs the ROM and prints everything sent over the serial port. Blargg's test ROMs
 //       report "Passed" / "Failed" there. Exit code 0 on "Passed".
 //
+//   ezy_gb_runner <rom.gb> --mooneye [max-seconds]
+//       Runs a mooneye-test-suite ROM until it executes LD B,B (opcode 0x40), its
+//       "test finished" breakpoint. Pass = registers hold Fibonacci numbers
+//       B=3 C=5 D=8 E=13 H=21 L=34; fail = all of them 0x42. Exit code 0 on pass.
+//
 //   ezy_gb_runner <rom.gb> --screenshot <out.bmp> [frames]
 //       Runs `frames` frames (default 120) and saves the screen as a BMP, e.g. to compare
 //       dmg-acid2 against its reference image.
@@ -84,11 +89,32 @@ int run_serial(ezy::gb::GameBoy& gb, double max_seconds) {
     return bus.serial_output().find("Passed") != std::string::npos ? 0 : 1;
 }
 
+int run_mooneye(ezy::gb::GameBoy& gb, double max_seconds) {
+    constexpr std::uint64_t kClockHz = 4'194'304;
+    constexpr std::uint8_t kLdBB = 0x40;
+    const auto max_cycles = static_cast<std::uint64_t>(max_seconds * kClockHz);
+    const auto& bus = gb.bus();
+    const auto& r = gb.cpu().regs();
+
+    // Stop right after LD B,B executes (the ROM keeps looping on it afterwards).
+    while (bus.t_cycles() < max_cycles && !gb.cpu().locked()) {
+        const bool at_breakpoint = !gb.cpu().halted() && bus.peek(r.pc) == kLdBB;
+        gb.step();
+        if (at_breakpoint) break;
+    }
+    const bool pass = r.b == 3 && r.c == 5 && r.d == 8 && r.e == 13 && r.h == 21 && r.l == 34;
+    std::cout << (pass ? "Passed" : "Failed") << std::hex << "  B=" << int{r.b} << " C=" << int{r.c}
+              << " D=" << int{r.d} << " E=" << int{r.e} << " H=" << int{r.h} << " L=" << int{r.l} << std::dec
+              << "  [" << static_cast<double>(bus.t_cycles()) / kClockHz << " emulated s]\n";
+    return pass ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: ezy_gb_runner <rom.gb> [max-seconds]\n"
+                     "       ezy_gb_runner <rom.gb> --mooneye [max-seconds]\n"
                      "       ezy_gb_runner <rom.gb> --screenshot <out.bmp> [frames]\n";
         return 2;
     }
@@ -111,6 +137,10 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "Saved " << argv[3] << " after " << frames << " frames\n";
         return 0;
+    }
+
+    if (argc >= 3 && std::strcmp(argv[2], "--mooneye") == 0) {
+        return run_mooneye(*gb, argc > 3 ? std::atof(argv[3]) : 30.0);
     }
 
     return run_serial(*gb, argc > 2 ? std::atof(argv[2]) : 120.0);
