@@ -24,6 +24,23 @@ constexpr std::uint16_t kObj1D = 1U << 6;
 constexpr std::uint16_t kForcedBlank = 1U << 7;
 constexpr std::uint16_t kBg0Enable = 1U << 8;  // BG1-3 follow
 constexpr std::uint16_t kObjEnable = 1U << 12;
+constexpr std::uint16_t kWin0Enable = 1U << 13;
+constexpr std::uint16_t kWin1Enable = 1U << 14;
+constexpr std::uint16_t kObjWinEnable = 1U << 15;
+
+// Windows and color effects
+constexpr std::uint32_t kWin0H = 0x040;  // WIN1H at +2, WIN0V at +4, WIN1V at +6
+constexpr std::uint32_t kWinin = 0x048;
+constexpr std::uint32_t kWinout = 0x04A;
+constexpr std::uint32_t kBldcnt = 0x050;
+constexpr std::uint32_t kBldalpha = 0x052;
+constexpr std::uint32_t kBldy = 0x054;
+constexpr std::uint8_t kLayerObj = 4;
+constexpr std::uint8_t kLayerBackdrop = 5;
+constexpr std::uint8_t kMaskAll = 0x3F;      // all layers + effects
+constexpr std::uint8_t kMaskEffects = 0x20;  // window control bit 5
+
+enum class Effect : std::uint16_t { None = 0, Alpha = 1, Brighten = 2, Darken = 3 };
 
 // BGxCNT
 constexpr std::uint16_t kBg256Colors = 1U << 7;
@@ -54,6 +71,30 @@ constexpr int kVBlankLastLine = 226;  // the flag is clear again on line 227
 
 constexpr std::uint32_t kPageOffset = 0xA000;  // second frame buffer in modes 4 and 5
 constexpr std::uint16_t kWhite = 0x7FFF;
+
+// Applies `f(channel)` to each 5-bit channel of a BGR555 color.
+template <typename F>
+std::uint16_t per_channel(std::uint16_t color, F f) {
+    std::uint32_t out = 0;
+    for (std::uint32_t shift = 0; shift <= 10; shift += 5) {
+        out |= std::min<std::uint32_t>(31, f((color >> shift) & 31U)) << shift;
+    }
+    return static_cast<std::uint16_t>(out);
+}
+
+// top * eva/16 + below * evb/16 per channel, saturating at 31.
+std::uint16_t alpha_blend(std::uint16_t top, std::uint16_t below, std::uint32_t eva, std::uint32_t evb) {
+    std::uint32_t out = 0;
+    for (std::uint32_t shift = 0; shift <= 10; shift += 5) {
+        const std::uint32_t a = (top >> shift) & 31U;
+        const std::uint32_t b = (below >> shift) & 31U;
+        out |= std::min<std::uint32_t>(31, (a * eva + b * evb) >> 4) << shift;
+    }
+    return static_cast<std::uint16_t>(out);
+}
+
+// Is `x` (or a line) in [first, last)? first > last wraps around the screen edge.
+bool in_range(int v, int first, int last) { return first <= last ? (v >= first && v < last) : (v >= first || v < last); }
 
 }  // namespace
 
@@ -186,28 +227,106 @@ void Ppu::render_line(int y) {
     std::stable_sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(count),
                      [&](std::size_t a, std::size_t b) { return bg_prio[a] < bg_prio[b]; });
 
-    LineBuffer obj;
-    obj.fill(kTransparent);
-    std::array<std::uint8_t, kScreenWidth> obj_prio{};
-    if ((dispcnt & kObjEnable) != 0) render_sprites(y, obj, obj_prio);
+    ObjLine obj;
+    obj.color.fill(kTransparent);
+    if ((dispcnt & kObjEnable) != 0) render_sprites(y, obj);
 
+    std::array<std::uint8_t, kScreenWidth> masks{};
+    window_masks(y, obj, masks);
+
+    const std::uint16_t bldcnt = io16(kBldcnt);
+    const auto effect = static_cast<Effect>((bldcnt >> 6) & 3U);
+    const std::uint32_t first_targets = bldcnt & 0x3FU;
+    const std::uint32_t second_targets = (bldcnt >> 8) & 0x3FU;
+    const std::uint16_t bldalpha = io16(kBldalpha);
+    const std::uint32_t eva = std::min<std::uint32_t>(16, bldalpha & 31U);
+    const std::uint32_t evb = std::min<std::uint32_t>(16, (bldalpha >> 8) & 31U);
+    const std::uint32_t evy = std::min<std::uint32_t>(16, io16(kBldy) & 31U);
     const std::uint16_t backdrop = palette16(0) & kWhite;
+
     for (std::size_t x = 0; x < kScreenWidth; ++x) {
-        std::uint16_t color = backdrop;
-        int best = 4;  // the backdrop sits behind priority 3
-        if (obj[x] != kTransparent) {
-            color = obj[x];
-            best = obj_prio[x];
-        }
-        for (std::size_t i = 0; i < count; ++i) {
+        const std::uint8_t mask = masks[x];
+        // The top two visible layers, front to back; the backdrop is behind everything.
+        std::array<std::uint16_t, 2> colors = {backdrop, backdrop};
+        std::array<std::uint8_t, 2> layers = {kLayerBackdrop, kLayerBackdrop};
+        std::size_t found = 0;
+        const auto take = [&](std::uint16_t color, std::uint8_t layer) {
+            colors[found] = color;
+            layers[found] = layer;
+            ++found;
+        };
+        bool obj_pending = obj.color[x] != kTransparent && (mask & (1U << kLayerObj)) != 0;
+        for (std::size_t i = 0; i < count && found < 2; ++i) {
             const std::size_t bg = order[i];
-            if (bg_prio[bg] >= best) break;  // a sprite wins ties with a BG
-            if (bgs[bg][x] != kTransparent) {
-                color = bgs[bg][x];
-                break;
+            if (obj_pending && obj.priority[x] <= bg_prio[bg]) {  // a sprite wins ties with a BG
+                take(obj.color[x], kLayerObj);
+                obj_pending = false;
+                if (found == 2) break;
+            }
+            if ((mask & (1U << bg)) != 0 && bgs[bg][x] != kTransparent) take(bgs[bg][x], static_cast<std::uint8_t>(bg));
+        }
+        if (obj_pending && found < 2) take(obj.color[x], kLayerObj);
+
+        std::uint16_t color = colors[0];
+        if ((mask & kMaskEffects) != 0) {
+            const bool top_first = (first_targets & (1U << layers[0])) != 0;
+            const bool below_second = (second_targets & (1U << layers[1])) != 0;
+            const bool semi = layers[0] == kLayerObj && obj.semi_transparent[x];
+            if (semi && below_second) {
+                // Semi-transparent sprites alpha-blend whatever BLDCNT's mode and 1st targets say.
+                color = alpha_blend(colors[0], colors[1], eva, evb);
+            } else if (top_first) {
+                switch (effect) {
+                    case Effect::Alpha:
+                        if (below_second) color = alpha_blend(colors[0], colors[1], eva, evb);
+                        break;
+                    case Effect::Brighten:
+                        color = per_channel(colors[0], [&](std::uint32_t c) { return c + (((31 - c) * evy) >> 4); });
+                        break;
+                    case Effect::Darken:
+                        color = per_channel(colors[0], [&](std::uint32_t c) { return c - ((c * evy) >> 4); });
+                        break;
+                    case Effect::None:
+                        break;
+                }
             }
         }
         row[static_cast<std::ptrdiff_t>(x)] = color;
+    }
+}
+
+void Ppu::window_masks(int y, const ObjLine& obj, std::array<std::uint8_t, kScreenWidth>& out) const {
+    const std::uint16_t dispcnt = io16(kDispcnt);
+    const bool any = (dispcnt & (kWin0Enable | kWin1Enable | kObjWinEnable)) != 0;
+    if (!any) {
+        out.fill(kMaskAll);
+        return;
+    }
+    const std::uint16_t winin = io16(kWinin);
+    const std::uint16_t winout = io16(kWinout);
+    // WINxH/V: left/top edge in the high byte, right/bottom edge (exclusive) in the low byte.
+    std::array<bool, 2> enabled{};
+    std::array<int, 2> left{};
+    std::array<int, 2> right{};
+    for (std::size_t w = 0; w < 2; ++w) {
+        const std::uint16_t h = io16(kWin0H + static_cast<std::uint32_t>(w) * 2);
+        const std::uint16_t v = io16(kWin0H + 4 + static_cast<std::uint32_t>(w) * 2);
+        enabled[w] = (dispcnt & (kWin0Enable << w)) != 0 && in_range(y, v >> 8, v & 0xFF);
+        left[w] = h >> 8;
+        right[w] = h & 0xFF;
+    }
+    const bool obj_window = (dispcnt & kObjWinEnable) != 0;
+    for (std::size_t x = 0; x < kScreenWidth; ++x) {
+        const int ix = static_cast<int>(x);
+        std::uint8_t mask = winout & kMaskAll;  // outside every window
+        if (enabled[0] && in_range(ix, left[0], right[0])) {
+            mask = winin & kMaskAll;  // WIN0 has the highest priority
+        } else if (enabled[1] && in_range(ix, left[1], right[1])) {
+            mask = (winin >> 8) & kMaskAll;
+        } else if (obj_window && obj.window[x]) {
+            mask = (winout >> 8) & kMaskAll;
+        }
+        out[x] = mask;
     }
 }
 
@@ -324,7 +443,7 @@ void Ppu::render_bitmap_bg(int mode, int y, LineBuffer& out) const {
     }
 }
 
-void Ppu::render_sprites(int y, LineBuffer& color, std::array<std::uint8_t, kScreenWidth>& priority) const {
+void Ppu::render_sprites(int y, ObjLine& out) const {
     // [shape][size] -> {width, height} (GBATEK "OBJ Attributes").
     static constexpr std::array<std::array<std::array<int, 2>, 4>, 3> kSizes = {{
         {{{8, 8}, {16, 16}, {32, 32}, {64, 64}}},  // square
@@ -345,7 +464,8 @@ void Ppu::render_sprites(int y, LineBuffer& color, std::array<std::uint8_t, kScr
         const bool affine = (a0 & kObjAffine) != 0;
         const bool double_size = (a0 & kObjDoubleOrHidden) != 0;
         if (!affine && double_size) continue;  // bit 9 hides a regular sprite
-        if (((a0 >> 10) & 3U) >= 2) continue;  // OBJ window (needs windows) or prohibited
+        const std::uint32_t obj_mode = (a0 >> 10) & 3U;  // 0 normal, 1 semi-transparent, 2 OBJ window
+        if (obj_mode == 3) continue;                     // prohibited
         const std::uint32_t shape = a0 >> 14U;
         if (shape == 3) continue;
         const auto [w, h] = kSizes[shape][a1 >> 14U];
@@ -403,10 +523,15 @@ void Ppu::render_sprites(int y, LineBuffer& color, std::array<std::uint8_t, kScr
             if (index == 0) continue;
             if (!bpp8) index += palette_bank * 16;
             const auto ux = static_cast<std::size_t>(x);
+            if (obj_mode == 2) {
+                out.window[ux] = true;
+                continue;
+            }
             // Lowest priority value wins; on a tie the lower OAM index (drawn first) keeps it.
-            if (color[ux] == kTransparent || prio < priority[ux]) {
-                color[ux] = palette16(256 + index) & kWhite;
-                priority[ux] = prio;
+            if (out.color[ux] == kTransparent || prio < out.priority[ux]) {
+                out.color[ux] = palette16(256 + index) & kWhite;
+                out.priority[ux] = prio;
+                out.semi_transparent[ux] = obj_mode == 1;
             }
         }
     }

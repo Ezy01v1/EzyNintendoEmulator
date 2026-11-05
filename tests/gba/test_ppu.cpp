@@ -430,3 +430,145 @@ TEST_CASE("PPU sprites in bitmap modes can't use tiles below 512") {
     CHECK(f.pixel(0, 0) == 0x0000);
     CHECK(f.pixel(8, 0) == 0x0077);
 }
+
+// --- Windows and color effects (exercise 3.8) ---
+
+namespace {
+
+constexpr std::uint16_t kRed = 0x001F;
+constexpr std::uint16_t kBlue = 0x7C00;
+
+// BG0 solid red (priority 0) in front of BG1 solid blue (priority 1), in mode 0. A zeroed
+// map points every entry at tile 0, so filling tile 0 fills the whole BG.
+void two_solid_bgs(Fixture& f) {
+    f.bus.write16(kPal + 1 * 2, kRed);
+    f.bus.write16(kPal + 2 * 2, kBlue);
+    fill_tile4(f, kVram, 1);           // BG0: char block 0
+    fill_tile4(f, kVram + 0x4000, 2);  // BG1: char block 1
+    f.bus.write16(0x04000008, 0x0400);  // BG0: screen block 4, priority 0
+    f.bus.write16(0x0400000A, 0x0405);  // BG1: same (empty) map, char block 1, priority 1
+}
+
+}  // namespace
+
+TEST_CASE("PPU WIN0: layers inside and outside the rectangle") {
+    Fixture f;
+    two_solid_bgs(f);
+    f.bus.write16(0x04000040, (10 << 8) | 20);  // WIN0H: x 10..19
+    f.bus.write16(0x04000044, (5 << 8) | 15);   // WIN0V: y 5..14
+    f.bus.write16(0x04000048, 0x0002);          // inside WIN0: BG1 only
+    f.bus.write16(0x0400004A, 0x0001);          // outside: BG0 only
+    f.bus.write16(0x04000000, 0x2300);          // BG0, BG1, WIN0
+    run_line(f, 4);
+    CHECK(f.pixel(10, 4) == kRed);
+    run_line(f, 5);
+    CHECK(f.pixel(9, 5) == kRed);
+    CHECK(f.pixel(10, 5) == kBlue);
+    CHECK(f.pixel(19, 5) == kBlue);
+    CHECK(f.pixel(20, 5) == kRed);
+    run_line(f, 15);
+    CHECK(f.pixel(10, 15) == kRed);
+}
+
+TEST_CASE("PPU windows: WIN0 beats WIN1, edges wrap, and a window can hide everything") {
+    Fixture f;
+    two_solid_bgs(f);
+    f.bus.write16(0x04000042, (230 << 8) | 5);  // WIN1H: x 230..239 and 0..4
+    f.bus.write16(0x04000046, (0 << 8) | 160);  // WIN1V: every line
+    f.bus.write16(0x04000048, 0x0000);          // inside WIN1: nothing (backdrop)
+    f.bus.write16(0x0400004A, 0x0002);          // outside: BG1
+    f.bus.write16(0x04000000, 0x4300);          // WIN1
+    run_line(f, 0);
+    CHECK(f.pixel(2, 0) == 0x0000);
+    CHECK(f.pixel(232, 0) == 0x0000);
+    CHECK(f.pixel(5, 0) == kBlue);
+    CHECK(f.pixel(229, 0) == kBlue);
+    f.bus.write16(0x04000040, (0 << 8) | 4);    // WIN0H: x 0..3
+    f.bus.write16(0x04000044, (0 << 8) | 160);
+    f.bus.write16(0x04000048, 0x0001);          // inside WIN0: BG0
+    f.bus.write16(0x04000000, 0x6300);          // WIN0 + WIN1
+    run_line(f, 1);
+    CHECK(f.pixel(2, 1) == kRed);     // in both: WIN0 decides
+    CHECK(f.pixel(4, 1) == 0x0000);   // only in WIN1
+}
+
+TEST_CASE("PPU OBJ window: opaque pixels of OBJ-window sprites select WINOUT's high byte") {
+    Fixture f;
+    two_solid_bgs(f);
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + 1 * 2, 0x03E0);
+    fill_tile4(f, kObjVram, 1);
+    set_sprite(f, 0, 0x0800, 50, 0);    // mode 2 (OBJ window), 8x8 at (50,0)
+    f.bus.write16(0x0400004A, 0x0201);  // outside: BG0; OBJ window: BG1
+    f.bus.write16(0x04000000, 0x9300);  // BG0, BG1, OBJ, OBJ window
+    run_line(f, 0);
+    CHECK(f.pixel(49, 0) == kRed);
+    CHECK(f.pixel(50, 0) == kBlue);  // the sprite itself isn't drawn
+    CHECK(f.pixel(57, 0) == kBlue);
+    CHECK(f.pixel(58, 0) == kRed);
+}
+
+TEST_CASE("PPU alpha blending: 1st target over 2nd target, weighted by EVA/EVB") {
+    Fixture f;
+    two_solid_bgs(f);
+    f.bus.write16(0x04000000, 0x0300);
+    f.bus.write16(0x04000050, 0x0001 | (1U << 6) | 0x0200);  // BG0 over BG1, alpha
+    f.bus.write16(0x04000052, (8 << 8) | 8);                 // EVA = EVB = 8/16
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == ((15U << 10) | 15U));
+    f.bus.write16(0x04000052, (16 << 8) | 16);  // saturates at 31
+    run_line(f, 1);
+    CHECK(f.pixel(0, 1) == (kRed | kBlue));
+    f.bus.write16(0x04000050, 0x0001 | (1U << 6) | 0x0400);  // 2nd target is BG2: not below
+    run_line(f, 2);
+    CHECK(f.pixel(0, 2) == kRed);
+}
+
+TEST_CASE("PPU brighten and darken the 1st target by EVY, unless the window disables effects") {
+    Fixture f;
+    two_solid_bgs(f);
+    f.bus.write16(0x04000000, 0x0300);
+    f.bus.write16(0x04000050, 0x0001 | (2U << 6));  // brighten BG0
+    f.bus.write16(0x04000054, 8);
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == (31U | (15U << 5) | (15U << 10)));
+    f.bus.write16(0x04000050, 0x0001 | (3U << 6));  // darken
+    run_line(f, 1);
+    CHECK(f.pixel(0, 1) == 16);
+    f.bus.write16(0x04000054, 31);  // EVY clamps to 16: black
+    run_line(f, 2);
+    CHECK(f.pixel(0, 2) == 0x0000);
+    f.bus.write16(0x04000040, (0 << 8) | 240);  // WIN0 over the whole line
+    f.bus.write16(0x04000044, (0 << 8) | 160);
+    f.bus.write16(0x04000048, 0x0003);  // BG0 and BG1 but no effects
+    f.bus.write16(0x04000000, 0x2300);
+    run_line(f, 3);
+    CHECK(f.pixel(0, 3) == kRed);
+}
+
+TEST_CASE("PPU effects on the backdrop: it can be a 1st target") {
+    Fixture f;
+    f.bus.write16(0x04000050, 0x0020 | (2U << 6));  // brighten the backdrop
+    f.bus.write16(0x04000054, 16);
+    f.bus.write16(0x04000000, 0x0000);
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == 0x7FFF);
+}
+
+TEST_CASE("PPU semi-transparent sprites alpha-blend over a 2nd target regardless of BLDCNT mode") {
+    Fixture f;
+    two_solid_bgs(f);
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + 1 * 2, 0x03E0);  // green
+    fill_tile4(f, kObjVram, 1);
+    set_sprite(f, 0, 0x0400, 0, 0);     // mode 1 (semi-transparent), priority 0, at (0,0)
+    f.bus.write16(0x04000000, 0x1300);
+    f.bus.write16(0x04000050, 0x0100);  // no effect, no 1st targets, BG0 is a 2nd target
+    f.bus.write16(0x04000052, (8 << 8) | 8);
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == ((15U << 5) | 15U));
+    CHECK(f.pixel(8, 0) == kRed);  // outside the sprite
+    f.bus.write16(0x04000050, 0x0200);  // only BG1 is a 2nd target: BG0 is below, no blend
+    run_line(f, 1);
+    CHECK(f.pixel(0, 1) == 0x03E0);
+}

@@ -37,11 +37,16 @@ inline constexpr std::uint16_t kVCount = 1U << 2;
 // lower priority value wins, OBJ beats a BG of the same priority, and among BGs the lower
 // number wins. Where nothing is opaque, the backdrop (palette entry 0) shows.
 //
+// Windows (WIN0, WIN1, the OBJ window, outside) pick per pixel which layers show and
+// whether color effects apply. Color effects (BLDCNT) then work on the top two visible
+// layers: alpha blending of a 1st target over a 2nd target, or brightening/darkening the
+// 1st target. Semi-transparent sprites always alpha-blend over a 2nd target below them.
+//
 // Implemented: tile modes 0-2 (text and affine backgrounds), bitmap modes 3-5, sprites
-// (regular and affine, 16/256 colors, 1D/2D mapping), forced blank, backdrop.
-// Not yet: windows, alpha blending and brightness (semi-transparent sprites draw as
-// normal ones, OBJ-window sprites aren't drawn), mosaic, affine transforms of the bitmap
-// modes, and the per-line sprite cycle budget.
+// (regular, affine, semi-transparent, OBJ window; 16/256 colors, 1D/2D mapping), windows,
+// alpha blending, brightness, forced blank, backdrop.
+// Not yet: mosaic, affine transforms of the bitmap modes, and the per-line sprite cycle
+// budget.
 class Ppu {
 public:
     Ppu(std::span<std::uint8_t> io, std::span<const std::uint8_t> palette, std::span<const std::uint8_t> vram,
@@ -85,8 +90,17 @@ private:
     void render_text_bg(int bg, int y, LineBuffer& out) const;
     void render_affine_bg(int bg, LineBuffer& out) const;
     void render_bitmap_bg(int mode, int y, LineBuffer& out) const;
-    // Fills `color` and `priority` for the OBJ layer.
-    void render_sprites(int y, LineBuffer& color, std::array<std::uint8_t, kScreenWidth>& priority) const;
+    // The OBJ layer of one line. `window` is the OBJ window: where an OBJ-window sprite is
+    // opaque (those sprites draw nothing themselves).
+    struct ObjLine {
+        LineBuffer color{};
+        std::array<std::uint8_t, kScreenWidth> priority{};
+        std::array<bool, kScreenWidth> semi_transparent{};
+        std::array<bool, kScreenWidth> window{};
+    };
+    void render_sprites(int y, ObjLine& out) const;
+    // Which layers (bits 0-3 BG0-3, bit 4 OBJ) and whether effects (bit 5) show at each x.
+    void window_masks(int y, const ObjLine& obj, std::array<std::uint8_t, kScreenWidth>& out) const;
     void advance_affine_references();
 
     std::span<std::uint8_t> io_;
