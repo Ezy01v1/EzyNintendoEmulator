@@ -12,6 +12,7 @@ constexpr std::uint16_t kOamDma = 0xFF46;
 constexpr std::uint16_t kInterruptEnable = 0xFFFF;
 
 constexpr bool is_timer(std::uint16_t addr) { return addr >= 0xFF04 && addr <= 0xFF07; }
+constexpr bool is_apu(std::uint16_t addr) { return addr >= 0xFF10 && addr <= 0xFF3F; }
 constexpr bool is_ppu(std::uint16_t addr) { return addr >= 0xFF40 && addr <= 0xFF4B && addr != kOamDma; }
 
 }  // namespace
@@ -30,7 +31,10 @@ void Bus::tick() { advance(); }
 
 void Bus::advance() {
     t_cycles_ += 4;
+    const std::uint16_t counter_before = timer_.counter();
     timer_.tick();
+    clock_frame_sequencer(counter_before);
+    apu_.tick();
     cartridge_.tick(4);
     if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
     ppu_.tick();
@@ -63,12 +67,18 @@ void Bus::poke(std::uint16_t addr, std::uint8_t value) {
     ie_ = value;
 }
 
+void Bus::clock_frame_sequencer(std::uint16_t counter_before) {
+    constexpr std::uint16_t kBit = 1U << 12;
+    if ((counter_before & kBit) != 0 && (timer_.counter() & kBit) == 0) apu_.div_falling_edge();
+}
+
 void Bus::set_button(Button button, bool pressed) {
     if (joypad_.set(button, pressed)) request_interrupt(interrupt::kJoypad);
 }
 
 std::uint8_t Bus::read_io(std::uint16_t addr) const {
     if (is_timer(addr)) return timer_.read(addr);
+    if (is_apu(addr)) return apu_.read(addr);
     if (is_ppu(addr)) return ppu_.read_register(addr);
     switch (addr) {
         case kJoypad: return joypad_.read();
@@ -81,8 +91,14 @@ std::uint8_t Bus::read_io(std::uint16_t addr) const {
 
 void Bus::write_io(std::uint16_t addr, std::uint8_t value) {
     if (is_timer(addr)) {
+        const std::uint16_t counter_before = timer_.counter();
         timer_.write(addr, value);
+        clock_frame_sequencer(counter_before);  // writing DIV can clock it
         if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
+        return;
+    }
+    if (is_apu(addr)) {
+        apu_.write(addr, value);
         return;
     }
     if (is_ppu(addr)) {

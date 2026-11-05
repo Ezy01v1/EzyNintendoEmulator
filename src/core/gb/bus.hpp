@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 
+#include "gb/apu.hpp"
 #include "gb/cartridge.hpp"
 #include "gb/cpu_bus.hpp"
 #include "gb/interrupts.hpp"
@@ -45,11 +46,15 @@ public:
 
     [[nodiscard]] const Cartridge& cartridge() const { return cartridge_; }
     [[nodiscard]] Cartridge& cartridge() { return cartridge_; }
+    [[nodiscard]] Apu& apu() { return apu_; }
+    [[nodiscard]] const Apu& apu() const { return apu_; }
     [[nodiscard]] Ppu& ppu() { return ppu_; }
     [[nodiscard]] const Ppu& ppu() const { return ppu_; }
 
 private:
-    void advance();  // advances timer and PPU by one M-cycle
+    void advance();  // advances timer, APU, PPU and cartridge by one M-cycle
+    // The APU frame sequencer runs off DIV: bit 12 of the timer counter falling.
+    void clock_frame_sequencer(std::uint16_t counter_before);
     void write_io(std::uint16_t addr, std::uint8_t value);
     [[nodiscard]] std::uint8_t read_io(std::uint16_t addr) const;
     void oam_dma(std::uint8_t page);
@@ -57,6 +62,7 @@ private:
     Cartridge cartridge_;
     Timer timer_;
     Ppu ppu_;
+    Apu apu_;
     Joypad joypad_;
     std::array<std::uint8_t, 0x2000> wram_{};
     std::array<std::uint8_t, 0x80> io_{};  // raw storage for I/O registers not modelled yet
