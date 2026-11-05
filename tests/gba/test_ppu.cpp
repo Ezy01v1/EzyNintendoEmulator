@@ -572,3 +572,108 @@ TEST_CASE("PPU semi-transparent sprites alpha-blend over a 2nd target regardless
     run_line(f, 1);
     CHECK(f.pixel(0, 1) == 0x03E0);
 }
+
+// --- Bitmap affine, mosaic and the sprite cycle budget (PPU completion) ---
+
+TEST_CASE("PPU reset values: BG2/BG3 PA and PD are 1.0") {
+    Fixture f;
+    CHECK(f.bus.read16(0x04000020) == 0x0100);
+    CHECK(f.bus.read16(0x04000022) == 0x0000);
+    CHECK(f.bus.read16(0x04000026) == 0x0100);
+    CHECK(f.bus.read16(0x04000030) == 0x0100);
+    CHECK(f.bus.read16(0x04000036) == 0x0100);
+}
+
+TEST_CASE("PPU bitmap modes go through BG2's affine transform and never wrap") {
+    Fixture f;
+    f.bus.write16(kPal, 0x1111);  // backdrop
+    f.bus.write16(kVram + 20 * 2, 0x001F);  // mode 3 pixel (20,0)
+    f.bus.write16(kVram + 7 * 2, 0x03E0);   // (7,0)
+    f.bus.write16(0x04000020, 0x0200);      // PA = 2: half-size, x samples 0, 2, 4...
+    f.bus.write16(0x04000000, 0x0403);
+    run_line(f, 0);
+    CHECK(f.pixel(10, 0) == 0x001F);
+    CHECK(f.pixel(119, 0) == 0x0000);  // samples x = 238
+    CHECK(f.pixel(120, 0) == 0x1111);  // samples x = 240: outside, backdrop
+    f.bus.write16(0x04000020, 0x0100);
+    f.bus.write32(0x04000028, 5 * 256);  // BG2X = 5: shifted left by 5
+    run_line(f, 1);
+    f.bus.write32(0x04000028, 5 * 256);
+    f.bus.write32(0x0400002C, 0);  // back to line 0 of the bitmap
+    run_line(f, 2);
+    CHECK(f.pixel(2, 2) == 0x03E0);
+    CHECK(f.pixel(15, 2) == 0x001F);
+    CHECK(f.pixel(235, 2) == 0x1111);
+}
+
+TEST_CASE("PPU BG mosaic: blocks repeat their top-left pixel") {
+    Fixture f;
+    f.bus.write16(kPal + 1 * 2, 0x7FFF);
+    set_pixel4(f, kVram + 32, 0, 0, 1);        // tile 1: just the top-left pixel
+    f.bus.write16(kVram + 0x800 * 4, 0x0001);
+    f.bus.write16(0x04000008, 0x0440);          // BG0, mosaic on
+    f.bus.write16(0x0400004C, (3 << 4) | 3);    // BG mosaic 4x4
+    f.bus.write16(0x04000000, 0x0100);
+    for (int y = 0; y <= 4; ++y) run_line(f, y);
+    CHECK(f.pixel(0, 0) == 0x7FFF);
+    CHECK(f.pixel(3, 0) == 0x7FFF);
+    CHECK(f.pixel(4, 0) == 0x0000);
+    CHECK(f.pixel(3, 3) == 0x7FFF);  // line 3 still shows map row 0
+    CHECK(f.pixel(0, 4) == 0x0000);
+}
+
+TEST_CASE("PPU BG mosaic on an affine BG repeats the first line's reference point") {
+    Fixture f;
+    f.bus.write16(kPal + 7 * 2, 0x7C00);
+    fill_tile8(f, kVram + 1 * 64, 7);
+    f.bus.write16(kVram + 0x800 * 8, 0x0001);  // map (0,0) = tile 1: texel rows 0..7
+    f.bus.write16(0x0400000C, 0x0840);         // BG2, mosaic on
+    f.bus.write16(0x0400004C, 15 << 4);        // vertical mosaic 16
+    f.bus.write16(0x04000000, 0x0401);         // mode 1, BG2
+    run_line(f, 9);
+    CHECK(f.pixel(0, 9) == 0x7C00);  // row 0 again (without mosaic: row 9, empty)
+    run_line(f, 16);
+    CHECK(f.pixel(0, 16) == 0x0000);  // a new block starts at row 16
+}
+
+TEST_CASE("PPU OBJ mosaic: horizontal and vertical") {
+    Fixture f;
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + 1 * 2, 0x0123);
+    set_pixel4(f, kObjVram, 0, 0, 1);       // only the sprite's top-left pixel
+    set_sprite(f, 0, 0x1000, 0, 0);         // 8x8 at (0,0), mosaic
+    f.bus.write16(0x0400004C, (3 << 12) | (3 << 8));  // OBJ mosaic 4x4
+    f.bus.write16(0x04000000, 0x1000);
+    run_line(f, 0);
+    CHECK(f.pixel(3, 0) == 0x0123);
+    CHECK(f.pixel(4, 0) == 0x0000);
+    run_line(f, 3);
+    CHECK(f.pixel(2, 3) == 0x0123);
+    run_line(f, 4);
+    CHECK(f.pixel(0, 4) == 0x0000);
+}
+
+TEST_CASE("PPU sprites past the per-line cycle budget are not drawn") {
+    Fixture f;
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + 1 * 2, 0x0321);
+    fill_tile4(f, kObjVram, 1);
+    // 18 empty 64x64 sprites cost 18 * 64 = 1152 of the 1210 cycles.
+    for (std::uint32_t i = 0; i < 18; ++i) set_sprite(f, i, 0x0000, 0xC000 | 100, 256);
+    set_sprite(f, 18, 0x0000, 0x8000, 0);  // 32x32 at (0,0): 1184, fits
+    f.bus.write16(0x04000000, 0x1040);
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == 0x0321);
+    set_sprite(f, 18, 0x0000, 0xC000, 0);  // 64x64: 1216, over budget
+    run_line(f, 1);
+    CHECK(f.pixel(0, 1) == 0x0000);
+    set_sprite(f, 18, 0x0000, 0x8000, 0);
+    f.bus.write16(0x04000000, 0x1060);  // HBlank interval free: only 954 cycles
+    run_line(f, 2);
+    CHECK(f.pixel(0, 2) == 0x0000);
+    f.bus.write16(0x04000000, 0x1040);  // hidden sprites cost nothing
+    for (std::uint32_t i = 0; i < 18; ++i) set_sprite(f, i, 0x0200, 0xC000 | 100, 256);
+    set_sprite(f, 18, 0x0000, 0xC000, 0);
+    run_line(f, 3);
+    CHECK(f.pixel(0, 3) == 0x0321);
+}

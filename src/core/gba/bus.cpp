@@ -51,6 +51,9 @@ Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios, Sche
       timers_(io_, scheduler) {
     std::copy_n(bios.begin(), std::min(bios.size(), kBiosSize), bios_.begin());
     set_keys(0);
+    // Reset values: BG2/BG3 PA and PD are 1.0 (identity), so the bitmap modes, which go
+    // through BG2's affine transform, show the frame buffer unscaled.
+    for (const std::uint32_t at : {0x020U, 0x026U, 0x030U, 0x036U}) io_[at + 1] = 0x01;
 }
 
 namespace {

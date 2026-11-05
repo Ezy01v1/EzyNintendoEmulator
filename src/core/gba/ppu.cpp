@@ -20,6 +20,7 @@ constexpr std::uint32_t kVramObjBase = 0x10000;
 // DISPCNT
 constexpr std::uint16_t kModeMask = 0x0007;
 constexpr std::uint16_t kPageSelect = 1U << 4;
+constexpr std::uint16_t kHBlankFree = 1U << 5;  // OAM accessible in HBlank: fewer sprite cycles
 constexpr std::uint16_t kObj1D = 1U << 6;
 constexpr std::uint16_t kForcedBlank = 1U << 7;
 constexpr std::uint16_t kBg0Enable = 1U << 8;  // BG1-3 follow
@@ -32,6 +33,7 @@ constexpr std::uint16_t kObjWinEnable = 1U << 15;
 constexpr std::uint32_t kWin0H = 0x040;  // WIN1H at +2, WIN0V at +4, WIN1V at +6
 constexpr std::uint32_t kWinin = 0x048;
 constexpr std::uint32_t kWinout = 0x04A;
+constexpr std::uint32_t kMosaic = 0x04C;
 constexpr std::uint32_t kBldcnt = 0x050;
 constexpr std::uint32_t kBldalpha = 0x052;
 constexpr std::uint32_t kBldy = 0x054;
@@ -43,6 +45,7 @@ constexpr std::uint8_t kMaskEffects = 0x20;  // window control bit 5
 enum class Effect : std::uint16_t { None = 0, Alpha = 1, Brighten = 2, Darken = 3 };
 
 // BGxCNT
+constexpr std::uint16_t kBgMosaic = 1U << 6;
 constexpr std::uint16_t kBg256Colors = 1U << 7;
 constexpr std::uint16_t kBgWrap = 1U << 13;  // affine BGs only
 
@@ -53,7 +56,10 @@ constexpr std::uint16_t kEntryVFlip = 1U << 11;
 // OBJ attributes
 constexpr std::uint16_t kObjAffine = 1U << 8;          // attr 0
 constexpr std::uint16_t kObjDoubleOrHidden = 1U << 9;  // attr 0: double size if affine, else hidden
+constexpr std::uint16_t kObjMosaic = 1U << 12;         // attr 0
 constexpr std::uint16_t kObj256Colors = 1U << 13;      // attr 0
+constexpr int kObjCyclesPerLine = 1210;                // GBATEK "OBJ Attributes"
+constexpr int kObjCyclesHBlankFree = 954;
 constexpr std::uint16_t kObjHFlip = 1U << 12;          // attr 1, regular sprites
 constexpr std::uint16_t kObjVFlip = 1U << 13;          // attr 1, regular sprites
 
@@ -187,6 +193,13 @@ bool Ppu::take_frame_done() {
 
 void Ppu::render_line(int y) {
     const std::uint16_t dispcnt = io16(kDispcnt);
+    const Mosaic mosaic = mosaic_sizes();
+    // Vertical mosaic on affine BGs repeats the first line of each block: keep the
+    // reference point that line used.
+    if (y % mosaic.bg_v == 0) {
+        mosaic_ref_x_ = affine_x_;
+        mosaic_ref_y_ = affine_y_;
+    }
     const auto row = framebuffer_.begin() + y * kScreenWidth;
     if ((dispcnt & kForcedBlank) != 0) {
         std::fill(row, row + kScreenWidth, kWhite);
@@ -215,11 +228,22 @@ void Ppu::render_line(int y) {
         bg_prio[bg] = static_cast<std::uint8_t>(io16(kBgcnt + static_cast<std::uint32_t>(bg) * 2) & 3);
         if (kinds[bg] == Kind::None || (dispcnt & (kBg0Enable << bg)) == 0) continue;
         const int index = static_cast<int>(bg);
+        const bool mosaic_on = (io16(kBgcnt + static_cast<std::uint32_t>(bg) * 2) & kBgMosaic) != 0;
+        // Affine and bitmap BGs go through the reference point of BG2 or BG3.
+        const std::size_t ref = bg >= 2 ? bg - 2 : 0;
+        const std::int32_t ref_x = mosaic_on ? mosaic_ref_x_[ref] : affine_x_[ref];
+        const std::int32_t ref_y = mosaic_on ? mosaic_ref_y_[ref] : affine_y_[ref];
         switch (kinds[bg]) {
-            case Kind::Text: render_text_bg(index, y, bgs[bg]); break;
-            case Kind::Affine: render_affine_bg(index, bgs[bg]); break;
-            case Kind::Bitmap: render_bitmap_bg(mode, y, bgs[bg]); break;
+            case Kind::Text: render_text_bg(index, mosaic_on ? y - y % mosaic.bg_v : y, bgs[bg]); break;
+            case Kind::Affine: render_affine_bg(index, ref_x, ref_y, bgs[bg]); break;
+            case Kind::Bitmap: render_bitmap_bg(mode, ref_x, ref_y, bgs[bg]); break;
             case Kind::None: break;
+        }
+        if (mosaic_on && mosaic.bg_h > 1) {
+            // Horizontal mosaic: each block repeats its leftmost pixel.
+            for (std::size_t x = 0; x < kScreenWidth; ++x) {
+                bgs[bg][x] = bgs[bg][x - x % static_cast<std::size_t>(mosaic.bg_h)];
+            }
         }
         order[count++] = bg;
     }
@@ -330,6 +354,11 @@ void Ppu::window_masks(int y, const ObjLine& obj, std::array<std::uint8_t, kScre
     }
 }
 
+Ppu::Mosaic Ppu::mosaic_sizes() const {
+    const std::uint16_t m = io16(kMosaic);  // each size is stored minus 1
+    return {(m & 15) + 1, ((m >> 4) & 15) + 1, ((m >> 8) & 15) + 1, ((m >> 12) & 15) + 1};
+}
+
 void Ppu::reload_affine_reference(int bg, bool y) {
     const std::uint32_t at = kBgAffineBase + static_cast<std::uint32_t>(bg - 2) * 0x10 + (y ? 0xC : 0x8);
     const std::uint32_t raw = io16(at) | (static_cast<std::uint32_t>(io16(at + 2)) << 16);
@@ -384,7 +413,7 @@ void Ppu::render_text_bg(int bg, int y, LineBuffer& out) const {
     }
 }
 
-void Ppu::render_affine_bg(int bg, LineBuffer& out) const {
+void Ppu::render_affine_bg(int bg, std::int32_t ref_x, std::int32_t ref_y, LineBuffer& out) const {
     const auto ubg = static_cast<std::uint32_t>(bg);
     const std::uint16_t cnt = io16(kBgcnt + ubg * 2);
     const std::uint32_t char_base = ((cnt >> 2) & 3U) * 0x4000;
@@ -395,8 +424,8 @@ void Ppu::render_affine_bg(int bg, LineBuffer& out) const {
     const std::uint32_t base = kBgAffineBase + (ubg - 2) * 0x10;
     const std::int32_t pa = static_cast<std::int16_t>(io16(base));
     const std::int32_t pc = static_cast<std::int16_t>(io16(base + 4));
-    std::int32_t fx = affine_x_[ubg - 2];
-    std::int32_t fy = affine_y_[ubg - 2];
+    std::int32_t fx = ref_x;
+    std::int32_t fy = ref_y;
 
     for (std::uint32_t x = 0; x < kScreenWidth; ++x, fx += pa, fy += pc) {
         out[x] = kTransparent;
@@ -419,27 +448,37 @@ void Ppu::render_affine_bg(int bg, LineBuffer& out) const {
     }
 }
 
-void Ppu::render_bitmap_bg(int mode, int y, LineBuffer& out) const {
+void Ppu::render_bitmap_bg(int mode, std::int32_t ref_x, std::int32_t ref_y, LineBuffer& out) const {
     const std::uint32_t page = (io16(kDispcnt) & kPageSelect) != 0 ? kPageOffset : 0;
-    const auto uy = static_cast<std::uint32_t>(y);
-    for (std::uint32_t x = 0; x < kScreenWidth; ++x) {
-        std::uint16_t color = kTransparent;
+    const std::int32_t width = mode == 5 ? 160 : kScreenWidth;
+    const std::int32_t height = mode == 5 ? 128 : kScreenHeight;
+    // The frame buffer is BG2, sampled through its affine transform (identity by default).
+    const std::int32_t pa = static_cast<std::int16_t>(io16(kBgAffineBase));
+    const std::int32_t pc = static_cast<std::int16_t>(io16(kBgAffineBase + 4));
+    std::int32_t fx = ref_x;
+    std::int32_t fy = ref_y;
+
+    for (std::uint32_t x = 0; x < kScreenWidth; ++x, fx += pa, fy += pc) {
+        out[x] = kTransparent;
+        const std::int32_t tx = fx >> 8;
+        const std::int32_t ty = fy >> 8;
+        if (tx < 0 || ty < 0 || tx >= width || ty >= height) continue;  // bitmaps never wrap
+        const auto pixel = static_cast<std::uint32_t>(ty * width + tx);
         switch (mode) {
             case 3:  // 240x160, direct 15-bit color
-                color = vram16((uy * kScreenWidth + x) * 2) & kWhite;
+                out[x] = vram16(pixel * 2) & kWhite;
                 break;
             case 4: {  // 240x160, 8-bit palette index, two pages; index 0 is transparent
-                const std::uint8_t index = vram_[page + uy * kScreenWidth + x];
-                if (index != 0) color = palette16(index) & kWhite;
+                const std::uint8_t index = vram_[page + pixel];
+                if (index != 0) out[x] = palette16(index) & kWhite;
                 break;
             }
             case 5:  // 160x128, direct color, two pages
-                if (x < 160 && uy < 128) color = vram16(page + (uy * 160 + x) * 2) & kWhite;
+                out[x] = vram16(page + pixel * 2) & kWhite;
                 break;
             default:
                 break;
         }
-        out[x] = color;
     }
 }
 
@@ -456,6 +495,10 @@ void Ppu::render_sprites(int y, ObjLine& out) const {
     const auto oam16 = [this](std::uint32_t at) {
         return static_cast<std::uint16_t>(oam_[at] | (oam_[at + 1] << 8));
     };
+    const Mosaic mosaic = mosaic_sizes();
+    // Sprite rendering has a cycle budget per line (less if OAM may be accessed in HBlank);
+    // sprites are processed in OAM order and the ones past the budget don't show.
+    int budget = (dispcnt & kHBlankFree) != 0 ? kObjCyclesHBlankFree : kObjCyclesPerLine;
 
     for (std::uint32_t i = 0; i < 128; ++i) {
         const std::uint16_t a0 = oam16(i * 8);
@@ -472,10 +515,15 @@ void Ppu::render_sprites(int y, ObjLine& out) const {
         const int box_w = affine && double_size ? w * 2 : w;
         const int box_h = affine && double_size ? h * 2 : h;
 
-        const int line = (y - (a0 & 0xFF)) & 0xFF;  // Y wraps around at 256
+        int line = (y - (a0 & 0xFF)) & 0xFF;  // Y wraps around at 256
         if (line >= box_h) continue;
+        // Cost: 1 cycle per pixel of width, or 10 + 2 per pixel of the box if affine.
+        budget -= affine ? 10 + 2 * box_w : w;
+        if (budget < 0) break;
         int sx = a1 & 0x1FF;
         if (sx >= kScreenWidth) sx -= 512;  // 9-bit signed X
+        const bool mosaic_on = (a0 & kObjMosaic) != 0;
+        if (mosaic_on) line = std::max(0, line - y % mosaic.obj_v);  // repeat each block's first line
 
         const bool bpp8 = (a0 & kObj256Colors) != 0;
         const std::uint32_t tile = a2 & 0x3FFU;
@@ -498,9 +546,11 @@ void Ppu::render_sprites(int y, ObjLine& out) const {
         const std::uint32_t tile_step = bpp8 ? 2 : 1;  // tile numbers count 32-byte units
         const std::uint32_t row_stride = one_d ? static_cast<std::uint32_t>(w / 8) * tile_step : 32;
 
-        for (int bx = 0; bx < box_w; ++bx) {
-            const int x = sx + bx;
+        for (int box_x = 0; box_x < box_w; ++box_x) {
+            const int x = sx + box_x;
             if (x < 0 || x >= kScreenWidth) continue;
+            // Horizontal mosaic: each screen block repeats its leftmost pixel (within the sprite).
+            const int bx = mosaic_on ? std::max(sx, x - x % mosaic.obj_h) - sx : box_x;
             int tx = bx;
             int ty = line;
             if (affine) {

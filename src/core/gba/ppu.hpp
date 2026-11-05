@@ -42,11 +42,12 @@ inline constexpr std::uint16_t kVCount = 1U << 2;
 // layers: alpha blending of a 1st target over a 2nd target, or brightening/darkening the
 // 1st target. Semi-transparent sprites always alpha-blend over a 2nd target below them.
 //
-// Implemented: tile modes 0-2 (text and affine backgrounds), bitmap modes 3-5, sprites
-// (regular, affine, semi-transparent, OBJ window; 16/256 colors, 1D/2D mapping), windows,
-// alpha blending, brightness, forced blank, backdrop.
-// Not yet: mosaic, affine transforms of the bitmap modes, and the per-line sprite cycle
-// budget.
+// Implemented: tile modes 0-2 (text and affine backgrounds), bitmap modes 3-5 (through
+// BG2's affine transform), sprites (regular, affine, semi-transparent, OBJ window; 16/256
+// colors, 1D/2D mapping, per-line cycle budget), mosaic, windows, alpha blending,
+// brightness, forced blank, backdrop.
+// Simplified: a whole line is drawn at once (no mid-line register changes), and the
+// sprite that runs out of cycles is dropped whole instead of being cut off.
 class Ppu {
 public:
     Ppu(std::span<std::uint8_t> io, std::span<const std::uint8_t> palette, std::span<const std::uint8_t> vram,
@@ -88,8 +89,16 @@ private:
     static constexpr std::uint16_t kTransparent = 0x8000;
 
     void render_text_bg(int bg, int y, LineBuffer& out) const;
-    void render_affine_bg(int bg, LineBuffer& out) const;
-    void render_bitmap_bg(int mode, int y, LineBuffer& out) const;
+    // Affine and bitmap BGs sample from a reference point (19.8 fixed point) stepping by
+    // PA/PC per pixel.
+    void render_affine_bg(int bg, std::int32_t ref_x, std::int32_t ref_y, LineBuffer& out) const;
+    void render_bitmap_bg(int mode, std::int32_t ref_x, std::int32_t ref_y, LineBuffer& out) const;
+
+    // MOSAIC block sizes in pixels (1 = no effect).
+    struct Mosaic {
+        int bg_h, bg_v, obj_h, obj_v;
+    };
+    [[nodiscard]] Mosaic mosaic_sizes() const;
     // The OBJ layer of one line. `window` is the OBJ window: where an OBJ-window sprite is
     // opaque (those sprites draw nothing themselves).
     struct ObjLine {
@@ -112,6 +121,9 @@ private:
     // Internal affine reference points of BG2 and BG3 (signed 19.8 fixed point).
     std::array<std::int32_t, 2> affine_x_{};
     std::array<std::int32_t, 2> affine_y_{};
+    // The reference points at the first line of the current vertical mosaic block.
+    std::array<std::int32_t, 2> mosaic_ref_x_{};
+    std::array<std::int32_t, 2> mosaic_ref_y_{};
 
     int vcount_ = 0;
     bool vblank_ = false;
