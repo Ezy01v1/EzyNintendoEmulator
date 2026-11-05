@@ -13,6 +13,10 @@ namespace ezy::gba {
 enum class EventType : std::uint8_t {
     PpuHDrawEnd,   // cycle 960 of a line: HBlank starts, the line is rendered
     PpuHBlankEnd,  // cycle 1232: next line (VCOUNT++), VBlank on line 160
+    Timer0,        // timer overflows
+    Timer1,
+    Timer2,
+    Timer3,
     Count,
 };
 

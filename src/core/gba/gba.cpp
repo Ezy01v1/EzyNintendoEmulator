@@ -52,14 +52,22 @@ void Gba::boot_without_bios() {
 void Gba::dispatch_due_events() {
     while (const auto event = scheduler_.pop_due()) {
         switch (event->type) {
-            case EventType::PpuHDrawEnd: bus_.ppu().on_hdraw_end(event->when); break;
+            case EventType::PpuHDrawEnd:
+                bus_.ppu().on_hdraw_end(event->when);
+                if (bus_.ppu().vcount() < kScreenHeight) bus_.on_hblank();  // HBlank DMA: visible lines only
+                break;
             case EventType::PpuHBlankEnd:
                 bus_.ppu().on_hblank_end(event->when);
                 if (bus_.ppu().take_frame_done()) {
                     ++frames_;
                     frame_done_ = true;
+                    bus_.on_vblank();
                 }
                 break;
+            case EventType::Timer0: bus_.timers().on_overflow(0, event->when); break;
+            case EventType::Timer1: bus_.timers().on_overflow(1, event->when); break;
+            case EventType::Timer2: bus_.timers().on_overflow(2, event->when); break;
+            case EventType::Timer3: bus_.timers().on_overflow(3, event->when); break;
             case EventType::Count: break;
         }
     }

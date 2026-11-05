@@ -9,6 +9,7 @@
 
 #include "gba/cpu/cpu_bus.hpp"
 #include "gba/ppu.hpp"
+#include "gba/timer.hpp"
 #include "gba/scheduler.hpp"
 
 namespace ezy::gba {
@@ -38,7 +39,7 @@ inline constexpr std::size_t kSramSize = 64 * 1024;
 //   (GBATEK "GBA Memory Map") and WAITCNT for the cartridge.
 //
 // I/O side effects so far: DISPSTAT/VCOUNT read-only bits (PPU), IF write-1-to-clear,
-// KEYINPUT read-only, HALTCNT. Everything else in I/O is plain storage.
+// KEYINPUT read-only, HALTCNT, timers, DMA. Everything else in I/O is plain storage.
 //
 // Not modelled yet: the ROM prefetch buffer, the non-sequential penalty at 128 KiB ROM
 // boundaries, I/O register side effects (plain storage for now), BIOS read protection,
@@ -57,6 +58,13 @@ public:
 
     [[nodiscard]] Ppu& ppu() { return ppu_; }
     [[nodiscard]] const Ppu& ppu() const { return ppu_; }
+    [[nodiscard]] Timers& timers() { return timers_; }
+    [[nodiscard]] const Timers& timers() const { return timers_; }
+
+    // DMA (0x0B0-0x0DF). Channels with "immediate" timing run as soon as they're enabled;
+    // the system calls these when the PPU enters HBlank on a visible line / VBlank.
+    void on_hblank() { trigger_dma(DmaTiming::HBlank); }
+    void on_vblank() { trigger_dma(DmaTiming::VBlank); }
 
     // Interrupts: IE (0x200), IF (0x202, writing 1 clears a bit), IME (0x208).
     void request_interrupt(std::uint16_t bits);
@@ -95,6 +103,21 @@ public:
     [[nodiscard]] std::uint32_t access_cycles(std::uint32_t addr, std::uint32_t size, Access access) const;
 
 private:
+    enum class DmaTiming : std::uint16_t { Immediate = 0, VBlank = 1, HBlank = 2, Special = 3 };
+
+    // Internal copies latched when a channel is enabled (the registers are write-only and
+    // the game may rewrite them while the channel is armed).
+    struct DmaChannel {
+        std::uint32_t src = 0;
+        std::uint32_t dst = 0;
+        std::uint32_t count = 0;
+    };
+
+    void after_dma_control_write(int index, std::uint16_t old_control);
+    void trigger_dma(DmaTiming timing);
+    void run_dma(int index);
+    [[nodiscard]] std::uint16_t dma_control(int index) const;
+
     void charge(std::uint32_t cycles) {
         if (scheduler_ != nullptr) scheduler_->advance(cycles);
     }
@@ -121,7 +144,10 @@ private:
     Scheduler* scheduler_ = nullptr;
     std::uint16_t keys_pressed_ = 0;
     bool halted_ = false;
-    Ppu ppu_;  // last: it holds views of the memory above
+    std::array<DmaChannel, 4> dma_{};
+    bool dma_running_ = false;
+    Ppu ppu_;  // last: these hold views of the memory above
+    Timers timers_;
 };
 
 // LDR from a misaligned address reads the aligned word and rotates it right by

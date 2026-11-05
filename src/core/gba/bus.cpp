@@ -47,7 +47,8 @@ Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios, Sche
       vram_(kVramSize, 0),
       sram_(kSramSize, 0xFF),  // erased flash/SRAM reads back as 0xFF
       scheduler_(scheduler),
-      ppu_(io_, palette_, vram_, scheduler) {
+      ppu_(io_, palette_, vram_, scheduler),
+      timers_(io_, scheduler) {
     std::copy_n(bios.begin(), std::min(bios.size(), kBiosSize), bios_.begin());
     set_keys(0);
 }
@@ -57,6 +58,10 @@ namespace {
 constexpr std::uint32_t kIoIf = 0x202;
 constexpr std::uint32_t kIoKeyinput = 0x130;
 constexpr std::uint32_t kIoHaltcnt = 0x301;
+constexpr std::uint32_t kIoTimerFirst = 0x100;
+constexpr std::uint32_t kIoTimerLast = 0x10F;
+constexpr std::uint32_t kIoDmaBase = 0x0B0;  // channel i at kIoDmaBase + 12 * i
+constexpr std::uint32_t kDmaStride = 12;
 constexpr std::uint32_t kIoPpuStatusFirst = 0x004;  // DISPSTAT
 constexpr std::uint32_t kIoPpuStatusLast = 0x007;   // VCOUNT high byte
 
@@ -139,6 +144,16 @@ T Bus::read(std::uint32_t addr) const {
     }
     T value = 0;
     std::memcpy(&value, memory.data() + offset, sizeof(T));
+    if (region == kIo && overlaps(offset, sizeof(T), kIoTimerFirst, kIoTimerLast)) {
+        // TMxCNT_L reads the live counter, not the stored reload value.
+        for (std::size_t b = 0; b < sizeof(T); ++b) {
+            const std::size_t at = offset + b;
+            if (at < kIoTimerFirst || at > kIoTimerLast || (at - kIoTimerFirst) % 4 >= 2) continue;
+            const auto counter = timers_.counter(static_cast<int>((at - kIoTimerFirst) / 4));
+            const auto byte = static_cast<std::uint8_t>(counter >> (8 * ((at - kIoTimerFirst) % 2)));
+            value = static_cast<T>((value & ~(static_cast<T>(0xFF) << (8 * b))) | (static_cast<T>(byte) << (8 * b)));
+        }
+    }
     return value;
 }
 
@@ -175,6 +190,7 @@ void Bus::write(std::uint32_t addr, T value) {
     }
     // I/O: plain storage, plus the registers with side effects.
     const std::array<std::uint8_t, 2> old_if = {io_[kIoIf], io_[kIoIf + 1]};
+    const std::array<std::uint16_t, 4> old_dma = {dma_control(0), dma_control(1), dma_control(2), dma_control(3)};
     std::memcpy(memory.data() + offset, &value, sizeof(T));
     for (std::uint32_t b = kIoIf; b <= kIoIf + 1; ++b) {
         // IF: writing 1 to a bit acknowledges (clears) that interrupt.
@@ -183,6 +199,11 @@ void Bus::write(std::uint32_t addr, T value) {
     if (overlaps(offset, sizeof(T), kIoKeyinput, kIoKeyinput + 1)) set_keys(keys_pressed_);  // read-only
     if (overlaps(offset, sizeof(T), kIoPpuStatusFirst, kIoPpuStatusLast)) ppu_.after_io_write();
     if (overlaps(offset, sizeof(T), kIoHaltcnt, kIoHaltcnt)) halted_ = true;
+    if (overlaps(offset, sizeof(T), kIoTimerFirst, kIoTimerLast)) timers_.after_io_write(offset, sizeof(T));
+    for (int i = 0; i < 4; ++i) {
+        const std::uint32_t control = kIoDmaBase + static_cast<std::uint32_t>(i) * kDmaStride + 10;
+        if (overlaps(offset, sizeof(T), control, control + 1)) after_dma_control_write(i, old_dma[static_cast<std::size_t>(i)]);
+    }
 }
 
 std::uint8_t Bus::read8(std::uint32_t addr) const { return read<std::uint8_t>(addr); }
@@ -254,6 +275,106 @@ void Bus::write16(std::uint32_t addr, std::uint16_t value, Access access) {
 void Bus::write32(std::uint32_t addr, std::uint32_t value, Access access) {
     charge(access_cycles(addr, 4, access));
     write(addr, value);
+}
+
+// --- DMA ---
+
+namespace {
+
+constexpr std::uint16_t kDmaRepeat = 1U << 9;
+constexpr std::uint16_t kDmaWord = 1U << 10;
+constexpr std::uint16_t kDmaIrq = 1U << 14;
+constexpr std::uint16_t kDmaEnable = 1U << 15;
+
+// Address masks: DMA0 can only reach internal memory; DMA3 may also write the cartridge.
+constexpr std::array<std::uint32_t, 4> kDmaSrcMask = {0x07FFFFFF, 0x0FFFFFFF, 0x0FFFFFFF, 0x0FFFFFFF};
+constexpr std::array<std::uint32_t, 4> kDmaDstMask = {0x07FFFFFF, 0x07FFFFFF, 0x07FFFFFF, 0x0FFFFFFF};
+
+}  // namespace
+
+std::uint16_t Bus::dma_control(int index) const {
+    const std::uint32_t at = kIoDmaBase + static_cast<std::uint32_t>(index) * kDmaStride + 10;
+    return static_cast<std::uint16_t>(io_[at] | (io_[at + 1] << 8));
+}
+
+void Bus::after_dma_control_write(int index, std::uint16_t old_control) {
+    const std::uint16_t control = dma_control(index);
+    if ((old_control & kDmaEnable) != 0 || (control & kDmaEnable) == 0) return;  // only 0 -> 1 arms it
+
+    // Latch source, destination and count.
+    const std::uint32_t base = kIoDmaBase + static_cast<std::uint32_t>(index) * kDmaStride;
+    const auto u32 = [&](std::uint32_t at) {
+        return static_cast<std::uint32_t>(io_[at] | (io_[at + 1] << 8) | (io_[at + 2] << 16) | (io_[at + 3] << 24));
+    };
+    DmaChannel& ch = dma_[static_cast<std::size_t>(index)];
+    const std::uint32_t align = (control & kDmaWord) != 0 ? ~3U : ~1U;
+    ch.src = u32(base) & kDmaSrcMask[static_cast<std::size_t>(index)] & align;
+    ch.dst = u32(base + 4) & kDmaDstMask[static_cast<std::size_t>(index)] & align;
+    const std::uint32_t count = io_[base + 8] | (io_[base + 9] << 8);
+    const std::uint32_t max = index == 3 ? 0x10000 : 0x4000;
+    ch.count = (count & (max - 1)) == 0 ? max : (count & (max - 1));
+
+    if (static_cast<DmaTiming>((control >> 12) & 3) == DmaTiming::Immediate) run_dma(index);
+}
+
+// Channels with the given timing run in priority order (DMA0 first).
+void Bus::trigger_dma(DmaTiming timing) {
+    for (int i = 0; i < 4; ++i) {
+        const std::uint16_t control = dma_control(i);
+        if ((control & kDmaEnable) != 0 && static_cast<DmaTiming>((control >> 12) & 3) == timing) run_dma(i);
+    }
+}
+
+// Runs a whole transfer at once (the CPU is stalled during it anyway), charging every
+// access plus 2 cycles of start-up. Special timing (sound FIFO, video capture) isn't
+// emulated yet, so those channels never fire.
+void Bus::run_dma(int index) {
+    if (dma_running_) return;  // a DMA writing DMA registers doesn't start another one
+    dma_running_ = true;
+    DmaChannel& ch = dma_[static_cast<std::size_t>(index)];
+    const std::uint16_t control = dma_control(index);
+    const bool word = (control & kDmaWord) != 0;
+    const std::uint32_t unit = word ? 4 : 2;
+    const auto step = [unit](std::uint32_t mode) -> std::int32_t {
+        switch (mode) {
+            case 0: case 3: return static_cast<std::int32_t>(unit);   // increment (3: + reload)
+            case 1: return -static_cast<std::int32_t>(unit);          // decrement
+            default: return 0;                                         // fixed
+        }
+    };
+    const std::int32_t dst_step = step((control >> 5) & 3);
+    const std::int32_t src_step = step((control >> 7) & 3);
+
+    charge(2);
+    Access access = static_cast<Access>(kDma | kNonseq);
+    for (std::uint32_t i = 0; i < ch.count; ++i) {
+        if (word) {
+            write32(ch.dst, read32(ch.src, access), access);
+        } else {
+            write16(ch.dst, read16(ch.src, access), access);
+        }
+        ch.src = static_cast<std::uint32_t>(static_cast<std::int32_t>(ch.src) + src_step);
+        ch.dst = static_cast<std::uint32_t>(static_cast<std::int32_t>(ch.dst) + dst_step);
+        access = static_cast<Access>(kDma | kSeq);
+    }
+
+    if ((control & kDmaIrq) != 0) request_interrupt(static_cast<std::uint16_t>(1U << (8 + index)));
+    const auto timing = static_cast<DmaTiming>((control >> 12) & 3);
+    const std::uint32_t base = kIoDmaBase + static_cast<std::uint32_t>(index) * kDmaStride;
+    if ((control & kDmaRepeat) != 0 && timing != DmaTiming::Immediate) {
+        // Repeat: stay armed with a fresh count, and reload the destination if asked to.
+        const std::uint32_t count = io_[base + 8] | (io_[base + 9] << 8);
+        const std::uint32_t max = index == 3 ? 0x10000 : 0x4000;
+        ch.count = (count & (max - 1)) == 0 ? max : (count & (max - 1));
+        if (((control >> 5) & 3) == 3) {
+            const std::uint32_t dad = static_cast<std::uint32_t>(io_[base + 4] | (io_[base + 5] << 8) |
+                                                                 (io_[base + 6] << 16) | (io_[base + 7] << 24));
+            ch.dst = dad & kDmaDstMask[static_cast<std::size_t>(index)] & (word ? ~3U : ~1U);
+        }
+    } else {
+        io_[base + 11] = static_cast<std::uint8_t>(io_[base + 11] & ~(kDmaEnable >> 8));  // done: clear enable
+    }
+    dma_running_ = false;
 }
 
 }  // namespace ezy::gba
