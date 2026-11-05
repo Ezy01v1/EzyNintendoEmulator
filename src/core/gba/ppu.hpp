@@ -29,16 +29,23 @@ inline constexpr std::uint16_t kVCount = 1U << 2;
 // HDraw ends, so register changes made during HBlank apply from the next line on, as on
 // hardware.
 //
-// The PPU doesn't own memory: it works on views of the bus's I/O registers, palette and
-// VRAM. It keeps DISPSTAT's read-only bits and VCOUNT up to date in the I/O storage and
+// The PPU doesn't own memory: it works on views of the bus's I/O registers, palette,
+// VRAM and OAM. It keeps DISPSTAT's read-only bits and VCOUNT up to date in the I/O storage and
 // raises interrupts by setting bits in IF there.
 //
-// Implemented: bitmap modes 3, 4 and 5, forced blank, backdrop. Tile modes 0-2, sprites,
-// windows and blending come next; for now those modes show the backdrop.
+// Each line is drawn into one buffer per layer (BG0-3, OBJ), then composed by priority:
+// lower priority value wins, OBJ beats a BG of the same priority, and among BGs the lower
+// number wins. Where nothing is opaque, the backdrop (palette entry 0) shows.
+//
+// Implemented: tile modes 0-2 (text and affine backgrounds), bitmap modes 3-5, sprites
+// (regular and affine, 16/256 colors, 1D/2D mapping), forced blank, backdrop.
+// Not yet: windows, alpha blending and brightness (semi-transparent sprites draw as
+// normal ones, OBJ-window sprites aren't drawn), mosaic, affine transforms of the bitmap
+// modes, and the per-line sprite cycle budget.
 class Ppu {
 public:
     Ppu(std::span<std::uint8_t> io, std::span<const std::uint8_t> palette, std::span<const std::uint8_t> vram,
-        Scheduler* scheduler);
+        std::span<const std::uint8_t> oam, Scheduler* scheduler);
 
     void start();  // schedule the first HDraw end (line 0 starts now)
     void on_hdraw_end(std::uint64_t when);
@@ -47,6 +54,11 @@ public:
     // The bus calls this after any I/O write that touched DISPSTAT/VCOUNT, to put the
     // read-only bits back (and re-check the VCount match against a new LYC).
     void after_io_write();
+
+    // The bus calls this after a write to BGxX (`y` false) or BGxY (`y` true), bg = 2 or 3:
+    // the internal reference point is reloaded from the register right away. Otherwise it
+    // only reloads at VBlank, and each drawn line adds PB/PD to it.
+    void reload_affine_reference(int bg, bool y);
 
     [[nodiscard]] int vcount() const { return vcount_; }
     [[nodiscard]] bool in_vblank() const { return vblank_; }
@@ -66,10 +78,26 @@ private:
     void check_vcount_match();
     void render_line(int y);
 
+    // One line of one layer: BGR555, or kTransparent where nothing is drawn.
+    using LineBuffer = std::array<std::uint16_t, kScreenWidth>;
+    static constexpr std::uint16_t kTransparent = 0x8000;
+
+    void render_text_bg(int bg, int y, LineBuffer& out) const;
+    void render_affine_bg(int bg, LineBuffer& out) const;
+    void render_bitmap_bg(int mode, int y, LineBuffer& out) const;
+    // Fills `color` and `priority` for the OBJ layer.
+    void render_sprites(int y, LineBuffer& color, std::array<std::uint8_t, kScreenWidth>& priority) const;
+    void advance_affine_references();
+
     std::span<std::uint8_t> io_;
     std::span<const std::uint8_t> palette_;
     std::span<const std::uint8_t> vram_;
+    std::span<const std::uint8_t> oam_;
     Scheduler* scheduler_;
+
+    // Internal affine reference points of BG2 and BG3 (signed 19.8 fixed point).
+    std::array<std::int32_t, 2> affine_x_{};
+    std::array<std::int32_t, 2> affine_y_{};
 
     int vcount_ = 0;
     bool vblank_ = false;

@@ -38,8 +38,9 @@ inline constexpr std::size_t kSramSize = 64 * 1024;
 //   charges the access's cost in cycles to the Scheduler, using the waitstate table
 //   (GBATEK "GBA Memory Map") and WAITCNT for the cartridge.
 //
-// I/O side effects so far: DISPSTAT/VCOUNT read-only bits (PPU), IF write-1-to-clear,
-// KEYINPUT read-only, HALTCNT, timers, DMA. Everything else in I/O is plain storage.
+// I/O side effects so far: DISPSTAT/VCOUNT read-only bits (PPU), BG2/BG3 X/Y reloading
+// the PPU's affine reference points, IF write-1-to-clear, KEYINPUT read-only, HALTCNT,
+// timers, DMA. Everything else in I/O is plain storage.
 //
 // Not modelled yet: the ROM prefetch buffer, the non-sequential penalty at 128 KiB ROM
 // boundaries, I/O register side effects (plain storage for now), BIOS read protection,

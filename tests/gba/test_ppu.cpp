@@ -153,3 +153,280 @@ TEST_CASE("PPU forced blank is white and BG2 off shows the backdrop") {
     f.run_to(2ULL * kCyclesPerLine);
     CHECK(f.pixel(0, 1) == 0x0421);
 }
+
+// --- Tile modes and sprites (exercise 3.7) ---
+
+namespace {
+
+constexpr std::uint32_t kVram = 0x06000000;
+constexpr std::uint32_t kPal = 0x05000000;
+constexpr std::uint32_t kObjPal = 0x05000200;
+constexpr std::uint32_t kObjVram = 0x06010000;
+constexpr std::uint32_t kOam = 0x07000000;
+
+// Fills a 4bpp tile (32 bytes) with one color index.
+void fill_tile4(Fixture& f, std::uint32_t at, std::uint32_t index) {
+    const auto half = static_cast<std::uint16_t>((index | (index << 4)) * 0x0101);
+    for (std::uint32_t i = 0; i < 32; i += 2) f.bus.write16(at + i, half);
+}
+
+// Fills an 8bpp tile (64 bytes) with one color index.
+void fill_tile8(Fixture& f, std::uint32_t at, std::uint32_t index) {
+    for (std::uint32_t i = 0; i < 64; i += 2) f.bus.write16(at + i, static_cast<std::uint16_t>(index * 0x0101));
+}
+
+// Sets the color index of one pixel of a 4bpp tile.
+void set_pixel4(Fixture& f, std::uint32_t tile_at, std::uint32_t x, std::uint32_t y, std::uint32_t index) {
+    const std::uint32_t at = tile_at + y * 4 + x / 2;
+    const std::uint32_t shift = (at & 1) * 8 + (x & 1) * 4;
+    const std::uint32_t half = (f.bus.read16(at & ~1U) & ~(0xFU << shift)) | (index << shift);
+    f.bus.write16(at & ~1U, static_cast<std::uint16_t>(half));
+}
+
+void set_sprite(Fixture& f, std::uint32_t i, std::uint16_t a0, std::uint16_t a1, std::uint16_t a2) {
+    f.bus.write16(kOam + i * 8, a0);
+    f.bus.write16(kOam + i * 8 + 2, a1);
+    f.bus.write16(kOam + i * 8 + 4, a2);
+}
+
+// Zeroed OAM means 128 visible 8x8 sprites at (0,0): hide them all first.
+void hide_all_sprites(Fixture& f) {
+    for (std::uint32_t i = 0; i < 128; ++i) set_sprite(f, i, 0x0200, 0, 0);
+}
+
+// Runs until line `y` (counted from the start, so it may be in a later frame) is drawn.
+void run_line(Fixture& f, int y) { f.run_to(static_cast<std::uint64_t>(y + 1) * kCyclesPerLine); }
+
+}  // namespace
+
+TEST_CASE("PPU mode 0: a text BG draws 4bpp tiles from the map with its palette bank") {
+    Fixture f;
+    f.bus.write16(kPal + (2 * 16 + 5) * 2, 0x001F);               // bank 2, color 5 = red
+    fill_tile4(f, kVram + 1 * 32, 5);                              // char block 0, tile 1
+    f.bus.write16(kVram + 0x800 * 4 + (1 * 32 + 2) * 2, 0x2001);  // map (2,1): tile 1, bank 2
+    f.bus.write16(0x04000008, 0x0400);                             // BG0CNT: screen block 4, 4bpp
+    f.bus.write16(0x04000000, 0x0100);                             // mode 0, BG0 on
+    run_line(f, 8);
+    CHECK(f.pixel(15, 8) == 0x0000);  // tile 0 is empty: the backdrop shows
+    CHECK(f.pixel(16, 8) == 0x001F);
+    CHECK(f.pixel(23, 8) == 0x001F);
+    CHECK(f.pixel(24, 8) == 0x0000);
+}
+
+TEST_CASE("PPU text BG: scrolling and flipped tiles") {
+    Fixture f;
+    f.bus.write16(kPal + 1 * 2, 0x7FFF);
+    set_pixel4(f, kVram + 32, 0, 0, 1);        // tile 1: only its top-left pixel is set
+    f.bus.write16(kVram + 0x800 * 4, 0x0C01);  // map (0,0): tile 1, H and V flip
+    f.bus.write16(0x04000008, 0x0400);
+    f.bus.write16(0x04000010, 3);  // HOFS
+    f.bus.write16(0x04000012, 2);  // VOFS
+    f.bus.write16(0x04000000, 0x0100);
+    // Flipped, the pixel is at map (7,7); scrolled, on screen at (4,5).
+    run_line(f, 5);
+    CHECK(f.pixel(4, 5) == 0x7FFF);
+    CHECK(f.pixel(3, 5) == 0x0000);
+    CHECK(f.pixel(5, 5) == 0x0000);
+}
+
+TEST_CASE("PPU text BG 512x256: the right half comes from the next screen block") {
+    Fixture f;
+    f.bus.write16(kPal + 1 * 2, 0x03E0);
+    fill_tile4(f, kVram + 32, 1);
+    f.bus.write16(kVram + 0x800 * 5, 0x0001);  // block 5 holds map x 256..511
+    f.bus.write16(0x04000008, 0x4400);         // size 1 (512x256), screen block 4
+    f.bus.write16(0x04000010, 256);
+    f.bus.write16(0x04000000, 0x0100);
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == 0x03E0);
+    CHECK(f.pixel(8, 0) == 0x0000);
+}
+
+TEST_CASE("PPU text BG in 256 colors uses 64-byte tiles and the whole palette") {
+    Fixture f;
+    f.bus.write16(kPal + 200 * 2, 0x1234);
+    fill_tile8(f, kVram + 0x4000 + 1 * 64, 200);
+    f.bus.write16(kVram + 0x800 * 4, 0x0001);
+    f.bus.write16(0x04000008, 0x0484);  // 256 colors, char block 1, screen block 4
+    f.bus.write16(0x04000000, 0x0100);
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == 0x1234);
+}
+
+TEST_CASE("PPU BG priority: lower value in front, then the lower BG number") {
+    Fixture f;
+    for (std::uint32_t i = 1; i <= 3; ++i) {
+        f.bus.write16(kPal + i * 2, static_cast<std::uint16_t>(i));
+        fill_tile4(f, kVram + i * 32, i);
+        f.bus.write16(kVram + 0x800 * (9 + i), static_cast<std::uint16_t>(i));  // BG(i-1) map: tile i
+    }
+    f.bus.write16(0x04000008, 0x0A01);  // BG0: block 10, priority 1
+    f.bus.write16(0x0400000A, 0x0B01);  // BG1: block 11, priority 1
+    f.bus.write16(0x0400000C, 0x0C02);  // BG2: block 12, priority 2
+    f.bus.write16(0x04000000, 0x0700);
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == 1);  // BG0 beats BG1 at the same priority, both beat BG2
+    f.bus.write16(0x0400000C, 0x0C00);
+    run_line(f, 1);
+    CHECK(f.pixel(0, 1) == 3);  // BG2 at priority 0
+    f.bus.write16(0x04000000, 0x0200);
+    run_line(f, 2);
+    CHECK(f.pixel(0, 2) == 2);  // only BG1 enabled
+}
+
+TEST_CASE("PPU mode 1: BG2 is affine, sampled from the reference point stepping by PA/PC") {
+    Fixture f;
+    f.bus.write16(kPal + 7 * 2, 0x7C00);
+    fill_tile8(f, kVram + 1 * 64, 7);              // affine tiles are always 8bpp
+    f.bus.write16(kVram + 0x800 * 8 + 2, 0x0100);  // 1-byte entries: map (3,0) = tile 1
+    f.bus.write16(0x0400000C, 0x0800);             // BG2CNT: 128x128, screen block 8
+    f.bus.write16(0x04000020, 0x0080);             // PA = 0.5: each texel spans two pixels
+    f.bus.write16(0x04000026, 0x0100);             // PD = 1
+    f.bus.write16(0x04000000, 0x0401);             // mode 1, BG2 on
+    run_line(f, 0);
+    CHECK(f.pixel(47, 0) == 0x0000);
+    CHECK(f.pixel(48, 0) == 0x7C00);  // texels 24..31 land on x 48..63
+    CHECK(f.pixel(63, 0) == 0x7C00);
+    CHECK(f.pixel(64, 0) == 0x0000);
+}
+
+TEST_CASE("PPU affine BG: wraparound, per-line PB/PD steps and BGxY writes") {
+    Fixture f;
+    f.bus.write16(kPal + 7 * 2, 0x7C00);
+    fill_tile8(f, kVram + 1 * 64, 7);
+    f.bus.write16(kVram + 0x800 * 8 + 16, 0x0001);  // map (0,1) = tile 1: texel rows 8..15
+    f.bus.write16(0x0400000C, 0x2800);               // wrap on
+    f.bus.write16(0x04000020, 0x0100);               // PA = 1
+    f.bus.write16(0x04000026, 0x0100);               // PD = 1
+    f.bus.write16(0x04000000, 0x0401);
+    run_line(f, 7);
+    CHECK(f.pixel(0, 7) == 0x0000);  // texel row 7
+    run_line(f, 8);
+    CHECK(f.pixel(0, 8) == 0x7C00);    // texel row 8
+    CHECK(f.pixel(128, 8) == 0x7C00);  // x wrapped around the 128-pixel map
+    CHECK(f.pixel(8, 8) == 0x0000);
+    // A BG2Y write reloads the internal reference at once.
+    f.bus.write32(0x0400002C, static_cast<std::uint32_t>(-256));  // y = -1, wraps to row 127
+    run_line(f, 9);
+    CHECK(f.pixel(0, 9) == 0x0000);
+    f.bus.write32(0x0400002C, 8 * 256);
+    run_line(f, 10);
+    CHECK(f.pixel(0, 10) == 0x7C00);
+}
+
+TEST_CASE("PPU sprites: a regular 4bpp sprite with its palette bank, and the hidden flag") {
+    Fixture f;
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + (3 * 16 + 1) * 2, 0x03FF);  // OBJ bank 3, color 1
+    fill_tile4(f, kObjVram + 5 * 32, 1);
+    set_sprite(f, 0, 10, 20, 0x3000 | 5);  // 8x8 at (20,10), tile 5, bank 3
+    f.bus.write16(0x04000000, 0x1000);     // mode 0, OBJ on
+    run_line(f, 10);
+    CHECK(f.pixel(19, 10) == 0x0000);
+    CHECK(f.pixel(20, 10) == 0x03FF);
+    CHECK(f.pixel(27, 10) == 0x03FF);
+    CHECK(f.pixel(28, 10) == 0x0000);
+    set_sprite(f, 0, 0x0200 | 10, 20, 0x3000 | 5);
+    run_line(f, 11);
+    CHECK(f.pixel(20, 11) == 0x0000);
+}
+
+TEST_CASE("PPU sprites: X is 9-bit signed and Y wraps at 256") {
+    Fixture f;
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + 1 * 2, 0x0011);
+    fill_tile4(f, kObjVram, 1);
+    set_sprite(f, 0, 252, 0x1FC, 0);  // y = 252: rows 4..7 on lines 0..3; x = -4
+    f.bus.write16(0x04000000, 0x1000);
+    run_line(f, 3);
+    CHECK(f.pixel(0, 3) == 0x0011);
+    CHECK(f.pixel(3, 3) == 0x0011);
+    CHECK(f.pixel(4, 3) == 0x0000);
+    run_line(f, 4);
+    CHECK(f.pixel(0, 4) == 0x0000);
+}
+
+TEST_CASE("PPU sprites: 1D vs 2D tile mapping, and vertical flip") {
+    Fixture f;
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + 1 * 2, 0x0001);
+    f.bus.write16(kObjPal + 2 * 2, 0x0002);
+    fill_tile4(f, kObjVram + 2 * 32, 1);   // 1D: a 16x16's second tile row starts at tile 2
+    fill_tile4(f, kObjVram + 32 * 32, 2);  // 2D: ... or 32 tiles later
+    set_sprite(f, 0, 0x0000, 0x4000, 0);   // square, size 1 = 16x16, at (0,0)
+    f.bus.write16(0x04000000, 0x1040);     // 1D
+    run_line(f, 8);
+    CHECK(f.pixel(0, 8) == 0x0001);
+    f.bus.write16(0x04000000, 0x1000);  // 2D
+    run_line(f, 9);
+    CHECK(f.pixel(0, 9) == 0x0002);
+    set_sprite(f, 0, 0x0000, 0x4000 | 0x2000, 0);  // V flip
+    run_line(f, 10);  // line 10 shows texture row 5: first tile row, empty
+    CHECK(f.pixel(0, 10) == 0x0000);
+    run_line(f, kLinesPerFrame + 2);  // next frame, line 2 shows texture row 13
+    CHECK(f.pixel(0, 2) == 0x0002);
+}
+
+TEST_CASE("PPU sprites: priority against BGs and against each other") {
+    Fixture f;
+    hide_all_sprites(f);
+    f.bus.write16(kPal + 1 * 2, 0x0BB0);  // BG0
+    f.bus.write16(kObjPal + 1 * 2, 0x0001);
+    f.bus.write16(kObjPal + 2 * 2, 0x0002);
+    fill_tile4(f, kVram + 32, 1);
+    f.bus.write16(kVram + 0x800 * 4, 0x0001);  // BG0 covers x 0..7 of the first tile row
+    f.bus.write16(0x04000008, 0x0401);         // BG0 priority 1
+    fill_tile4(f, kObjVram + 1 * 32, 1);
+    fill_tile4(f, kObjVram + 2 * 32, 2);
+    set_sprite(f, 0, 0, 0, (2U << 10) | 1);  // A: x 0..7, priority 2
+    set_sprite(f, 1, 0, 4, (1U << 10) | 2);  // B: x 4..11, priority 1
+    f.bus.write16(0x04000000, 0x1100);
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == 0x0BB0);  // A is behind BG0
+    CHECK(f.pixel(4, 0) == 0x0002);  // B beats A, and wins the tie with BG0
+    CHECK(f.pixel(8, 0) == 0x0002);
+    set_sprite(f, 0, 0, 0, (1U << 10) | 1);  // A to priority 1 too
+    run_line(f, 1);
+    CHECK(f.pixel(4, 1) == 0x0001);  // same priority: the lower OAM index wins
+}
+
+TEST_CASE("PPU sprites: an affine double-size sprite fills a 2x box around its centre") {
+    Fixture f;
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + 1 * 2, 0x0055);
+    fill_tile4(f, kObjVram, 1);
+    set_sprite(f, 0, 0x0300, 0, 0);  // affine + double size: an 8x8 in a 16x16 box, group 0
+    // Group 0 is the 4th halfword of OAM entries 0-3: identity.
+    f.bus.write16(kOam + 6, 0x0100);
+    f.bus.write16(kOam + 14, 0);
+    f.bus.write16(kOam + 22, 0);
+    f.bus.write16(kOam + 30, 0x0100);
+    f.bus.write16(0x04000000, 0x1000);
+    run_line(f, 3);
+    CHECK(f.pixel(3, 3) == 0x0000);  // inside the box, outside the texture
+    run_line(f, 4);
+    CHECK(f.pixel(3, 4) == 0x0000);
+    CHECK(f.pixel(4, 4) == 0x0055);
+    CHECK(f.pixel(11, 4) == 0x0055);
+    CHECK(f.pixel(12, 4) == 0x0000);
+    f.bus.write16(kOam + 6, 0x0200);  // PA = 2: the 8 texels squeeze into 4 pixels
+    run_line(f, 5);
+    CHECK(f.pixel(5, 5) == 0x0000);
+    CHECK(f.pixel(6, 5) == 0x0055);
+    CHECK(f.pixel(9, 5) == 0x0055);
+    CHECK(f.pixel(10, 5) == 0x0000);
+}
+
+TEST_CASE("PPU sprites in bitmap modes can't use tiles below 512") {
+    Fixture f;
+    hide_all_sprites(f);
+    f.bus.write16(kObjPal + 1 * 2, 0x0077);
+    fill_tile4(f, kObjVram, 1);
+    fill_tile4(f, kObjVram + 512 * 32, 1);
+    set_sprite(f, 0, 0, 0, 0);
+    set_sprite(f, 1, 0, 8, 512);
+    f.bus.write16(0x04000000, 0x1003);  // mode 3, BG2 off, OBJ on
+    run_line(f, 0);
+    CHECK(f.pixel(0, 0) == 0x0000);
+    CHECK(f.pixel(8, 0) == 0x0077);
+}

@@ -47,7 +47,7 @@ Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios, Sche
       vram_(kVramSize, 0),
       sram_(kSramSize, 0xFF),  // erased flash/SRAM reads back as 0xFF
       scheduler_(scheduler),
-      ppu_(io_, palette_, vram_, scheduler),
+      ppu_(io_, palette_, vram_, oam_, scheduler),
       timers_(io_, scheduler) {
     std::copy_n(bios.begin(), std::min(bios.size(), kBiosSize), bios_.begin());
     set_keys(0);
@@ -64,6 +64,8 @@ constexpr std::uint32_t kIoDmaBase = 0x0B0;  // channel i at kIoDmaBase + 12 * i
 constexpr std::uint32_t kDmaStride = 12;
 constexpr std::uint32_t kIoPpuStatusFirst = 0x004;  // DISPSTAT
 constexpr std::uint32_t kIoPpuStatusLast = 0x007;   // VCOUNT high byte
+constexpr std::uint32_t kIoBg2Ref = 0x028;  // BG2X, BG2Y (BG3X/Y follow 0x10 later)
+constexpr std::uint32_t kIoBg3Ref = 0x038;
 
 constexpr bool overlaps(std::size_t offset, std::size_t size, std::uint32_t first, std::uint32_t last) {
     return offset <= last && offset + size > first;
@@ -198,6 +200,11 @@ void Bus::write(std::uint32_t addr, T value) {
     }
     if (overlaps(offset, sizeof(T), kIoKeyinput, kIoKeyinput + 1)) set_keys(keys_pressed_);  // read-only
     if (overlaps(offset, sizeof(T), kIoPpuStatusFirst, kIoPpuStatusLast)) ppu_.after_io_write();
+    for (std::uint32_t r = 0; r < 4; ++r) {
+        // Writing BGxX/BGxY reloads that internal reference point at once.
+        const std::uint32_t at = (r < 2 ? kIoBg2Ref : kIoBg3Ref) + (r % 2) * 4;
+        if (overlaps(offset, sizeof(T), at, at + 3)) ppu_.reload_affine_reference(2 + static_cast<int>(r / 2), r % 2 == 1);
+    }
     if (overlaps(offset, sizeof(T), kIoHaltcnt, kIoHaltcnt)) halted_ = true;
     if (overlaps(offset, sizeof(T), kIoTimerFirst, kIoTimerLast)) timers_.after_io_write(offset, sizeof(T));
     for (int i = 0; i < 4; ++i) {
