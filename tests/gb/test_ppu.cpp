@@ -466,3 +466,56 @@ TEST_CASE("FIFO sprites: on CGB the lower OAM index wins an overlap") {
     mode3_dots(ppu);
     CHECK(line1(ppu)[6] == 0x1234);  // OAM 0 wins although its X is larger
 }
+
+TEST_CASE("LY: line 153 reads 153 only briefly, then 0") {
+    Ppu ppu;
+    while (ppu.read_register(0xFF44) != 153) ppu.tick(1);
+    int dots_at_153 = 0;
+    while (ppu.read_register(0xFF44) == 153) {
+        ppu.tick(1);
+        ++dots_at_153;
+    }
+    CHECK(dots_at_153 == 4);
+    CHECK(ppu.read_register(0xFF44) == 0);
+    CHECK(ppu.mode() == 1);  // still VBlank
+}
+
+TEST_CASE("LCD on: the first line starts in mode 0, without an OAM scan") {
+    Ppu ppu;
+    ppu.write_register(0xFF40, 0x00);
+    ppu.write_register(0xFF40, 0x91);
+    CHECK(ppu.mode() == 0);
+    ppu.tick(4);
+    CHECK(ppu.mode() == 0);
+    CHECK(ppu.oam_accessible());
+    while (ppu.mode() == 0) ppu.tick(1);
+    CHECK(ppu.mode() == 3);
+}
+
+TEST_CASE("LCD off and on mid-frame restarts at line 0 with nothing left over") {
+    Ppu ppu;
+    for (int i = 0; i < 456 * 5 + 120; ++i) ppu.tick(1);  // in the middle of mode 3
+    ppu.write_register(0xFF40, 0x00);
+    CHECK(ppu.read_register(0xFF44) == 0);
+    ppu.write_register(0xFF40, 0x91);
+    while (ppu.mode() != 0 || ppu.read_register(0xFF44) == 0) ppu.tick(1);  // finish line 0
+    CHECK(ppu.read_register(0xFF44) == 1);
+}
+
+TEST_CASE("STAT LY=LYC bit is kept while the LCD is off") {
+    Ppu ppu;
+    ppu.write_register(0xFF45, 0);       // LYC = 0 = LY
+    CHECK((ppu.read_register(0xFF41) & 0x04) != 0);
+    ppu.write_register(0xFF40, 0x00);
+    ppu.write_register(0xFF45, 5);       // the comparison doesn't run while off
+    CHECK((ppu.read_register(0xFF41) & 0x04) != 0);
+}
+
+TEST_CASE("entering VBlank also fires the mode 2 STAT source") {
+    Ppu ppu;
+    ppu.write_register(0xFF41, 0x20);  // mode 2 interrupt only
+    while (ppu.ly() != 143) ppu.tick(1);
+    ppu.take_interrupts();
+    while (ppu.ly() != 144) ppu.tick(1);
+    CHECK((ppu.take_interrupts() & interrupt::kStat) != 0);
+}

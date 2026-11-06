@@ -79,6 +79,7 @@ public:
         ar(vram_), ar(vram_bank_), ar(oam_), ar(frame_);
         ar(cgb_mode_), ar(opri_), ar(bg_palettes_), ar(obj_palettes_), ar(bcps_), ar(ocps_);
         ar(lcdc_), ar(stat_), ar(scy_), ar(scx_), ar(ly_), ar(lyc_), ar(bgp_), ar(obp0_), ar(obp1_), ar(wy_), ar(wx_);
+        ar(ly_reg_), ar(lyc_flag_), ar(first_line_);
         ar(dot_), ar(mode_), ar(stat_line_), ar(window_y_hit_), ar(window_line_);
         ar(interrupts_), ar(frame_ready_), ar(hblank_started_);
         ar(line_sprites_), ar(sprite_count_), ar(bg_fifo_), ar(obj_fifo_);
@@ -138,7 +139,10 @@ private:
     std::uint8_t lcdc_ = 0x91;
     std::uint8_t stat_ = 0x00;  // only the interrupt-enable bits 3-6 are stored
     std::uint8_t scy_ = 0, scx_ = 0;
-    std::uint8_t ly_ = 0, lyc_ = 0;
+    std::uint8_t ly_ = 0, lyc_ = 0;  // ly_ is the line being drawn
+    std::uint8_t ly_reg_ = 0;       // what the LY register reads (changes a little early)
+    bool lyc_flag_ = true;          // STAT bit 2, updated only while the LCD is on
+    bool first_line_ = false;       // line 0 right after the LCD was switched on
     std::uint8_t bgp_ = 0xFC, obp0_ = 0xFF, obp1_ = 0xFF;
     std::uint8_t wy_ = 0, wx_ = 0;
 

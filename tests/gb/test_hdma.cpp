@@ -81,7 +81,8 @@ TEST_CASE("HDMA with the LCD off waits for the LCD") {
     CHECK(bus.peek(0x800F) == 0x0F);
     CHECK(bus.peek(0x8010) == 0x00);
     CHECK(bus.peek(0xFF55) == 0x00);
-    bus.poke(0xFF40, 0x91);
+    bus.poke(0xFF40, 0x91);  // line 0 starts in mode 0; wait for the first real HBlank
+    while (bus.ppu().mode() != 3) bus.tick();
     while (bus.ppu().mode() != 0) bus.tick();
     CHECK(bus.peek(0x801F) == 0x1F);
     CHECK(bus.peek(0xFF55) == 0xFF);

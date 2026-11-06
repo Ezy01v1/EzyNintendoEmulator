@@ -20,10 +20,20 @@ void Ppu::tick(int dots) {
     for (int i = 0; i < dots; ++i) step_dot();
 }
 
+// The LY register runs a few dots ahead of the line itself: it shows the next line number
+// 3 dots before the line ends (the same 3-dot offset as the mode 3 calibration in
+// ppu_draw.cpp). Line 153 is special: LY reads 153 for 4 dots, then 0 for the rest of it.
+constexpr int kLyEarlyDots = 3;
+constexpr int kFirstLineStartDot = 0;   // line 0 after LCD on starts this far in
+constexpr int kFirstLineDrawDelay = 0;   // ...and its mode 3 starts this much later
+
 void Ppu::step_dot() {
     ++dot_;
+    if (dot_ == kDotsPerLine - kLyEarlyDots && ly_ != kLinesPerFrame - 1) ly_reg_ = static_cast<std::uint8_t>(ly_ + 1);
+    if (ly_ == kLinesPerFrame - 1 && dot_ == 4 - kLyEarlyDots) ly_reg_ = 0;
     if (dot_ == kDotsPerLine) {
         dot_ = 0;
+        first_line_ = false;
         ++ly_;
         if (ly_ == kLcdHeight) {
             interrupts_ |= interrupt::kVBlank;
@@ -39,8 +49,10 @@ void Ppu::step_dot() {
     if (ly_ >= kLcdHeight) {
         new_mode = 1;
     } else if (dot_ < kOamScanDots) {
-        new_mode = 2;
-    } else if (mode_ == 2) {
+        new_mode = first_line_ ? 0 : 2;  // right after LCD on there's no OAM scan
+    } else if (first_line_ && mode_ == 0 && dot_ < kOamScanDots + kFirstLineDrawDelay) {
+        new_mode = 0;
+    } else if (mode_ == 2 || (first_line_ && dot_ == kOamScanDots + kFirstLineDrawDelay)) {
         new_mode = 3;
         begin_mode3();
     } else if (mode_ == 3 && draw_dot()) {
@@ -48,17 +60,18 @@ void Ppu::step_dot() {
         hblank_started_ = true;
         if (window_drawn_) ++window_line_;
     }
-    if (new_mode != mode_) {
-        mode_ = new_mode;
-        update_stat_line();
-    } else if (dot_ == 0) {
-        update_stat_line();  // LY changed: LY=LYC may have changed
-    }
+    mode_ = new_mode;
+    lyc_flag_ = ly_reg_ == lyc_;
+    update_stat_line();
 }
 
+// The STAT interrupt line is the OR of the enabled sources; only its rising edge requests
+// an interrupt. On the first dot of line 144 the mode 2 source fires too (the hardware
+// starts an OAM scan there before switching to VBlank).
 void Ppu::update_stat_line() {
-    const bool line = ((stat_ & 0x40) && ly_ == lyc_) || ((stat_ & 0x08) && mode_ == 0) ||
-                      ((stat_ & 0x10) && mode_ == 1) || ((stat_ & 0x20) && mode_ == 2);
+    const bool vblank_oam = ly_ == kLcdHeight && dot_ == 0;
+    const bool line = ((stat_ & 0x40) && lyc_flag_) || ((stat_ & 0x08) && mode_ == 0) ||
+                      ((stat_ & 0x10) && mode_ == 1) || ((stat_ & 0x20) && (mode_ == 2 || vblank_oam));
     if (line && !stat_line_) interrupts_ |= interrupt::kStat;
     stat_line_ = line;
 }
@@ -68,12 +81,12 @@ std::uint8_t Ppu::read_register(std::uint16_t addr) const {
         case 0xFF40: return lcdc_;
         case 0xFF41: {
             const int mode = lcd_on() ? mode_ : 0;
-            const int coincidence = ly_ == lyc_ ? 0x04 : 0;
+            const int coincidence = lyc_flag_ ? 0x04 : 0;  // kept while the LCD is off
             return static_cast<std::uint8_t>(0x80 | stat_ | coincidence | mode);
         }
         case 0xFF42: return scy_;
         case 0xFF43: return scx_;
-        case 0xFF44: return ly_;
+        case 0xFF44: return ly_reg_;
         case 0xFF45: return lyc_;
         case 0xFF47: return bgp_;
         case 0xFF48: return obp0_;
@@ -96,13 +109,21 @@ void Ppu::write_register(std::uint16_t addr, std::uint8_t value) {
             lcdc_ = value;
             if (was_on && !lcd_on()) {  // turning the LCD off resets the line state
                 ly_ = 0;
+                ly_reg_ = 0;
                 dot_ = 0;
                 mode_ = 0;
                 window_y_hit_ = false;
                 window_line_ = 0;
                 frame_.fill(blank_color());
             } else if (!was_on && lcd_on()) {
-                mode_ = 2;
+                // Line 0 starts over, in mode 0 (no OAM scan), and LY=LYC is checked at once.
+                // On hardware this line is also shorter and draws a little late (Mooneye
+                // lcdon_timing); those offsets aren't modelled yet (the two knobs below stay
+                // at 0), see the known failures in roms/README.md.
+                dot_ = kFirstLineStartDot;
+                mode_ = 0;
+                first_line_ = true;
+                lyc_flag_ = ly_reg_ == lyc_;
             }
             break;
         }
@@ -110,7 +131,10 @@ void Ppu::write_register(std::uint16_t addr, std::uint8_t value) {
         case 0xFF42: scy_ = value; break;
         case 0xFF43: scx_ = value; break;
         case 0xFF44: break;  // LY is read-only
-        case 0xFF45: lyc_ = value; break;
+        case 0xFF45:
+            lyc_ = value;
+            if (lcd_on()) lyc_flag_ = ly_reg_ == lyc_;  // the comparison only runs while on
+            break;
         case 0xFF47: bgp_ = value; break;
         case 0xFF48: obp0_ = value; break;
         case 0xFF49: obp1_ = value; break;
