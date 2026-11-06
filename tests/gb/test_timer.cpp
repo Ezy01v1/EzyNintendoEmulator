@@ -32,7 +32,7 @@ TEST_CASE("TIMA overflow reloads TMA and requests an interrupt") {
     timer.write(0xFF05, 0xFF);
     timer.write(0xFF07, 0x05);
     CHECK_FALSE(timer.take_interrupt());
-    for (int i = 0; i < 4; ++i) timer.tick();
+    for (int i = 0; i < 5; ++i) timer.tick();  // overflow, then one cycle of delay
     CHECK(timer.read(0xFF05) == 0xF0);
     CHECK(timer.take_interrupt());
     CHECK_FALSE(timer.take_interrupt());  // reported only once
@@ -46,4 +46,51 @@ TEST_CASE("writing DIV while the selected bit is high bumps TIMA (falling edge)"
     timer.tick();  // counter = 8: bit 3 is high
     timer.write(0xFF04, 0);
     CHECK(timer.read(0xFF05) == 1);
+}
+
+namespace {
+
+// TIMA = 0xFF at the fastest rate (+1 every 4 M-cycles), TMA = 0x42: the next increment
+// overflows. Returns after the M-cycle in which TIMA overflowed.
+Timer timer_at_overflow() {
+    Timer timer;
+    timer.write(0xFF04, 0);
+    timer.write(0xFF06, 0x42);
+    timer.write(0xFF05, 0xFF);
+    timer.write(0xFF07, 0x05);
+    for (int i = 0; i < 4; ++i) timer.tick();
+    return timer;
+}
+
+}  // namespace
+
+TEST_CASE("TIMA reads 0 for one cycle after overflow, then TMA") {
+    Timer timer = timer_at_overflow();
+    CHECK(timer.read(0xFF05) == 0x00);
+    CHECK_FALSE(timer.take_interrupt());
+    timer.tick();
+    CHECK(timer.read(0xFF05) == 0x42);
+    CHECK(timer.take_interrupt());
+}
+
+TEST_CASE("writing TIMA during the delay cancels the reload and interrupt") {
+    Timer timer = timer_at_overflow();
+    timer.write(0xFF05, 0x10);
+    timer.tick();
+    CHECK(timer.read(0xFF05) == 0x10);
+    CHECK_FALSE(timer.take_interrupt());
+}
+
+TEST_CASE("writing TIMA on the reload cycle is ignored") {
+    Timer timer = timer_at_overflow();
+    timer.tick();  // reload cycle
+    timer.write(0xFF05, 0x10);
+    CHECK(timer.read(0xFF05) == 0x42);
+}
+
+TEST_CASE("writing TMA on the reload cycle also reaches TIMA") {
+    Timer timer = timer_at_overflow();
+    timer.tick();
+    timer.write(0xFF06, 0x77);
+    CHECK(timer.read(0xFF05) == 0x77);
 }

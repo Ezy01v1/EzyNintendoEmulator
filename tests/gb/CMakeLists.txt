@@ -38,3 +38,21 @@ endif()
 if(EXISTS ${EZY_ROMS}/dmg-acid2-reference-cgb.bmp)
     ezy_gb_rom_test(gb_dmg_acid2_cgb dmg-acid2.gb --compare ${EZY_ROMS}/dmg-acid2-reference-cgb.bmp --model cgb)
 endif()
+
+# Mooneye timing ROMs from the accuracy pass. They were verified on DMG hardware, so they
+# run with --model dmg (see docs/superpowers/specs/2026-11-06-gb-accuracy-design.md).
+set(EZY_MOONEYE_DMG_TIMING
+    ppu/intr_1_2_timing-GS ppu/intr_2_0_timing ppu/intr_2_mode0_timing ppu/intr_2_mode0_timing_sprites
+    ppu/intr_2_mode3_timing ppu/intr_2_oam_ok_timing ppu/stat_irq_blocking ppu/stat_lyc_onoff
+    ppu/vblank_stat_intr-GS
+    oam_dma/basic oam_dma/reg_read oam_dma/sources-GS oam_dma_start oam_dma_restart oam_dma_timing
+    timer/div_write timer/rapid_toggle timer/tim00 timer/tim00_div_trigger timer/tim01
+    timer/tim01_div_trigger timer/tim10 timer/tim10_div_trigger timer/tim11 timer/tim11_div_trigger
+    timer/tima_reload timer/tima_write_reloading timer/tma_write_reloading
+    call_timing call_timing2 call_cc_timing call_cc_timing2 ret_timing ret_cc_timing reti_timing
+    jp_timing jp_cc_timing rst_timing push_timing add_sp_e_timing ld_hl_sp_e_timing
+    interrupts/ie_push di_timing-GS halt_ime0_nointr_timing halt_ime1_timing2-GS)
+foreach(rom IN LISTS EZY_MOONEYE_DMG_TIMING)
+    string(REPLACE "/" "_" name ${rom})
+    ezy_gb_rom_test(gb_mooneye_${name} mooneye/acceptance/${rom}.gb --mooneye --model dmg)
+endforeach()

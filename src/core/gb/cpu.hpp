@@ -94,6 +94,7 @@ private:
     void execute_block3(int y, int z, int p, int q);
     void execute_cb();
     void service_interrupt();
+    void run_opcode(std::uint8_t opcode);  // execute + the EI delay bookkeeping
 
     // Operations.
     void jr(bool taken);

@@ -150,7 +150,7 @@ void draw_tiles(const gb::GameBoy& gameboy, int bank) {
 }
 
 void draw_vram(const gb::GameBoy& gameboy, int& bank) {
-    debug_ui::place_window(10, 370, 300, 340);
+    debug_ui::place_window(10, 410, 780, 300);  // below the screen, like CHIP-8's panels
     ImGui::Begin("VRAM");
     if (gameboy.model() == gb::Model::Cgb) {
         draw_palettes("BG palettes", gameboy.bus().ppu().bg_palette_ram());

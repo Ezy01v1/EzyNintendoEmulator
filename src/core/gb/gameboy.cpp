@@ -51,7 +51,7 @@ GameBoy::GameBoy(Cartridge cartridge, Model model) : bus_(std::move(cartridge), 
 namespace {
 
 constexpr std::array<char, 4> kStateMagic = {'E', 'Z', 'G', 'B'};
-constexpr std::uint32_t kStateVersion = 1;
+constexpr std::uint32_t kStateVersion = 2;  // 2: pixel FIFO, OAM DMA, TIMA delay
 
 // Identifies the game a state belongs to: the header and global checksums.
 std::uint32_t rom_id(const Cartridge& cart) {

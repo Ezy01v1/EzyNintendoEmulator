@@ -181,3 +181,27 @@ TEST_CASE("illegal opcodes lock the CPU") {
     f.step();
     CHECK(f.cpu.locked());
 }
+
+TEST_CASE("ie_push: the push of PC's high byte can cancel the interrupt") {
+    Fixture f({0x00});
+    f.cpu.set_ime(true);
+    f.cpu.regs().sp = 0x0000;  // the high byte of PC is pushed to 0xFFFF = IE
+    f.bus.ie = 0x01;
+    f.bus.if_ = 0x01;
+    CHECK(f.step() == 5);
+    // PC = 0x0100: its high byte 0x01 lands in IE, so VBlank stays enabled.
+    CHECK(f.cpu.regs().pc == 0x0040);
+
+    Fixture g({0x00});
+    g.cpu.regs().pc = 0x0000;
+    g.bus.memory[0x0000] = 0x00;
+    g.cpu.set_ime(true);
+    g.cpu.regs().sp = 0x0000;
+    g.bus.ie = 0x01;
+    g.bus.if_ = 0x01;
+    g.step();
+    // PC's high byte 0x00 overwrites IE: nothing is pending any more, so the CPU jumps
+    // to 0x0000 and IF keeps its bit.
+    CHECK(g.cpu.regs().pc == 0x0000);
+    CHECK(g.bus.if_ == 0x01);
+}

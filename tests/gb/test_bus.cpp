@@ -109,3 +109,77 @@ TEST_CASE("CPU reads of OAM return 0xFF during mode 2") {
     CHECK(bus.read(0xFE00) == 0xFF);
     CHECK(bus.peek(0xFE00) == 0x42);
 }
+
+namespace {
+
+// LCD off (so OAM is never locked by the PPU) and 160 bytes at 0xC000 = 0x10, 0x11, ...
+Bus make_dma_bus() {
+    Bus bus(make_cartridge());
+    bus.poke(0xFF40, 0x00);
+    for (std::uint16_t i = 0; i < 0xA0; ++i) bus.poke(static_cast<std::uint16_t>(0xC000 + i), static_cast<std::uint8_t>(0x10 + i));
+    return bus;
+}
+
+}  // namespace
+
+// Mooneye oam_dma_start: write at M0, OAM still free at M1, the DMA owns it from M2.
+TEST_CASE("OAM DMA starts 2 M-cycles after the write and copies one byte per M-cycle") {
+    Bus bus = make_dma_bus();
+    bus.write(0xFF46, 0xC0);
+    bus.tick();
+    CHECK_FALSE(bus.oam_dma_active());
+    bus.tick();
+    CHECK(bus.oam_dma_active());
+    for (int i = 0; i < 80; ++i) bus.tick();
+    CHECK(bus.peek(0xFE00 + 79) == 0x10 + 79);
+    CHECK(bus.peek(0xFE00 + 80) == 0x00);
+    for (int i = 0; i < 80; ++i) bus.tick();
+    CHECK(bus.peek(0xFE9F) == 0x10 + 159);
+    CHECK_FALSE(bus.oam_dma_active());
+}
+
+TEST_CASE("CPU reads outside HRAM see the DMA byte during DMA, HRAM stays readable") {
+    Bus bus = make_dma_bus();
+    bus.poke(0xFF80, 0x77);
+    bus.poke(0xD000, 0x55);
+    bus.write(0xFF46, 0xC0);
+    bus.tick();
+    bus.tick();  // started; nothing copied yet
+    const std::uint8_t seen = bus.read(0xD000);  // same bus as the source; this cycle copies byte 0
+    CHECK(seen == 0x10);
+    CHECK(bus.read(0xFF80) == 0x77);
+    bus.write(0xD000, 0x99);  // dropped
+    CHECK(bus.peek(0xD000) == 0x55);
+    CHECK(bus.read(0xFE00) == 0xFF);  // OAM belongs to the DMA
+}
+
+TEST_CASE("restarting OAM DMA mid-transfer") {
+    Bus bus = make_dma_bus();
+    for (std::uint16_t i = 0; i < 0xA0; ++i) bus.poke(static_cast<std::uint16_t>(0xC100 + i), 0xAA);
+    bus.write(0xFF46, 0xC0);
+    for (int i = 0; i < 12; ++i) bus.tick();  // start-up + 10 bytes
+    bus.write(0xFF46, 0xC1);                // the old transfer runs during the new start-up
+    for (int i = 0; i < 162; ++i) bus.tick();
+    CHECK(bus.peek(0xFE00) == 0xAA);
+    CHECK(bus.peek(0xFE9F) == 0xAA);
+}
+
+TEST_CASE("OAM DMA from 0xFE00 reads the WRAM echo at 0xDE00") {
+    Bus bus = make_dma_bus();
+    bus.poke(0xDE05, 0x5E);
+    bus.write(0xFF46, 0xFE);
+    for (int i = 0; i < 162; ++i) bus.tick();
+    CHECK(bus.peek(0xFE05) == 0x5E);
+}
+
+TEST_CASE("OAM DMA from VRAM leaves the external bus to the CPU") {
+    Bus bus = make_dma_bus();
+    bus.poke(0x8000, 0xD7);
+    bus.poke(0x8001, 0xD8);
+    bus.poke(0xC800, 0x42);
+    bus.write(0xFF46, 0x80);
+    bus.tick();
+    bus.tick();
+    CHECK(bus.read(0xC800) == 0x42);  // WRAM is on the other bus
+    CHECK(bus.read(0x8100) == 0xD8);  // VRAM is the DMA's bus: the CPU sees the byte being moved
+}

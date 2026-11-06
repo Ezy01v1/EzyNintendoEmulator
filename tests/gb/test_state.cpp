@@ -109,3 +109,25 @@ TEST_CASE("a damaged state loaded during the boot animation keeps the boot ROM")
     CHECK(booting->bus().peek(0x0100) == rom[0x0100]);
     CHECK(booting->bus().peek(0x0000) == 0x00);
 }
+
+TEST_CASE("a state saved in the middle of mode 3 resumes to an identical frame") {
+    auto gb = GameBoy::create(make_busy_rom());
+    REQUIRE(gb);
+    run_frames(*gb, 3);
+    while (gb->bus().ppu().mode() != 3 || gb->bus().ppu().ly() != 70) gb->step();
+    const auto state = gb->save_state();
+    run_frames(*gb, 2);
+    const std::vector<std::uint16_t> frame_a(gb->framebuffer().begin(), gb->framebuffer().end());
+    REQUIRE(gb->load_state(state));
+    run_frames(*gb, 2);
+    CHECK(std::vector<std::uint16_t>(gb->framebuffer().begin(), gb->framebuffer().end()) == frame_a);
+}
+
+TEST_CASE("version 1 states (before the pixel FIFO) are rejected") {
+    auto gb = GameBoy::create(make_busy_rom());
+    REQUIRE(gb);
+    auto state = gb->save_state();
+    state[4] = 1;  // version field (little-endian u32 after the 4-byte magic)
+    state[5] = state[6] = state[7] = 0;
+    CHECK_FALSE(gb->load_state(state));
+}

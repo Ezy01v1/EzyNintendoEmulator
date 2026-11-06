@@ -5,6 +5,7 @@
 #include <span>
 
 #include "gb/model.hpp"
+#include "gb/ppu_fifo.hpp"
 
 namespace ezy::gb {
 
@@ -16,19 +17,21 @@ inline constexpr int kLinesPerFrame = 154;
 // The DMG model shows its 4 shades as these plain greys, lightest to darkest.
 inline constexpr std::array<std::uint16_t, 4> kDmgGreys = {0x7FFF, 0x56B5, 0x294A, 0x0000};
 
+// Our line timing is measured from an origin about 3 dots after the hardware's (found by
+// calibrating against Mooneye's hardware-verified PPU timing ROMs). Both the mode 3
+// dummy fetch (ppu_draw.cpp) and the early LY change (ppu.cpp) come from this one value.
+inline constexpr int kLineOriginOffsetDots = 3;
+
 inline constexpr int kDotsPerFrame = kDotsPerLine * kLinesPerFrame;  // 70224 T-cycles
 
-// Picture Processing Unit (DMG).
+// Picture Processing Unit (DMG and CGB).
 //
-// Timing per visible line: mode 2 (OAM scan, 80 dots) -> mode 3 (drawing, 172 dots plus
-// penalties) -> mode 0 (HBlank, rest of the 456). Lines 144-153 are mode 1 (VBlank).
-// The mode 3 length is estimated when it starts (Pan Docs, "Mode 3 length"): +SCX % 8 for
-// the discarded pixels, +6 if the window shows on the line, and 6 to 11 per sprite.
+// Timing per visible line: mode 2 (OAM scan, 80 dots) -> mode 3 (drawing) -> mode 0
+// (HBlank, rest of the 456). Lines 144-153 are mode 1 (VBlank).
 //
-// Rendering model: a *scanline* renderer. The whole line is drawn when mode 3 ends, using
-// the register values at that moment. Real hardware draws pixel by pixel through a FIFO,
-// so mid-line register changes are not reproduced. That is enough for dmg-acid2 and nearly
-// all games; a FIFO renderer can replace render_scanline() later without touching the rest.
+// Rendering model: a pixel FIFO stepped one dot at a time (ppu_draw.cpp), like the
+// hardware. Mode 3 lasts as long as the fetches take (172 dots plus SCX % 8, the window
+// and sprite fetches), and mid-line register writes show up where they happen.
 //
 // The CPU can't reach OAM in modes 2-3 or VRAM in mode 3 (the bus checks *_accessible()).
 class Ppu {
@@ -81,8 +84,13 @@ public:
         ar(vram_), ar(vram_bank_), ar(oam_), ar(frame_);
         ar(cgb_mode_), ar(opri_), ar(bg_palettes_), ar(obj_palettes_), ar(bcps_), ar(ocps_);
         ar(lcdc_), ar(stat_), ar(scy_), ar(scx_), ar(ly_), ar(lyc_), ar(bgp_), ar(obp0_), ar(obp1_), ar(wy_), ar(wx_);
-        ar(dot_), ar(hblank_start_), ar(mode_), ar(stat_line_), ar(window_y_hit_), ar(window_line_);
+        ar(ly_reg_), ar(lyc_flag_), ar(first_line_);
+        ar(dot_), ar(mode_), ar(stat_line_), ar(window_y_hit_), ar(window_line_);
         ar(interrupts_), ar(frame_ready_), ar(hblank_started_);
+        ar(line_sprites_), ar(sprite_count_), ar(bg_fifo_), ar(obj_fifo_);
+        ar(lx_), ar(discard_), ar(startup_dots_), ar(fetch_step_), ar(fetch_tile_);
+        ar(fetch_tile_index_), ar(fetch_attributes_), ar(fetch_lo_), ar(fetch_hi_);
+        ar(window_active_), ar(window_drawn_), ar(sprite_dots_), ar(fetching_sprite_), ar(penalty_tile_);
     }
 
     [[nodiscard]] std::uint8_t ly() const { return ly_; }
@@ -93,18 +101,22 @@ public:
     [[nodiscard]] bool oam_accessible() const { return !lcd_on() || (mode_ != 2 && mode_ != 3); }
 
 private:
-    void render_scanline();
+    void step_dot();
+    // Mode 3 (ppu_draw.cpp).
+    void scan_oam();
+    void begin_mode3();
+    bool draw_dot();
+    void fetcher_dot();
+    void fetch_tile_number();
+    void fetch_tile_data();
+    [[nodiscard]] int sprite_at_current_x() const;
+    void merge_sprite(const LineSprite& sprite);
+    [[nodiscard]] std::uint16_t mix_pixel(const FifoBgPixel& bg, const FifoObjPixel& obj) const;
+
     void write_palette_data(std::array<std::uint8_t, 64>& ram, std::uint8_t& spec, std::uint8_t value);
     [[nodiscard]] std::uint16_t bg_color(int palette, std::uint8_t index) const;
     [[nodiscard]] std::uint16_t obj_color(std::uint8_t attributes, std::uint8_t index) const;
     void update_stat_line();
-    [[nodiscard]] int mode3_length() const;
-    struct BgPixel {
-        std::uint8_t index;       // colour index 0-3, before palettes
-        std::uint8_t attributes;  // CGB map attributes (0 outside CGB mode)
-    };
-    [[nodiscard]] BgPixel bg_pixel(std::uint16_t map_base, int x, int y) const;
-    [[nodiscard]] std::uint8_t tile_color_index(int bank, std::uint16_t tile_addr, int row, int col) const;
 
     [[nodiscard]] static std::size_t vram_index(int bank, std::uint16_t addr) {
         return static_cast<std::size_t>(bank) * 0x2000 + (addr - 0x8000);
@@ -132,12 +144,14 @@ private:
     std::uint8_t lcdc_ = 0x91;
     std::uint8_t stat_ = 0x00;  // only the interrupt-enable bits 3-6 are stored
     std::uint8_t scy_ = 0, scx_ = 0;
-    std::uint8_t ly_ = 0, lyc_ = 0;
+    std::uint8_t ly_ = 0, lyc_ = 0;  // ly_ is the line being drawn
+    std::uint8_t ly_reg_ = 0;       // what the LY register reads (changes a little early)
+    bool lyc_flag_ = true;          // STAT bit 2, updated only while the LCD is on
+    bool first_line_ = false;       // line 0 right after the LCD was switched on
     std::uint8_t bgp_ = 0xFC, obp0_ = 0xFF, obp1_ = 0xFF;
     std::uint8_t wy_ = 0, wx_ = 0;
 
     int dot_ = 0;
-    int hblank_start_ = 80 + 172;  // dot where this line's mode 3 ends
     int mode_ = 2;
     bool stat_line_ = false;     // STAT interrupt fires on the rising edge of this
     bool window_y_hit_ = false;  // WY matched LY at some point this frame
@@ -145,6 +159,23 @@ private:
     std::uint8_t interrupts_ = 0;
     bool frame_ready_ = false;
     bool hblank_started_ = false;
+
+    // Mode 3 state.
+    std::array<LineSprite, 10> line_sprites_{};
+    std::size_t sprite_count_ = 0;
+    PixelFifo<FifoBgPixel, 16> bg_fifo_;
+    PixelFifo<FifoObjPixel, 8> obj_fifo_;
+    int lx_ = 0;            // next pixel to output (0-159)
+    int discard_ = 0;       // pixels still to throw away (SCX % 8, window left of the screen)
+    int startup_dots_ = 0;  // dummy fetch at the start of mode 3
+    int fetch_step_ = 0;    // 0-5: reading the tile, 6: waiting to push
+    int fetch_tile_ = 0;    // tiles fetched on this line (BG) or since the window started
+    std::uint8_t fetch_tile_index_ = 0, fetch_attributes_ = 0, fetch_lo_ = 0, fetch_hi_ = 0;
+    bool window_active_ = false;  // the fetcher is on the window
+    bool window_drawn_ = false;   // the window showed on this line (its line counter advances)
+    int sprite_dots_ = 0;         // dots left in the current sprite fetch
+    int fetching_sprite_ = 0;     // index into line_sprites_
+    int penalty_tile_ = -1;       // BG tile that already paid the sprite alignment penalty
 };
 
 }  // namespace ezy::gb
