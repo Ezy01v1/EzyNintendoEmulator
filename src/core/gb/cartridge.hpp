@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "gb/mbc.hpp"
@@ -92,6 +93,14 @@ public:
     bool load_save_data(std::span<const std::uint8_t> data, std::int64_t unix_now = 0);
     // Set by every write to external RAM or the RTC, until cleared by whoever persists it.
     [[nodiscard]] bool save_dirty() const { return save_dirty_; }
+
+    // Save states: the MBC registers and the RAM (the ROM and header never change).
+    template <class Ar>
+    void serialize(Ar& ar) {
+        std::visit([&](auto& mbc) { mbc.serialize(ar); }, mbc_);
+        ar(ram_);
+        if constexpr (Ar::kLoading) save_dirty_ = true;
+    }
     void clear_save_dirty() { save_dirty_ = false; }
 
     [[nodiscard]] const Mbc& mbc() const { return mbc_; }

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <vector>
 
 #include "gb/bus.hpp"
 #include "gb/cpu.hpp"
@@ -24,6 +25,12 @@ public:
     void run_frame();
 
     [[nodiscard]] Model model() const { return bus_.model(); }
+
+    // Save states: the whole machine (CPU, memory, PPU, APU, timers, cartridge RAM and
+    // clock) as bytes. load_state() refuses a state of another game, model or format
+    // version, or a damaged one, and then leaves the running machine untouched.
+    [[nodiscard]] std::vector<std::uint8_t> save_state();
+    [[nodiscard]] bool load_state(std::span<const std::uint8_t> state);
     void step() { cpu_.step(); }
 
     void set_button(Button button, bool pressed) { bus_.set_button(button, pressed); }

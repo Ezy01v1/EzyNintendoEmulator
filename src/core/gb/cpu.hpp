@@ -57,6 +57,13 @@ public:
 
     void step();  // services an interrupt or executes one instruction
 
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(r_.a), ar(r_.f), ar(r_.b), ar(r_.c), ar(r_.d), ar(r_.e), ar(r_.h), ar(r_.l);
+        ar(r_.sp), ar(r_.pc);
+        ar(ime_), ar(ime_pending_), ar(halted_), ar(halt_bug_), ar(locked_);
+    }
+
     [[nodiscard]] Registers& regs() { return r_; }
     [[nodiscard]] const Registers& regs() const { return r_; }
     [[nodiscard]] bool ime() const { return ime_; }

@@ -1,4 +1,4 @@
-add_executable(ezy_gb_tests test_main.cpp test_cartridge.cpp test_bus.cpp test_cpu.cpp test_timer.cpp test_ppu.cpp test_apu.cpp test_cgb.cpp test_hdma.cpp test_compat_palettes.cpp)
+add_executable(ezy_gb_tests test_main.cpp test_cartridge.cpp test_bus.cpp test_cpu.cpp test_timer.cpp test_ppu.cpp test_apu.cpp test_cgb.cpp test_hdma.cpp test_compat_palettes.cpp test_state.cpp)
 target_link_libraries(ezy_gb_tests PRIVATE ezy_gb doctest::doctest ezy_warnings)
 # Lets doctest print std::string_view on MSVC (it otherwise forward-declares std::ostream).
 target_compile_definitions(ezy_gb_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)

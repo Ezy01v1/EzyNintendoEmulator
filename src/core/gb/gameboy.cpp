@@ -1,5 +1,8 @@
 #include "gb/gameboy.hpp"
 
+#include <array>
+
+#include "common/state.hpp"
 #include "gb/compat_palettes.hpp"
 
 namespace ezy::gb {
@@ -42,6 +45,64 @@ std::unique_ptr<GameBoy> GameBoy::create(std::span<const std::uint8_t> rom, Opti
 
 GameBoy::GameBoy(Cartridge cartridge, Model model) : bus_(std::move(cartridge), model), cpu_(bus_) {
     cpu_.reset_post_boot(model, bus_.cgb_mode(), compat_title_checksum(bus_.cartridge().header()));
+}
+
+namespace {
+
+constexpr std::array<char, 4> kStateMagic = {'E', 'Z', 'G', 'B'};
+constexpr std::uint32_t kStateVersion = 1;
+
+// Identifies the game a state belongs to: the header and global checksums.
+std::uint32_t rom_id(const Cartridge& cart) {
+    const auto global_hi = cart.read_rom(0x014E);
+    const auto global_lo = cart.read_rom(0x014F);
+    return static_cast<std::uint32_t>(cart.header().header_checksum) << 16 |
+           static_cast<std::uint32_t>(global_hi) << 8 | global_lo;
+}
+
+struct StateHeader {
+    std::array<char, 4> magic{};
+    std::uint32_t version = 0;
+    std::uint32_t rom = 0;
+    Model model = Model::Dmg;
+
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(magic), ar(version), ar(rom), ar(model);
+    }
+};
+
+}  // namespace
+
+std::vector<std::uint8_t> GameBoy::save_state() {
+    StateWriter writer;
+    StateHeader header{kStateMagic, kStateVersion, rom_id(bus_.cartridge()), model()};
+    writer(header);
+    writer(cpu_);
+    writer(bus_);
+    return writer.take();
+}
+
+bool GameBoy::load_state(std::span<const std::uint8_t> state) {
+    StateReader reader(state);
+    StateHeader header;
+    reader(header);
+    if (reader.failed() || header.magic != kStateMagic || header.version != kStateVersion ||
+        header.rom != rom_id(bus_.cartridge()) || header.model != model()) {
+        return false;
+    }
+    const std::vector<std::uint8_t> previous = save_state();
+    reader(cpu_);
+    reader(bus_);
+    if (reader.failed() || !reader.at_end()) {
+        StateReader undo(previous);
+        StateHeader skip;
+        undo(skip);
+        undo(cpu_);
+        undo(bus_);
+        return false;
+    }
+    return true;
 }
 
 void GameBoy::run_frame() {

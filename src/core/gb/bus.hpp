@@ -41,6 +41,23 @@ public:
     // before leaving, decides whether the game then runs in DMG compatibility mode.
     void map_boot_rom(std::vector<std::uint8_t> boot_rom);
     [[nodiscard]] bool boot_rom_mapped() const { return !boot_rom_.empty(); }
+
+    // Save states: everything but the model (checked by GameBoy) and the serial log.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(cartridge_), ar(timer_), ar(ppu_), ar(apu_), ar(joypad_), ar(hdma_);
+        ar(cgb_mode_), ar(wram_), ar(svbk_), ar(undocumented_), ar(rp_), ar(key0_);
+        ar(io_), ar(hram_), ar(if_), ar(ie_), ar(dma_);
+        ar(t_cycles_), ar(dots_), ar(double_speed_), ar(speed_switch_armed_), ar(apu_half_cycle_);
+        // The boot ROM itself isn't stored, only whether it is still mapped. A state taken
+        // during the boot animation can only be loaded while the boot ROM is still mapped.
+        bool mapped = !boot_rom_.empty();
+        ar(mapped);
+        if constexpr (Ar::kLoading) {
+            if (!mapped) boot_rom_.clear();
+            if (mapped && boot_rom_.empty()) ar.fail();
+        }
+    }
     // True when CGB features are enabled: a CGB game on CGB hardware. A DMG game on a CGB
     // runs in DMG compatibility mode, where most CGB registers are hidden.
     [[nodiscard]] bool cgb_mode() const { return cgb_mode_; }
@@ -110,11 +127,11 @@ private:
     // CGB registers.
     std::uint8_t svbk_ = 1;  // 0xFF70, bits 0-2
     std::array<std::uint8_t, 4> undocumented_{};  // 0xFF72-0xFF75
-    std::uint8_t rp_ = 0;
+    std::uint8_t rp_ = 0;    // 0xFF56, writable bits 0 and 6-7
     Hdma hdma_;
     std::vector<std::uint8_t> boot_rom_;  // empty once unmapped (or never used)
     std::uint8_t key0_ = 0;
-    bool in_vram_dma_ = false;    // 0xFF56, writable bits 0 and 6-7
+    bool in_vram_dma_ = false;
     std::array<std::uint8_t, 0x80> io_{};  // raw storage for I/O registers not modelled yet
     std::array<std::uint8_t, 0x7F> hram_{};
     std::uint8_t if_ = 0;

@@ -22,6 +22,11 @@ public:
     // True once per overflow; the bus turns it into an interrupt request.
     bool take_interrupt();
 
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(counter_), ar(tima_), ar(tma_), ar(tac_), ar(interrupt_);
+    }
+
     [[nodiscard]] std::uint16_t counter() const { return counter_; }
 
 private:

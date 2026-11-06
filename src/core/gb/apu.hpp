@@ -47,16 +47,32 @@ public:
     [[nodiscard]] std::uint8_t pcm12() const;
     [[nodiscard]] std::uint8_t pcm34() const;
 
+    // Save states. Samples not yet played are not part of the state.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(regs_), ar(powered_), ar(frame_step_);
+        ar(squares_), ar(sweep_), ar(wave_), ar(noise_);
+        ar(acc_left_), ar(acc_right_), ar(acc_count_), ar(sample_phase_), ar(hp_left_), ar(hp_right_);
+    }
+
 private:
     struct Envelope {
         int volume = 0;
         int timer = 0;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(volume), ar(timer);
+        }
         void trigger(std::uint8_t nrx2);
         void clock(std::uint8_t nrx2);
     };
 
     struct Length {
         int counter = 0;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(counter);
+        }
         void clock(bool enabled, bool& channel_on);
     };
 
@@ -66,6 +82,10 @@ private:
         int duty_pos = 0;
         Envelope env;
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(on), ar(timer), ar(duty_pos), ar(env), ar(len);
+        }
     };
 
     struct Sweep {
@@ -73,6 +93,10 @@ private:
         int timer = 0;
         int shadow = 0;
         bool negate_used = false;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(enabled), ar(timer), ar(shadow), ar(negate_used);
+        }
     };
 
     struct Wave {
@@ -81,6 +105,10 @@ private:
         int pos = 0;
         std::uint8_t sample = 0;  // last nibble read from wave RAM
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(on), ar(timer), ar(pos), ar(sample), ar(len);
+        }
     };
 
     struct Noise {
@@ -89,6 +117,10 @@ private:
         std::uint16_t lfsr = 0x7FFF;
         Envelope env;
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(on), ar(timer), ar(lfsr), ar(env), ar(len);
+        }
     };
 
     [[nodiscard]] std::uint8_t reg(std::uint16_t addr) const { return regs_[addr - 0xFF10]; }

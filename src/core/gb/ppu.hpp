@@ -76,6 +76,15 @@ public:
     [[nodiscard]] std::span<const std::uint8_t, 64> bg_palette_ram() const { return bg_palettes_; }
     [[nodiscard]] std::span<const std::uint8_t, 64> obj_palette_ram() const { return obj_palettes_; }
 
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(vram_), ar(vram_bank_), ar(oam_), ar(frame_);
+        ar(cgb_mode_), ar(opri_), ar(bg_palettes_), ar(obj_palettes_), ar(bcps_), ar(ocps_);
+        ar(lcdc_), ar(stat_), ar(scy_), ar(scx_), ar(ly_), ar(lyc_), ar(bgp_), ar(obp0_), ar(obp1_), ar(wy_), ar(wx_);
+        ar(dot_), ar(hblank_start_), ar(mode_), ar(stat_line_), ar(window_y_hit_), ar(window_line_);
+        ar(interrupts_), ar(frame_ready_), ar(hblank_started_);
+    }
+
     [[nodiscard]] std::uint8_t ly() const { return ly_; }
     [[nodiscard]] int mode() const { return mode_; }
     [[nodiscard]] std::uint8_t lcdc() const { return lcdc_; }
