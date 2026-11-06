@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <initializer_list>
+#include <span>
 #include <cstdint>
 
 #include "gb/interrupts.hpp"
@@ -291,10 +293,10 @@ TEST_CASE("locks are lifted while the LCD is off") {
 TEST_CASE("SCX fine scroll lengthens mode 3") {
     Ppu ppu;
     ppu.write_register(0xFF43, 5);
-    run_dots(ppu, 80 + 172);
+    run_dots(ppu, 80 + 168);
     CHECK(ppu.mode() == 3);
     run_dots(ppu, 4);
-    CHECK(ppu.mode() == 3);  // 177 dots: still drawing at 256
+    CHECK(ppu.mode() == 3);  // 169 + 5 = 174 dots: still drawing at dot 252
     run_dots(ppu, 4);
     CHECK(ppu.mode() == 0);
 }
@@ -329,15 +331,16 @@ int mode3_dots(Ppu& ppu) {
 
 }  // namespace
 
-TEST_CASE("FIFO: mode 3 lasts 172 dots with SCX = 0 and no sprites") {
+// 169, not Pan Docs' 172: see the timing note at the top of ppu_draw.cpp.
+TEST_CASE("FIFO: mode 3 lasts 169 dots with SCX = 0 and no sprites") {
     Ppu ppu;
-    CHECK(mode3_dots(ppu) == 172);
+    CHECK(mode3_dots(ppu) == 169);
 }
 
 TEST_CASE("FIFO: SCX % 8 adds its value to mode 3") {
     Ppu ppu;
     ppu.write_register(0xFF43, 3);
-    CHECK(mode3_dots(ppu) == 175);
+    CHECK(mode3_dots(ppu) == 172);
 }
 
 TEST_CASE("FIFO: the window adds 6 dots") {
@@ -345,7 +348,7 @@ TEST_CASE("FIFO: the window adds 6 dots") {
     ppu.write_register(0xFF4A, 0);   // WY
     ppu.write_register(0xFF4B, 87);  // WX: window from x = 80
     ppu.write_register(0xFF40, 0x91 | 0x20);
-    CHECK(mode3_dots(ppu) == 178);
+    CHECK(mode3_dots(ppu) == 175);
 }
 
 TEST_CASE("FIFO: a mid-line BGP write changes only the pixels after it") {
@@ -369,9 +372,97 @@ TEST_CASE("FIFO: VRAM lock follows the real mode 3 end") {
     Ppu ppu;
     ppu.write_register(0xFF43, 7);
     while (!(ppu.ly() == 1 && ppu.mode() == 3)) ppu.tick(1);
-    for (int i = 0; i < 179; ++i) {  // 172 + SCX % 8
+    for (int i = 0; i < 176; ++i) {  // 169 + SCX % 8
         CHECK_FALSE(ppu.vram_accessible());
         ppu.tick(1);
     }
     CHECK(ppu.vram_accessible());
+}
+
+namespace {
+
+// LCD off, sprites on (8x8), all of OAM moved off-screen; then the listed sprites on line 1.
+Ppu make_sprite_ppu(std::initializer_list<std::uint8_t> xs) {
+    Ppu ppu;
+    ppu.write_register(0xFF40, 0x00);
+    for (std::uint16_t i = 0; i < 0xA0; ++i) ppu.write_oam(static_cast<std::uint16_t>(0xFE00 + i), 0);
+    std::uint16_t slot = 0;
+    for (const auto x : xs) {
+        ppu.write_oam(static_cast<std::uint16_t>(0xFE00 + slot * 4), 17);  // covers line 1
+        ppu.write_oam(static_cast<std::uint16_t>(0xFE01 + slot * 4), x);
+        ++slot;
+    }
+    ppu.write_register(0xFF40, 0x93);
+    return ppu;
+}
+
+// Line 1, as written to the framebuffer (it is drawn after mode3_dots runs).
+std::span<const std::uint16_t> line1(const Ppu& ppu) { return ppu.framebuffer().subspan(kLcdWidth, kLcdWidth); }
+
+}  // namespace
+
+TEST_CASE("FIFO sprites: one sprite at X=8 adds 11 dots") {
+    Ppu ppu = make_sprite_ppu({8});
+    CHECK(mode3_dots(ppu) == 169 + 11);
+}
+
+TEST_CASE("FIFO sprites: a sprite at X=0 is hidden but still stalls") {
+    Ppu ppu = make_sprite_ppu({0});
+    fill_tile(ppu, 0x8000, 3);
+    ppu.write_register(0xFF47, 0x00);  // BG white, so a visible sprite pixel would show
+    ppu.write_register(0xFF48, 0xFF);
+    CHECK(mode3_dots(ppu) == 169 + 11);
+    CHECK(line1(ppu)[0] == kDmgGreys[0]);
+}
+
+TEST_CASE("FIFO sprites: only 10 sprites per line are drawn") {
+    Ppu ppu = make_sprite_ppu({8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88});
+    fill_tile(ppu, 0x8000, 3);
+    ppu.write_register(0xFF47, 0x00);  // BG all white
+    ppu.write_register(0xFF48, 0xFF);  // OBP0: colour 3 -> black
+    mode3_dots(ppu);
+    CHECK(line1(ppu)[72] == kDmgGreys[3]);  // 10th sprite
+    CHECK(line1(ppu)[80] == kDmgGreys[0]);  // 11th sprite: not drawn
+}
+
+TEST_CASE("FIFO sprites: sprites at X >= 168 count toward 10 but are not drawn") {
+    Ppu ppu = make_sprite_ppu({168, 168, 168, 168, 168, 168, 168, 168, 168, 168, 8});
+    fill_tile(ppu, 0x8000, 3);
+    ppu.write_register(0xFF47, 0x00);
+    ppu.write_register(0xFF48, 0xFF);
+    CHECK(mode3_dots(ppu) == 169);  // nothing fetched: the 11th sprite never made the list
+    CHECK(line1(ppu)[0] == kDmgGreys[0]);
+}
+
+TEST_CASE("FIFO sprites: on DMG the lower X wins an overlap") {
+    Ppu ppu = make_sprite_ppu({12, 8});  // OAM 0 at x=12, OAM 1 at x=8
+    fill_tile(ppu, 0x8000, 3);
+    ppu.write_oam(0xFE03, 0x10);  // OAM 0 uses OBP1
+    ppu.write_register(0xFF47, 0x00);
+    ppu.write_register(0xFF48, 0xFF);  // OBP0 -> black
+    ppu.write_register(0xFF49, 0x55);  // OBP1 -> light grey
+    mode3_dots(ppu);
+    CHECK(line1(ppu)[6] == kDmgGreys[3]);  // overlap: OAM 1 (x=8) wins
+}
+
+TEST_CASE("FIFO sprites: on CGB the lower OAM index wins an overlap") {
+    Ppu ppu = make_cgb_ppu();
+    ppu.write_register(0xFF40, 0x00);
+    for (std::uint16_t i = 0; i < 0xA0; ++i) ppu.write_oam(static_cast<std::uint16_t>(0xFE00 + i), 0);
+    fill_tile(ppu, 0x8000, 0);
+    fill_tile(ppu, 0x8010, 3);
+    ppu.write_oam(0xFE00, 17);
+    ppu.write_oam(0xFE01, 12);
+    ppu.write_oam(0xFE02, 1);
+    ppu.write_oam(0xFE03, 0x01);  // OAM 0: palette 1
+    ppu.write_oam(0xFE04, 17);
+    ppu.write_oam(0xFE05, 8);
+    ppu.write_oam(0xFE06, 1);
+    ppu.write_oam(0xFE07, 0x02);  // OAM 1: palette 2
+    ppu.write_register(0xFF6A, 0x80 | (1 * 8 + 6));  // OBJ palette 1 colour 3
+    ppu.write_register(0xFF6B, 0x34);
+    ppu.write_register(0xFF6B, 0x12);
+    ppu.write_register(0xFF40, 0x93);
+    mode3_dots(ppu);
+    CHECK(line1(ppu)[6] == 0x1234);  // OAM 0 wins although its X is larger
 }

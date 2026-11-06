@@ -1,10 +1,12 @@
 // The pixel-FIFO renderer: what the PPU does, dot by dot, during mode 3.
 //
 // Model (Pan Docs "Pixel FIFO", "Mode 3 length"):
-//  - Mode 3 starts with a 6-dot dummy fetch. Then the fetcher reads a tile in 6 dots
-//    (tile number, low byte, high byte; 2 dots each) and pushes its 8 pixels into the BG
-//    FIFO on the next dot once the FIFO is empty. One pixel leaves the FIFO per dot.
-//    That gives 6 + 6 + 160 = 172 dots with nothing else going on.
+//  - Mode 3 starts with a dummy fetch. Then the fetcher reads a tile in 6 dots (tile
+//    number, low byte, high byte; 2 dots each) and pushes its 8 pixels into the BG FIFO
+//    on the next dot once the FIFO is empty. One pixel leaves the FIFO per dot.
+//    Pan Docs puts the whole of mode 3 at 172 dots. Mooneye's intr_2_mode0_timing(_sprites)
+//    show that, counted from our line start, the CPU sees mode 0 3 dots earlier than that,
+//    so the dummy fetch here is 3 dots: 3 + 6 + 160 = 169.
 //  - The first SCX % 8 pixels of the line are thrown away (+1 dot each).
 //  - When the window starts, the BG FIFO is cleared and the fetcher restarts on the window
 //    map, which costs the 6 dots of a fetch.
@@ -29,7 +31,7 @@ constexpr std::uint8_t kLcdcTileData = 0x10;
 constexpr std::uint8_t kLcdcWindowEnable = 0x20;
 constexpr std::uint8_t kLcdcWindowMap = 0x40;
 
-constexpr int kDummyFetchDots = 6;
+constexpr int kDummyFetchDots = 3;  // calibrated against Mooneye, see above
 constexpr int kFetchDots = 6;
 constexpr int kSpriteFetchDots = 6;
 
@@ -184,13 +186,20 @@ bool Ppu::draw_dot() {
 
     if (discard_ == 0) {
         if (const int sprite = sprite_at_current_x(); sprite >= 0) {
-            // The sprite fetch needs the BG fetcher to have pixels ready first.
+            // The sprite fetch needs the BG fetcher to have pixels ready first. It can start
+            // on the same dot the fetcher pushes them.
             if (bg_fifo_.empty()) {
                 fetcher_dot();
-                return false;
+                if (bg_fifo_.empty()) return false;
             }
-            const int x_in_tile = window_active_ ? (lx_ + 7 - wx_) & 7 : (lx_ + scx_) & 7;
-            const int tile = window_active_ ? (lx_ + 7 - wx_) / 8 : (lx_ + scx_) / 8;
+            // Where the sprite's left edge falls within a background (or window) tile. This
+            // uses the sprite's own X, so sprites partly off the left edge differ too.
+            const int sprite_x = line_sprites_[static_cast<std::size_t>(sprite)].x;
+            // (OAM X is the screen X + 8, which doesn't change anything modulo 8. The window
+            // case adds 256 to stay positive.)
+            const int plane_x = window_active_ ? sprite_x + 256 - wx_ - 1 : sprite_x + scx_;
+            const int x_in_tile = plane_x & 7;
+            const int tile = plane_x / 8;
             int extra = 0;
             if (tile != penalty_tile_) {
                 extra = std::max(0, 5 - x_in_tile);
