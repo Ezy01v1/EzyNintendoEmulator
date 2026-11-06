@@ -3,9 +3,11 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <vector>
 
 #include "gb/bus.hpp"
 #include "gb/cpu.hpp"
+#include "gb/model.hpp"
 
 namespace ezy::gb {
 
@@ -14,17 +16,25 @@ class GameBoy {
 public:
     // Returns nullptr if the ROM header can't be parsed. Heap-allocated because the CPU
     // keeps a reference to the bus, so the object must never move.
-    [[nodiscard]] static std::unique_ptr<GameBoy> create(std::span<const std::uint8_t> rom);
+    [[nodiscard]] static std::unique_ptr<GameBoy> create(std::span<const std::uint8_t> rom, Options options = {});
 
     GameBoy(const GameBoy&) = delete;
     GameBoy& operator=(const GameBoy&) = delete;
 
     // Runs until the PPU finishes a frame (or one frame's worth of cycles if the LCD is off).
     void run_frame();
+
+    [[nodiscard]] Model model() const { return bus_.model(); }
+
+    // Save states: the whole machine (CPU, memory, PPU, APU, timers, cartridge RAM and
+    // clock) as bytes. load_state() refuses a state of another game, model or format
+    // version, or a damaged one, and then leaves the running machine untouched.
+    [[nodiscard]] std::vector<std::uint8_t> save_state();
+    [[nodiscard]] bool load_state(std::span<const std::uint8_t> state);
     void step() { cpu_.step(); }
 
     void set_button(Button button, bool pressed) { bus_.set_button(button, pressed); }
-    [[nodiscard]] std::span<const std::uint8_t> framebuffer() const { return bus_.ppu().framebuffer(); }
+    [[nodiscard]] std::span<const std::uint16_t> framebuffer() const { return bus_.ppu().framebuffer(); }
 
     [[nodiscard]] Cpu& cpu() { return cpu_; }
     [[nodiscard]] const Cpu& cpu() const { return cpu_; }
@@ -32,7 +42,7 @@ public:
     [[nodiscard]] const Bus& bus() const { return bus_; }
 
 private:
-    explicit GameBoy(Cartridge cartridge);
+    GameBoy(Cartridge cartridge, Model model);
 
     Bus bus_;
     Cpu cpu_;

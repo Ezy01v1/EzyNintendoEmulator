@@ -1,18 +1,116 @@
 #include "gb/gameboy.hpp"
 
+#include <array>
+#include <cassert>
+
+#include "common/state.hpp"
+#include "gb/compat_palettes.hpp"
+
 namespace ezy::gb {
 
-std::unique_ptr<GameBoy> GameBoy::create(std::span<const std::uint8_t> rom) {
-    auto cartridge = Cartridge::load(rom);
-    if (!cartridge) return nullptr;
-    return std::unique_ptr<GameBoy>(new GameBoy(std::move(*cartridge)));
+namespace {
+
+// What the CGB boot ROM leaves in B for a DMG game: the sum of the 16 title bytes, but
+// only for Nintendo-published games (the only ones it has palettes for).
+std::uint8_t compat_title_checksum(const CartridgeHeader& header) {
+    if (!header.nintendo_licensee()) return 0;
+    std::uint8_t sum = 0;
+    for (const auto byte : header.title_bytes) sum = static_cast<std::uint8_t>(sum + byte);
+    return sum;
 }
 
-GameBoy::GameBoy(Cartridge cartridge) : bus_(std::move(cartridge)), cpu_(bus_) { cpu_.reset_post_boot(); }
+}  // namespace
+
+std::unique_ptr<GameBoy> GameBoy::create(std::span<const std::uint8_t> rom, Options options) {
+    auto cartridge = Cartridge::load(rom);
+    if (!cartridge) return nullptr;
+    const Model model = resolve_model(options.model);
+    constexpr std::size_t kCgbBootRomSize = 0x900;
+    const bool real_boot = options.boot_rom && model == Model::Cgb;
+    if (real_boot && options.boot_rom->size() != kCgbBootRomSize) return nullptr;
+
+    auto gameboy = std::unique_ptr<GameBoy>(new GameBoy(std::move(*cartridge), model));
+    if (real_boot) {
+        // Start from scratch at 0x0000 and let Nintendo's code do the rest.
+        gameboy->bus().map_boot_rom(std::move(*options.boot_rom));
+        gameboy->cpu().regs() = Registers{};
+        return gameboy;
+    }
+    if (gameboy->model() == Model::Cgb && !gameboy->bus().cgb_mode()) {
+        // What the CGB boot ROM does for a DMG game: pick its colours.
+        const CompatPalette p = select_compat_palette(gameboy->bus().cartridge().header(), options.held_buttons);
+        gameboy->bus().ppu().set_compat_palettes(p.bg, p.obj0, p.obj1);
+    }
+    return gameboy;
+}
+
+GameBoy::GameBoy(Cartridge cartridge, Model model) : bus_(std::move(cartridge), model), cpu_(bus_) {
+    cpu_.reset_post_boot(model, bus_.cgb_mode(), compat_title_checksum(bus_.cartridge().header()));
+}
+
+namespace {
+
+constexpr std::array<char, 4> kStateMagic = {'E', 'Z', 'G', 'B'};
+constexpr std::uint32_t kStateVersion = 1;
+
+// Identifies the game a state belongs to: the header and global checksums.
+std::uint32_t rom_id(const Cartridge& cart) {
+    const auto global_hi = cart.read_rom(0x014E);
+    const auto global_lo = cart.read_rom(0x014F);
+    return static_cast<std::uint32_t>(cart.header().header_checksum) << 16 |
+           static_cast<std::uint32_t>(global_hi) << 8 | global_lo;
+}
+
+struct StateHeader {
+    std::array<char, 4> magic{};
+    std::uint32_t version = 0;
+    std::uint32_t rom = 0;
+    Model model = Model::Dmg;
+
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(magic), ar(version), ar(rom), ar(model);
+    }
+};
+
+}  // namespace
+
+std::vector<std::uint8_t> GameBoy::save_state() {
+    StateWriter writer;
+    StateHeader header{kStateMagic, kStateVersion, rom_id(bus_.cartridge()), model()};
+    writer(header);
+    writer(cpu_);
+    writer(bus_);
+    return writer.take();
+}
+
+bool GameBoy::load_state(std::span<const std::uint8_t> state) {
+    StateReader reader(state);
+    StateHeader header;
+    reader(header);
+    if (reader.failed() || header.magic != kStateMagic || header.version != kStateVersion ||
+        header.rom != rom_id(bus_.cartridge()) || header.model != model()) {
+        return false;
+    }
+    const std::vector<std::uint8_t> previous = save_state();
+    reader(cpu_);
+    reader(bus_);
+    if (reader.failed() || !reader.at_end()) {
+        StateReader undo(previous);
+        StateHeader skip;
+        undo(skip);
+        undo(cpu_);
+        undo(bus_);
+        assert(!undo.failed());  // our own state of a moment ago always loads
+        return false;
+    }
+    bus_.finish_load();
+    return true;
+}
 
 void GameBoy::run_frame() {
-    const std::uint64_t start = bus_.t_cycles();
-    while (bus_.t_cycles() - start < kDotsPerFrame) {
+    const std::uint64_t start = bus_.dots();
+    while (bus_.dots() - start < kDotsPerFrame) {
         cpu_.step();
         if (bus_.ppu().take_frame_ready()) return;
     }

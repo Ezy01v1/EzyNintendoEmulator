@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "gba/hle_bios.hpp"
-#include "gba/state.hpp"
+#include "common/state.hpp"
 
 namespace ezy::gba {
 

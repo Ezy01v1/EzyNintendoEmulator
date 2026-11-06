@@ -5,6 +5,8 @@
 #include <span>
 #include <vector>
 
+#include "gb/model.hpp"
+
 namespace ezy::gb {
 
 // Audio Processing Unit (0xFF10-0xFF3F). Four channels: two squares (CH1 with frequency
@@ -37,16 +39,40 @@ public:
     [[nodiscard]] bool channel_on(int ch) const;  // ch 0-3
     [[nodiscard]] int frame_step() const { return frame_step_; }
 
+    // The DMG and CGB APUs differ in a few corner cases (length counters while powered
+    // off, wave RAM access while CH3 plays). Set once at power-on.
+    void set_model(Model model) { model_ = model; }
+    // CGB PCM12/PCM34 (0xFF76/0xFF77): the current 4-bit digital output of CH1|CH2 and
+    // CH3|CH4 (low nibble = the lower channel).
+    [[nodiscard]] std::uint8_t pcm12() const;
+    [[nodiscard]] std::uint8_t pcm34() const;
+
+    // Save states. Samples not yet played are not part of the state.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(regs_), ar(powered_), ar(frame_step_);
+        ar(squares_), ar(sweep_), ar(wave_), ar(noise_);
+        ar(acc_left_), ar(acc_right_), ar(acc_count_), ar(sample_phase_), ar(hp_left_), ar(hp_right_);
+    }
+
 private:
     struct Envelope {
         int volume = 0;
         int timer = 0;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(volume), ar(timer);
+        }
         void trigger(std::uint8_t nrx2);
         void clock(std::uint8_t nrx2);
     };
 
     struct Length {
         int counter = 0;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(counter);
+        }
         void clock(bool enabled, bool& channel_on);
     };
 
@@ -56,6 +82,10 @@ private:
         int duty_pos = 0;
         Envelope env;
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(on), ar(timer), ar(duty_pos), ar(env), ar(len);
+        }
     };
 
     struct Sweep {
@@ -63,6 +93,10 @@ private:
         int timer = 0;
         int shadow = 0;
         bool negate_used = false;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(enabled), ar(timer), ar(shadow), ar(negate_used);
+        }
     };
 
     struct Wave {
@@ -71,6 +105,10 @@ private:
         int pos = 0;
         std::uint8_t sample = 0;  // last nibble read from wave RAM
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(on), ar(timer), ar(pos), ar(sample), ar(len);
+        }
     };
 
     struct Noise {
@@ -79,6 +117,10 @@ private:
         std::uint16_t lfsr = 0x7FFF;
         Envelope env;
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            ar(on), ar(timer), ar(lfsr), ar(env), ar(len);
+        }
     };
 
     [[nodiscard]] std::uint8_t reg(std::uint16_t addr) const { return regs_[addr - 0xFF10]; }
@@ -97,9 +139,11 @@ private:
 
     void step_channels(int t_cycles);
     void mix_and_sample();
+    [[nodiscard]] int channel_amplitude(int ch) const;  // 0-15, before the DAC
 
     std::array<std::uint8_t, 0x30> regs_{};  // raw FF10-FF3F (wave RAM at the end)
     bool powered_ = true;
+    Model model_ = Model::Dmg;
     int frame_step_ = 0;  // next frame sequencer step to run (0-7)
 
     std::array<Square, 2> squares_{};

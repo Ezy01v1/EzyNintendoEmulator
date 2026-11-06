@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -7,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "gb/mbc.hpp"
@@ -15,7 +17,10 @@ namespace ezy::gb {
 
 // Cartridge header layout (Pan Docs, "The Cartridge Header").
 inline constexpr std::size_t kTitleStart = 0x134;
-inline constexpr std::size_t kTitleEnd = 0x143;  // inclusive
+inline constexpr std::size_t kTitleEnd = 0x143;  // inclusive (0x142 on CGB cartridges)
+inline constexpr std::size_t kCgbFlagAddr = 0x143;
+inline constexpr std::size_t kNewLicenseeAddr = 0x144;  // 2 ASCII characters
+inline constexpr std::size_t kOldLicenseeAddr = 0x14B;  // 0x33 = "use the new code"
 inline constexpr std::size_t kCartTypeAddr = 0x147;
 inline constexpr std::size_t kRomSizeAddr = 0x148;
 inline constexpr std::size_t kRamSizeAddr = 0x149;
@@ -24,11 +29,23 @@ inline constexpr std::size_t kHeaderEnd = 0x150;  // a ROM must be at least this
 
 struct CartridgeHeader {
     std::string title;
+    // The 16 raw bytes 0x134-0x143. The CGB boot ROM sums them to pick a palette.
+    std::array<std::uint8_t, 16> title_bytes{};
+    // 0x80 = also runs on CGB with colour, 0xC0 = CGB only, anything else = DMG game.
+    std::uint8_t cgb_flag = 0;
+    std::uint8_t old_licensee = 0;
+    std::array<char, 2> new_licensee{};
     std::uint8_t cart_type = 0;
     std::size_t rom_size = 0;  // bytes, as declared by the header
     std::size_t ram_size = 0;  // bytes, as declared by the header
     std::uint8_t header_checksum = 0;
     bool header_checksum_ok = false;
+
+    [[nodiscard]] bool supports_cgb() const { return (cgb_flag & 0x80) != 0; }
+    // Games published by Nintendo: the only ones the CGB boot ROM has palettes for.
+    [[nodiscard]] bool nintendo_licensee() const {
+        return old_licensee == 0x01 || (old_licensee == 0x33 && new_licensee == std::array<char, 2>{'0', '1'});
+    }
 };
 
 // Parses the header. Returns nullopt if the ROM is too small or declares an unknown size.
@@ -76,6 +93,14 @@ public:
     bool load_save_data(std::span<const std::uint8_t> data, std::int64_t unix_now = 0);
     // Set by every write to external RAM or the RTC, until cleared by whoever persists it.
     [[nodiscard]] bool save_dirty() const { return save_dirty_; }
+
+    // Save states: the MBC registers and the RAM (the ROM and header never change).
+    template <class Ar>
+    void serialize(Ar& ar) {
+        std::visit([&](auto& mbc) { mbc.serialize(ar); }, mbc_);
+        ar(ram_);
+        if constexpr (Ar::kLoading) save_dirty_ = true;
+    }
     void clear_save_dirty() { save_dirty_ = false; }
 
     [[nodiscard]] const Mbc& mbc() const { return mbc_; }

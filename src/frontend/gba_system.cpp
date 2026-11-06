@@ -1,5 +1,7 @@
 #include "gba_system.hpp"
 
+#include "file_util.hpp"
+
 #include <imgui.h>
 
 #include <array>
@@ -105,34 +107,6 @@ void GbaSystem::load_save() {
     }
 }
 
-namespace {
-
-// Writes to a temp file and renames it, so a crash mid-write never corrupts the old file.
-bool write_file_atomically(const std::filesystem::path& path, std::span<const std::uint8_t> data) {
-    std::filesystem::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-        if (!file) {
-            std::cerr << "Could not write " << tmp.string() << "\n";
-            return false;
-        }
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::cerr << "Could not replace " << path.string() << ": " << ec.message() << "\n";
-        return false;
-    }
-    return true;
-}
-
-std::filesystem::path state_path(const std::filesystem::path& save_path) {
-    return std::filesystem::path(save_path).replace_extension(".ss1");
-}
-
-}  // namespace
 
 void GbaSystem::flush_save() {
     frames_since_flush_ = 0;

@@ -17,11 +17,24 @@ constexpr std::uint16_t u16(T v) {
 
 }  // namespace
 
-void Cpu::reset_post_boot() {
-    r_.set_af(0x01B0);
-    r_.set_bc(0x0013);
-    r_.set_de(0x00D8);
-    r_.set_hl(0x014D);
+void Cpu::reset_post_boot(Model model, bool cgb_mode, std::uint8_t compat_b) {
+    if (model == Model::Dmg) {
+        r_.set_af(0x01B0);
+        r_.set_bc(0x0013);
+        r_.set_de(0x00D8);
+        r_.set_hl(0x014D);
+    } else if (cgb_mode) {
+        r_.set_af(0x1180);  // A = 0x11 is how games detect a Game Boy Color
+        r_.set_bc(0x0000);
+        r_.set_de(0xFF56);
+        r_.set_hl(0x000D);
+    } else {
+        r_.set_af(0x1180);
+        r_.set_bc(static_cast<std::uint16_t>(compat_b << 8));
+        r_.set_de(0x0008);
+        // The boot ROM leaves HL pointing into its palette code for two checksums.
+        r_.set_hl(compat_b == 0x43 || compat_b == 0x58 ? 0x991A : 0x007C);
+    }
     r_.sp = 0xFFFE;
     r_.pc = 0x0100;
     ime_ = ime_pending_ = halted_ = halt_bug_ = locked_ = false;
@@ -41,6 +54,7 @@ void Cpu::step() {
             return;
         }
         halted_ = false;  // any pending interrupt wakes the CPU, even with IME off
+        bus_.set_cpu_halted(false);
     }
     if (ime_ && bus_.pending_interrupts() != 0) {
         service_interrupt();
@@ -73,6 +87,7 @@ void Cpu::halt() {
         halt_bug_ = true;  // HALT is skipped and the next byte is read twice
     } else {
         halted_ = true;
+        bus_.set_cpu_halted(true);
     }
 }
 
@@ -210,7 +225,10 @@ void Cpu::execute_block0(int y, int z, int p, int q) {
                     bus_.write(u16(addr + 1), u8(r_.sp >> 8));
                     break;
                 }
-                case 2: read8(); break;  // STOP: treated as a 2-byte NOP for now
+                case 2:  // STOP: 2 bytes. Low-power mode isn't modelled; the bus handles the rest.
+                    read8();
+                    bus_.stop();
+                    break;
                 case 3: jr(true); break;  // JR e
                 default: jr(condition(y - 4)); break;  // JR cc, e
             }

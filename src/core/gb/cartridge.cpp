@@ -47,11 +47,17 @@ std::optional<CartridgeHeader> parse_header(std::span<const std::uint8_t> rom) {
     }
 
     CartridgeHeader header;
-    // The title is padded with zeros; stop at the first one.
-    for (std::size_t addr = kTitleStart; addr <= kTitleEnd && rom[addr] != 0; ++addr) {
+    header.cgb_flag = rom[kCgbFlagAddr];
+    // The title is padded with zeros; stop at the first one. On CGB cartridges the last
+    // title byte is the CGB flag instead.
+    const std::size_t title_end = header.supports_cgb() ? kTitleEnd - 1 : kTitleEnd;
+    for (std::size_t i = 0; i < header.title_bytes.size(); ++i) header.title_bytes[i] = rom[kTitleStart + i];
+    for (std::size_t addr = kTitleStart; addr <= title_end && rom[addr] != 0; ++addr) {
         header.title.push_back(static_cast<char>(rom[addr]));
     }
     header.cart_type = rom[kCartTypeAddr];
+    header.old_licensee = rom[kOldLicenseeAddr];
+    header.new_licensee = {static_cast<char>(rom[kNewLicenseeAddr]), static_cast<char>(rom[kNewLicenseeAddr + 1])};
     header.rom_size = *rom_size;
     header.ram_size = *ram_size;
     header.header_checksum = rom[kHeaderChecksumAddr];

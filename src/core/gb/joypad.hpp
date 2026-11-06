@@ -28,6 +28,11 @@ public:
         return newly_pressed;
     }
 
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(select_), ar(pressed_);
+    }
+
 private:
     std::uint8_t select_ = 0x30;
     std::uint8_t pressed_ = 0;  // bit set = pressed; low nibble d-pad, high nibble buttons

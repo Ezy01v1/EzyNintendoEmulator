@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "gb/cpu_bus.hpp"
+#include "gb/model.hpp"
 
 namespace ezy::gb {
 
@@ -48,11 +49,20 @@ class Cpu {
 public:
     explicit Cpu(CpuBus& bus) : bus_(bus) {}
 
-    // Register state the DMG boot ROM leaves behind (Pan Docs, "Power Up Sequence").
-    // We never run the boot ROM itself: it is Nintendo's copyrighted code.
-    void reset_post_boot();
+    // Register state the boot ROM leaves behind (Pan Docs, "Power Up Sequence"). We don't
+    // need the boot ROM itself: it is Nintendo's copyrighted code. On a CGB the values
+    // depend on the mode; in DMG compatibility mode B holds the title checksum the boot ROM
+    // computed for Nintendo games (0 otherwise), passed in as `compat_b`.
+    void reset_post_boot(Model model = Model::Dmg, bool cgb_mode = false, std::uint8_t compat_b = 0);
 
     void step();  // services an interrupt or executes one instruction
+
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(r_.a), ar(r_.f), ar(r_.b), ar(r_.c), ar(r_.d), ar(r_.e), ar(r_.h), ar(r_.l);
+        ar(r_.sp), ar(r_.pc);
+        ar(ime_), ar(ime_pending_), ar(halted_), ar(halt_bug_), ar(locked_);
+    }
 
     [[nodiscard]] Registers& regs() { return r_; }
     [[nodiscard]] const Registers& regs() const { return r_; }

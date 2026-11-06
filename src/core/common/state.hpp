@@ -7,7 +7,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace ezy::gba {
+namespace ezy {
 
 namespace state_detail {
 template <typename T>
@@ -25,8 +25,8 @@ struct IsArray<std::array<T, N>> : std::true_type {};
 //
 // Values without padding are copied as raw bytes; a struct with padding (whose bytes
 // would be garbage) must have its own serialize(), which the archivers call. Values are
-// copied as raw bytes (little-endian, as the bus already assumes), so a state
-// is only meant to be loaded by the same build: Gba checks a version number for that.
+// copied as raw bytes (little-endian, as the buses already assume), so a state
+// is only meant to be loaded by the same build: Gba and GameBoy check a version number.
 
 class StateWriter {
 public:
@@ -82,6 +82,8 @@ public:
     }
 
     [[nodiscard]] bool failed() const { return failed_; }
+    // For serialize() functions that find the data valid but unusable.
+    void fail() { failed_ = true; }
     [[nodiscard]] bool at_end() const { return pos_ == data_.size(); }
 
 private:
@@ -97,4 +99,4 @@ private:
     bool failed_ = false;
 };
 
-}  // namespace ezy::gba
+}  // namespace ezy

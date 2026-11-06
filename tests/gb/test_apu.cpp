@@ -4,8 +4,10 @@
 #include <cstdint>
 
 #include "gb/apu.hpp"
+#include "gb/model.hpp"
 
 using ezy::gb::Apu;
+using ezy::gb::Model;
 
 namespace {
 
@@ -101,4 +103,60 @@ TEST_CASE("APU produces 48 kHz stereo samples and a square wave is audible") {
     CHECK(peak <= 1.0F);
     apu.clear_samples();
     CHECK(apu.samples().empty());
+}
+
+TEST_CASE("PCM12 and PCM34 report the channel outputs") {
+    Apu apu;
+    apu.set_model(Model::Cgb);
+    CHECK(apu.pcm12() == 0x00);
+    apu.write(0xFF12, 0xF0);  // CH1 volume 15, DAC on
+    apu.write(0xFF11, 0xC0);  // 75% duty: high most of the time
+    apu.write(0xFF14, 0x87);  // trigger
+    bool saw_high = false;
+    for (int i = 0; i < 4096 && !saw_high; ++i) {
+        apu.tick();
+        saw_high = (apu.pcm12() & 0x0F) == 0x0F;
+    }
+    CHECK(saw_high);
+    CHECK((apu.pcm12() >> 4) == 0);  // CH2 silent
+    CHECK(apu.pcm34() == 0x00);
+}
+
+TEST_CASE("CGB length registers ignore writes while the APU is off") {
+    Apu apu;
+    apu.set_model(Model::Cgb);
+    apu.write(0xFF26, 0x00);
+    apu.write(0xFF11, 0x3F);  // length = 1 if accepted
+    apu.write(0xFF26, 0x80);
+    apu.write(0xFF12, 0xF0);
+    apu.write(0xFF14, 0xC0);  // trigger with length enabled: length 0 -> reloads 64
+    apu.div_falling_edge();   // one length clock
+    CHECK(apu.channel_on(0));
+}
+
+TEST_CASE("DMG length registers accept writes while the APU is off") {
+    Apu apu;
+    apu.write(0xFF26, 0x00);
+    apu.write(0xFF11, 0x3F);  // length = 1
+    apu.write(0xFF26, 0x80);
+    apu.write(0xFF12, 0xF0);
+    apu.write(0xFF14, 0xC0);
+    apu.div_falling_edge();
+    CHECK_FALSE(apu.channel_on(0));
+}
+
+TEST_CASE("wave RAM while CH3 plays: readable on CGB, 0xFF on DMG") {
+    for (const Model model : {Model::Cgb, Model::Dmg}) {
+        Apu apu;
+        apu.set_model(model);
+        apu.write(0xFF30, 0x12);
+        apu.write(0xFF1A, 0x80);  // DAC on
+        apu.write(0xFF1E, 0x80);  // trigger
+        apu.tick();
+        if (model == Model::Cgb) {
+            CHECK(apu.read(0xFF30) != 0xFF);
+        } else {
+            CHECK(apu.read(0xFF30) == 0xFF);
+        }
+    }
 }

@@ -16,6 +16,11 @@ public:
     virtual std::uint8_t read(std::uint16_t addr) = 0;              // costs one M-cycle
     virtual void write(std::uint16_t addr, std::uint8_t value) = 0;  // costs one M-cycle
     virtual void tick() = 0;                                         // internal M-cycle
+    // The STOP instruction, after its second byte was fetched. On a CGB it performs an
+    // armed speed switch. The default (test buses) does nothing.
+    virtual void stop() {}
+    // Told whenever the CPU enters or leaves HALT.
+    virtual void set_cpu_halted(bool /*halted*/) {}
 
     // IE & IF, masked to the 5 interrupt bits.
     [[nodiscard]] virtual std::uint8_t pending_interrupts() const = 0;

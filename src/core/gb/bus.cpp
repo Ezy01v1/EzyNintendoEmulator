@@ -17,36 +17,73 @@ constexpr bool is_ppu(std::uint16_t addr) { return addr >= 0xFF40 && addr <= 0xF
 
 }  // namespace
 
+// The CPU is locked out of VRAM and OAM while the PPU uses them: reads return 0xFF and
+// writes are lost. peek()/poke() (debugger, DMA) ignore the locks.
+bool Bus::cpu_can_access(std::uint16_t addr) const {
+    if (addr >= 0x8000 && addr < 0xA000) return ppu_.vram_accessible();
+    if (addr >= 0xFE00 && addr < 0xFEA0) return ppu_.oam_accessible();
+    return true;
+}
+
 std::uint8_t Bus::read(std::uint16_t addr) {
     advance();
-    return peek(addr);
+    return cpu_can_access(addr) ? peek(addr) : 0xFF;
 }
 
 void Bus::write(std::uint16_t addr, std::uint8_t value) {
     advance();
-    poke(addr, value);
+    if (cpu_can_access(addr)) poke(addr, value);
 }
 
 void Bus::tick() { advance(); }
 
 void Bus::advance() {
+    const int dots = double_speed_ ? 2 : 4;
     t_cycles_ += 4;
+    dots_ += static_cast<std::uint64_t>(dots);
     const std::uint16_t counter_before = timer_.counter();
     timer_.tick();
     clock_frame_sequencer(counter_before);
-    apu_.tick();
-    cartridge_.tick(4);
+    // The APU runs on the dot clock: every other CPU M-cycle in double speed.
+    apu_half_cycle_ = !apu_half_cycle_;
+    if (!double_speed_ || apu_half_cycle_) apu_.tick();
+    cartridge_.tick(dots);  // the RTC counts real time
     if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
-    ppu_.tick();
+    ppu_.tick(dots);
     request_interrupt(ppu_.take_interrupts());
+    // HBlank DMA skips the HBlanks that pass while the CPU is halted (Pan Docs).
+    if (ppu_.take_hblank_started() && hdma_.hblank_active() && !in_vram_dma_ && !cpu_halted_) run_vram_dma(1);
+}
+
+// 2 bytes per M-cycle: a 16-byte block costs the CPU 8 M-cycles.
+void Bus::run_vram_dma(int blocks) {
+    in_vram_dma_ = true;
+    for (int b = 0; b < blocks; ++b) {
+        const Hdma::Block block = hdma_.next_block();
+        for (std::uint16_t i = 0; i < 16; ++i) {
+            ppu_.write_vram(static_cast<std::uint16_t>(block.dest + i), peek(static_cast<std::uint16_t>(block.source + i)));
+        }
+        // 32 dots per block: 8 CPU M-cycles, or 16 in double speed.
+        for (int cycle = 0; cycle < (double_speed_ ? 16 : 8); ++cycle) advance();
+    }
+    in_vram_dma_ = false;
+}
+
+void Bus::map_boot_rom(std::vector<std::uint8_t> boot_rom) {
+    boot_rom_ = std::move(boot_rom);
+    cgb_mode_ = true;
+    ppu_.set_cgb_mode(true);
+    ppu_.set_opri(0);
 }
 
 std::uint8_t Bus::peek(std::uint16_t addr) const {
+    // The cartridge header (0x0100-0x01FF) stays visible: the boot ROM reads it.
+    if (!boot_rom_.empty() && (addr < 0x0100 || (addr >= 0x0200 && addr < 0x0900))) return boot_rom_[addr];
     if (addr < 0x8000) return cartridge_.read_rom(addr);
     if (addr < 0xA000) return ppu_.read_vram(addr);
     if (addr < 0xC000) return cartridge_.read_ram(addr);
-    if (addr < 0xE000) return wram_[addr - 0xC000];
-    if (addr < 0xFE00) return wram_[addr - 0xE000];  // echo RAM mirrors C000-DDFF
+    if (addr < 0xE000) return wram_[wram_index(addr)];
+    if (addr < 0xFE00) return wram_[wram_index(addr - 0x2000)];  // echo RAM mirrors C000-DDFF
     if (addr < 0xFEA0) return ppu_.read_oam(addr);
     if (addr < 0xFF00) return 0xFF;  // unusable area
     if (addr < 0xFF80) return read_io(addr);
@@ -58,8 +95,8 @@ void Bus::poke(std::uint16_t addr, std::uint8_t value) {
     if (addr < 0x8000) { cartridge_.write_rom(addr, value); return; }  // MBC registers
     if (addr < 0xA000) { ppu_.write_vram(addr, value); return; }
     if (addr < 0xC000) { cartridge_.write_ram(addr, value); return; }
-    if (addr < 0xE000) { wram_[addr - 0xC000] = value; return; }
-    if (addr < 0xFE00) { wram_[addr - 0xE000] = value; return; }
+    if (addr < 0xE000) { wram_[wram_index(addr)] = value; return; }
+    if (addr < 0xFE00) { wram_[wram_index(addr - 0x2000)] = value; return; }
     if (addr < 0xFEA0) { ppu_.write_oam(addr, value); return; }
     if (addr < 0xFF00) return;  // unusable area
     if (addr < 0xFF80) { write_io(addr, value); return; }
@@ -67,8 +104,94 @@ void Bus::poke(std::uint16_t addr, std::uint8_t value) {
     ie_ = value;
 }
 
+std::size_t Bus::wram_index(std::uint16_t addr) const {
+    if (addr < 0xD000) return addr - 0xC000;
+    return static_cast<std::size_t>(wram_bank()) * 0x1000 + (addr - 0xD000);
+}
+
+// CGB-only registers. Outside CGB mode (a DMG, or a DMG game on a CGB) they are not
+// there: reads return 0xFF and writes are dropped. Returns nullopt / false for addresses
+// that aren't CGB registers.
+std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
+    const bool cgb_register = addr == 0xFF4C || addr == 0xFF4D || addr == 0xFF4F || (addr >= 0xFF51 && addr <= 0xFF56) ||
+                              (addr >= 0xFF68 && addr <= 0xFF6C) || addr == 0xFF76 || addr == 0xFF77 ||
+                              addr == 0xFF70 || (addr >= 0xFF72 && addr <= 0xFF75);
+    if (!cgb_register) return std::nullopt;
+    // 0xFF72/73/75 exist on any CGB, even in compatibility mode; 0xFF74 only in CGB mode.
+    const bool always_on_cgb = addr == 0xFF72 || addr == 0xFF73 || addr == 0xFF75;
+    if (!cgb_mode_ && !(model_ == Model::Cgb && always_on_cgb)) return std::uint8_t{0xFF};
+    switch (addr) {
+        case 0xFF4F: return static_cast<std::uint8_t>(0xFE | ppu_.vram_bank());
+        case 0xFF68:
+        case 0xFF69:
+        case 0xFF6A:
+        case 0xFF6B: return ppu_.read_register(addr);
+        case 0xFF4D:
+            return static_cast<std::uint8_t>(0x7E | (double_speed_ ? 0x80 : 0) | (speed_switch_armed_ ? 1 : 0));
+        case 0xFF55: return hdma_.read_control();
+        case 0xFF76: return apu_.pcm12();
+        case 0xFF77: return apu_.pcm34();
+        case 0xFF56: return static_cast<std::uint8_t>(0x3E | rp_);  // bit 1 = 1: no light received
+        case 0xFF6C: return static_cast<std::uint8_t>(0xFE | ppu_.opri());
+        case 0xFF70: return static_cast<std::uint8_t>(0xF8 | svbk_);
+        case 0xFF75: return static_cast<std::uint8_t>(0x8F | undocumented_[3]);
+        case 0xFF72:
+        case 0xFF73:
+        case 0xFF74: return undocumented_[addr - 0xFF72];
+        default: return boot_rom_.empty() ? std::uint8_t{0xFF} : key0_;  // KEY0
+    }
+}
+
+bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
+    if (!read_cgb_io(addr)) return false;
+    const bool always_on_cgb = addr == 0xFF72 || addr == 0xFF73 || addr == 0xFF75;
+    if (!cgb_mode_ && !(model_ == Model::Cgb && always_on_cgb)) return true;
+    switch (addr) {
+        case 0xFF4F: ppu_.set_vram_bank(value & 1); break;
+        case 0xFF68:
+        case 0xFF69:
+        case 0xFF6A:
+        case 0xFF6B: ppu_.write_register(addr, value); break;
+        case 0xFF4D: speed_switch_armed_ = (value & 1) != 0; break;
+        case 0xFF51:
+        case 0xFF52:
+        case 0xFF53:
+        case 0xFF54: hdma_.write_address(addr, value); break;
+        case 0xFF55:
+            if (const int blocks = hdma_.write_control(value); blocks > 0) {
+                run_vram_dma(blocks);
+            } else if (hdma_.hblank_active() &&
+                       (!ppu_.lcd_on() || (ppu_.mode() == 0 && ppu_.ly() < kLcdHeight))) {
+                // With the LCD off, or when started inside an HBlank, one block goes right away.
+                run_vram_dma(1);
+            }
+            break;
+        case 0xFF56: rp_ = value & 0xC1; break;
+        case 0xFF6C: ppu_.set_opri(value); break;
+        case 0xFF70: svbk_ = value & 0x07; break;
+        case 0xFF75: undocumented_[3] = value & 0x70; break;
+        case 0xFF72:
+        case 0xFF73:
+        case 0xFF74: undocumented_[addr - 0xFF72] = value; break;
+        default:  // KEY0: only the boot ROM can write it
+            if (!boot_rom_.empty()) key0_ = value;
+            break;
+    }
+    return true;
+}
+
+void Bus::stop() {
+    // STOP always resets DIV.
+    write_io(0xFF04, 0);
+    if (!cgb_mode_ || !speed_switch_armed_) return;
+    double_speed_ = !double_speed_;
+    speed_switch_armed_ = false;
+    for (int cycle = 0; cycle < 2050; ++cycle) advance();  // the CPU is stopped meanwhile
+}
+
 void Bus::clock_frame_sequencer(std::uint16_t counter_before) {
-    constexpr std::uint16_t kBit = 1U << 12;
+    // 512 Hz either way: in double speed DIV counts twice as fast, so one bit higher.
+    const auto kBit = static_cast<std::uint16_t>(double_speed_ ? 1U << 13 : 1U << 12);
     if ((counter_before & kBit) != 0 && (timer_.counter() & kBit) == 0) apu_.div_falling_edge();
 }
 
@@ -77,6 +200,7 @@ void Bus::set_button(Button button, bool pressed) {
 }
 
 std::uint8_t Bus::read_io(std::uint16_t addr) const {
+    if (const auto value = read_cgb_io(addr)) return *value;
     if (is_timer(addr)) return timer_.read(addr);
     if (is_apu(addr)) return apu_.read(addr);
     if (is_ppu(addr)) return ppu_.read_register(addr);
@@ -90,6 +214,7 @@ std::uint8_t Bus::read_io(std::uint16_t addr) const {
 }
 
 void Bus::write_io(std::uint16_t addr, std::uint8_t value) {
+    if (write_cgb_io(addr, value)) return;
     if (is_timer(addr)) {
         const std::uint16_t counter_before = timer_.counter();
         timer_.write(addr, value);
@@ -122,6 +247,13 @@ void Bus::write_io(std::uint16_t addr, std::uint8_t value) {
             break;
         case kInterruptFlag: if_ = value & 0x1F; break;
         case kOamDma: oam_dma(value); break;
+        case 0xFF50:  // unmap the boot ROM, for good
+            if (!boot_rom_.empty()) {
+                boot_rom_.clear();
+                cgb_mode_ = (key0_ & 0x04) == 0;
+                ppu_.set_cgb_mode(cgb_mode_);
+            }
+            break;
         default: io_[addr - 0xFF00] = value; break;
     }
 }

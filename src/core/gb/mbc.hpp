@@ -30,6 +30,9 @@ struct NoMbc {
         return 0xFF;
     }
     bool write_ram(std::uint16_t /*addr*/, std::uint8_t /*value*/, std::span<std::uint8_t> /*ram*/) { return false; }
+
+    template <class Ar>
+    void serialize(Ar& /*ar*/) {}
 };
 
 struct Mbc1 {
@@ -42,6 +45,11 @@ struct Mbc1 {
     std::uint8_t bank_high = 0;  // 2 bits
     bool advanced_mode = false;  // also applies bank_high to 0x0000-0x3FFF and RAM
     bool ram_enabled = false;
+
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(bank_low), ar(bank_high), ar(advanced_mode), ar(ram_enabled);
+    }
 
 private:
     [[nodiscard]] std::size_t ram_offset(std::uint16_t addr, std::size_t ram_size) const;
@@ -69,6 +77,11 @@ struct Rtc {
     [[nodiscard]] static std::uint8_t mask(std::uint8_t reg, std::uint8_t value);
     [[nodiscard]] std::uint8_t read(std::uint8_t reg) const { return latched[reg - 0x08]; }
 
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(regs), ar(latched), ar(subsecond_cycles);
+    }
+
 private:
     void step_second();
 };
@@ -89,6 +102,11 @@ struct Mbc3 {
     std::uint8_t last_latch_write = 0xFF;
     bool has_rtc = false;
     Rtc rtc;
+
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(rom_bank), ar(ram_select), ar(ram_enabled), ar(last_latch_write), ar(rtc);
+    }
 };
 
 struct Mbc5 {
@@ -102,6 +120,11 @@ struct Mbc5 {
     bool ram_enabled = false;
     bool has_rumble = false;     // bit 3 of the RAM bank register drives the motor instead
     bool rumble_on = false;
+
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(rom_bank), ar(ram_bank), ar(ram_enabled), ar(rumble_on);
+    }
 };
 
 using Mbc = std::variant<NoMbc, Mbc1, Mbc3, Mbc5>;
