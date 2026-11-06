@@ -9,6 +9,7 @@
 #include "gb/cpu_bus.hpp"
 #include "gb/interrupts.hpp"
 #include "gb/joypad.hpp"
+#include "gb/model.hpp"
 #include "gb/ppu.hpp"
 #include "gb/timer.hpp"
 
@@ -21,7 +22,15 @@ namespace ezy::gb {
 // side effects; they are for tests and the debugger only.
 class Bus final : public CpuBus {
 public:
-    explicit Bus(Cartridge cartridge) : cartridge_(std::move(cartridge)) {}
+    explicit Bus(Cartridge cartridge, Model model = Model::Dmg)
+        : cartridge_(std::move(cartridge)),
+          model_(model),
+          cgb_mode_(model == Model::Cgb && cartridge_.header().supports_cgb()) {}
+
+    [[nodiscard]] Model model() const { return model_; }
+    // True when CGB features are enabled: a CGB game on CGB hardware. A DMG game on a CGB
+    // runs in DMG compatibility mode, where most CGB registers are hidden.
+    [[nodiscard]] bool cgb_mode() const { return cgb_mode_; }
 
     std::uint8_t read(std::uint16_t addr) override;
     void write(std::uint16_t addr, std::uint8_t value) override;
@@ -60,6 +69,8 @@ private:
     void oam_dma(std::uint8_t page);
 
     Cartridge cartridge_;
+    Model model_;
+    bool cgb_mode_;
     Timer timer_;
     Ppu ppu_;
     Apu apu_;

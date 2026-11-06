@@ -17,11 +17,24 @@ constexpr std::uint16_t u16(T v) {
 
 }  // namespace
 
-void Cpu::reset_post_boot() {
-    r_.set_af(0x01B0);
-    r_.set_bc(0x0013);
-    r_.set_de(0x00D8);
-    r_.set_hl(0x014D);
+void Cpu::reset_post_boot(Model model, bool cgb_mode, std::uint8_t compat_b) {
+    if (model == Model::Dmg) {
+        r_.set_af(0x01B0);
+        r_.set_bc(0x0013);
+        r_.set_de(0x00D8);
+        r_.set_hl(0x014D);
+    } else if (cgb_mode) {
+        r_.set_af(0x1180);  // A = 0x11 is how games detect a Game Boy Color
+        r_.set_bc(0x0000);
+        r_.set_de(0xFF56);
+        r_.set_hl(0x000D);
+    } else {
+        r_.set_af(0x1180);
+        r_.set_bc(static_cast<std::uint16_t>(compat_b << 8));
+        r_.set_de(0x0008);
+        // The boot ROM leaves HL pointing into its palette code for two checksums.
+        r_.set_hl(compat_b == 0x43 || compat_b == 0x58 ? 0x991A : 0x007C);
+    }
     r_.sp = 0xFFFE;
     r_.pc = 0x0100;
     ime_ = ime_pending_ = halted_ = halt_bug_ = locked_ = false;
