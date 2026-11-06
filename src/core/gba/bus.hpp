@@ -54,7 +54,8 @@ inline constexpr std::size_t kSramSize = 64 * 1024;  // the save chip's address 
 //
 // Not modelled yet: the ROM prefetch buffer, the non-sequential penalty at 128 KiB ROM
 // boundaries, I/O register side effects (plain storage for now), BIOS read protection,
-// real open-bus values outside the ROM.
+// open bus inside unused I/O registers and during DMA (we return the last opcode
+// fetched for unmapped regions only, without the per-region Thumb rules).
 class Bus final : public CpuBus, private TimerOverflowHook {
 public:
     static constexpr std::uint32_t kWaitcnt = 0x04000204;
@@ -167,6 +168,8 @@ private:
     std::array<std::uint8_t, kOamSize> oam_{};
     Backup backup_;  // after rom_: detected from it
     std::optional<Gpio> gpio_;  // likewise
+    // Last opcode fetched (Thumb: the halfword twice); unmapped reads return it.
+    std::uint32_t open_bus_ = 0;
     Scheduler* scheduler_ = nullptr;
     std::uint16_t keys_pressed_ = 0;
     bool halted_ = false;

@@ -173,7 +173,8 @@ T Bus::read(std::uint32_t addr) const {
             if constexpr (sizeof(T) == 2) return static_cast<T>(half(addr));
             if constexpr (sizeof(T) == 4) return static_cast<T>(half(addr) | (half(addr + 2) << 16));
         }
-        return 0;  // unmapped: real open bus (last prefetched opcode) comes with the CPU
+        // Unmapped: the bus still holds the last opcode the CPU fetched.
+        return static_cast<T>(open_bus_ >> (8 * (addr & 3 & ~(sizeof(T) - 1))));
     }
     T value = 0;
     std::memcpy(&value, memory.data() + offset, sizeof(T));
@@ -308,7 +309,9 @@ std::uint8_t Bus::read8(std::uint32_t addr, Access access) {
 std::uint16_t Bus::read16(std::uint32_t addr, Access access) {
     charge(access_cycles(addr, 2, access));
     if (is_eeprom_address(addr)) return backup_.eeprom_read();
-    return read<std::uint16_t>(addr);
+    const auto value = read<std::uint16_t>(addr);
+    if ((access & kCode) != 0) open_bus_ = value * 0x00010001U;  // Thumb: both halves
+    return value;
 }
 
 bool Bus::is_eeprom_address(std::uint32_t addr) const {
@@ -320,7 +323,9 @@ bool Bus::is_eeprom_address(std::uint32_t addr) const {
 
 std::uint32_t Bus::read32(std::uint32_t addr, Access access) {
     charge(access_cycles(addr, 4, access));
-    return read<std::uint32_t>(addr);
+    const auto value = read<std::uint32_t>(addr);
+    if ((access & kCode) != 0) open_bus_ = value;
+    return value;
 }
 
 void Bus::write8(std::uint32_t addr, std::uint8_t value, Access access) {

@@ -160,3 +160,25 @@ TEST_CASE("KEYCNT raises the keypad interrupt in OR and AND mode") {
     bus.write16(0x04000132, 0x4001);
     CHECK((bus.interrupt_flags() & kKeypadIrq) != 0);
 }
+
+TEST_CASE("unmapped reads return the last opcode the CPU fetched (open bus)") {
+    Bus bus(make_rom());
+    CHECK(bus.read32(0x10000000) == 0);  // nothing fetched yet
+
+    // ARM fetch: the whole word.
+    bus.write32(0x03000000, 0xE3A01234);
+    (void)bus.read32(0x03000000, static_cast<Access>(kCode | kNonseq));
+    CHECK(bus.read32(0x10000000) == 0xE3A01234);
+    CHECK(bus.read16(0x10000002) == 0xE3A0);
+    CHECK(bus.read8(0x10000001) == 0x12);
+    CHECK(bus.read32(0x00004000) == 0xE3A01234);  // past the BIOS
+    CHECK(bus.read32(0x04000400) == 0xE3A01234);  // past I/O
+
+    // Data loads don't change it.
+    (void)bus.read32(0x08000000, kNonseq);
+    CHECK(bus.read32(0x10000000) == 0xE3A01234);
+
+    // Thumb fetch: the halfword in both halves.
+    (void)bus.read16(0x08000006, static_cast<Access>(kCode | kSeq));
+    CHECK(bus.read32(0x10000000) == 0x00030003);
+}
