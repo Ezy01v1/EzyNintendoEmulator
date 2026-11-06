@@ -1,5 +1,7 @@
 #include "gb/gameboy.hpp"
 
+#include "gb/compat_palettes.hpp"
+
 namespace ezy::gb {
 
 namespace {
@@ -18,7 +20,13 @@ std::uint8_t compat_title_checksum(const CartridgeHeader& header) {
 std::unique_ptr<GameBoy> GameBoy::create(std::span<const std::uint8_t> rom, Options options) {
     auto cartridge = Cartridge::load(rom);
     if (!cartridge) return nullptr;
-    return std::unique_ptr<GameBoy>(new GameBoy(std::move(*cartridge), resolve_model(options.model)));
+    auto gameboy = std::unique_ptr<GameBoy>(new GameBoy(std::move(*cartridge), resolve_model(options.model)));
+    if (gameboy->model() == Model::Cgb && !gameboy->bus().cgb_mode()) {
+        // What the CGB boot ROM does for a DMG game: pick its colours.
+        const CompatPalette p = select_compat_palette(gameboy->bus().cartridge().header(), options.held_buttons);
+        gameboy->bus().ppu().set_compat_palettes(p.bg, p.obj0, p.obj1);
+    }
+    return gameboy;
 }
 
 GameBoy::GameBoy(Cartridge cartridge, Model model) : bus_(std::move(cartridge), model), cpu_(bus_) {

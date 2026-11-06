@@ -237,3 +237,10 @@ TEST_CASE("timer runs at CPU speed in double speed") {
     CHECK(gb->bus().peek(0xFF04) == 1);
     CHECK(gb->bus().dots() % 2 == 0);
 }
+
+TEST_CASE("a DMG game on a CGB gets its compatibility palette at power-on") {
+    auto gb = GameBoy::create(make_rom());  // non-Nintendo: the default palette
+    REQUIRE(gb);
+    const auto ram = gb->bus().ppu().bg_palette_ram();
+    CHECK((ram[2] | (ram[3] << 8)) == 0x1BEF);
+}
