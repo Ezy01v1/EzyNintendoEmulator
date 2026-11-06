@@ -104,7 +104,7 @@ std::size_t Bus::wram_index(std::uint16_t addr) const {
 // that aren't CGB registers.
 std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
     const bool cgb_register = addr == 0xFF4C || addr == 0xFF4D || addr == 0xFF4F || (addr >= 0xFF51 && addr <= 0xFF56) ||
-                              (addr >= 0xFF68 && addr <= 0xFF6C) ||
+                              (addr >= 0xFF68 && addr <= 0xFF6C) || addr == 0xFF76 || addr == 0xFF77 ||
                               addr == 0xFF70 || (addr >= 0xFF72 && addr <= 0xFF75);
     if (!cgb_register) return std::nullopt;
     // 0xFF72/73/75 exist on any CGB, even in compatibility mode; 0xFF74 only in CGB mode.
@@ -119,6 +119,8 @@ std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
         case 0xFF4D:
             return static_cast<std::uint8_t>(0x7E | (double_speed_ ? 0x80 : 0) | (speed_switch_armed_ ? 1 : 0));
         case 0xFF55: return hdma_.read_control();
+        case 0xFF76: return apu_.pcm12();
+        case 0xFF77: return apu_.pcm34();
         case 0xFF56: return static_cast<std::uint8_t>(0x3E | rp_);  // bit 1 = 1: no light received
         case 0xFF6C: return static_cast<std::uint8_t>(0xFE | ppu_.opri());
         case 0xFF70: return static_cast<std::uint8_t>(0xF8 | svbk_);

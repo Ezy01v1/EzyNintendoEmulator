@@ -30,6 +30,7 @@ public:
           cgb_mode_(model == Model::Cgb && cartridge_.header().supports_cgb()) {
         ppu_.set_model(model_, cgb_mode_);
         ppu_.set_opri(cgb_mode_ ? 0 : 1);
+        apu_.set_model(model_);
     }
 
     [[nodiscard]] Model model() const { return model_; }

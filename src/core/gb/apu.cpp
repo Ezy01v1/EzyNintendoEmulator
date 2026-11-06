@@ -108,9 +108,9 @@ void Apu::Length::clock(bool enabled, bool& channel_on) {
 
 std::uint8_t Apu::read(std::uint16_t addr) const {
     if (addr >= kWaveRam) {
-        // While CH3 plays, the CPU sees the byte the channel is reading (CGB behaviour;
-        // the DMG only allows it on the exact cycle of the read, 0xFF otherwise).
-        if (wave_.on) return regs_[kWaveRam - 0xFF10 + wave_.pos / 2];
+        // While CH3 plays, the CGB shows the CPU the byte the channel is reading. The DMG
+        // only allows it on the exact cycle CH3 reads, which we don't model: 0xFF.
+        if (wave_.on) return model_ == Model::Cgb ? regs_[kWaveRam - 0xFF10 + wave_.pos / 2] : 0xFF;
         return reg(addr);
     }
     if (addr == kNr52) {
@@ -126,7 +126,7 @@ std::uint8_t Apu::read(std::uint16_t addr) const {
 void Apu::write(std::uint16_t addr, std::uint8_t value) {
     if (addr >= kWaveRam) {
         if (wave_.on) {
-            regs_[kWaveRam - 0xFF10 + wave_.pos / 2] = value;
+            if (model_ == Model::Cgb) regs_[kWaveRam - 0xFF10 + wave_.pos / 2] = value;
         } else {
             regs_[addr - 0xFF10] = value;
         }
@@ -157,8 +157,8 @@ void Apu::write(std::uint16_t addr, std::uint8_t value) {
     }
 
     if (!powered_) {
-        // While off, everything is read-only except the length counters (on the DMG).
-        if (index == 1) write_length_reg(ch, value);
+        // While off, everything is read-only except the length counters on the DMG.
+        if (index == 1 && model_ == Model::Dmg) write_length_reg(ch, value);
         return;
     }
 
@@ -258,6 +258,11 @@ void Apu::power_off() {
     for (auto& sq : squares_) {
         sq.on = false;
         sq.env = {};
+        if (model_ == Model::Cgb) sq.len = {};
+    }
+    if (model_ == Model::Cgb) {
+        wave_.len = {};
+        noise_.len = {};
     }
     wave_.on = false;
     noise_.on = false;
@@ -359,19 +364,35 @@ void Apu::step_channels(int t_cycles) {
     }
 }
 
+int Apu::channel_amplitude(int ch) const {
+    if (ch < 2) {
+        const Square& sq = squares_[static_cast<std::size_t>(ch)];
+        const int duty = reg(kBase[static_cast<std::size_t>(ch)] + 1) >> 6;
+        return sq.on && kDuty[static_cast<std::size_t>(duty)][static_cast<std::size_t>(sq.duty_pos)] ? sq.env.volume : 0;
+    }
+    if (ch == 2) {
+        static constexpr std::array<int, 4> kWaveShift = {4, 0, 1, 2};  // mute, 100%, 50%, 25%
+        return wave_.on ? wave_.sample >> kWaveShift[(reg(0xFF1C) >> 5) & 0x03] : 0;
+    }
+    return noise_.on && (noise_.lfsr & 1) == 0 ? noise_.env.volume : 0;
+}
+
+std::uint8_t Apu::pcm12() const {
+    if (!powered_) return 0;
+    return static_cast<std::uint8_t>(channel_amplitude(0) | (channel_amplitude(1) << 4));
+}
+
+std::uint8_t Apu::pcm34() const {
+    if (!powered_) return 0;
+    return static_cast<std::uint8_t>(channel_amplitude(2) | (channel_amplitude(3) << 4));
+}
+
 void Apu::mix_and_sample() {
     float left = 0.0F;
     float right = 0.0F;
     if (powered_) {
         std::array<int, 4> amp{};
-        for (int ch = 0; ch < 2; ++ch) {
-            const Square& sq = squares_[static_cast<std::size_t>(ch)];
-            const int duty = reg(kBase[static_cast<std::size_t>(ch)] + 1) >> 6;
-            amp[static_cast<std::size_t>(ch)] = sq.on && kDuty[static_cast<std::size_t>(duty)][static_cast<std::size_t>(sq.duty_pos)] ? sq.env.volume : 0;
-        }
-        static constexpr std::array<int, 4> kWaveShift = {4, 0, 1, 2};  // mute, 100%, 50%, 25%
-        amp[2] = wave_.on ? wave_.sample >> kWaveShift[(reg(0xFF1C) >> 5) & 0x03] : 0;
-        amp[3] = noise_.on && (noise_.lfsr & 1) == 0 ? noise_.env.volume : 0;
+        for (int ch = 0; ch < 4; ++ch) amp[static_cast<std::size_t>(ch)] = channel_amplitude(ch);
 
         const std::uint8_t nr51 = reg(kNr51);
         for (int ch = 0; ch < 4; ++ch) {

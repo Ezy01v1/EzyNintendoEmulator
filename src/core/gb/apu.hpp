@@ -5,6 +5,8 @@
 #include <span>
 #include <vector>
 
+#include "gb/model.hpp"
+
 namespace ezy::gb {
 
 // Audio Processing Unit (0xFF10-0xFF3F). Four channels: two squares (CH1 with frequency
@@ -36,6 +38,14 @@ public:
     [[nodiscard]] bool powered() const { return powered_; }
     [[nodiscard]] bool channel_on(int ch) const;  // ch 0-3
     [[nodiscard]] int frame_step() const { return frame_step_; }
+
+    // The DMG and CGB APUs differ in a few corner cases (length counters while powered
+    // off, wave RAM access while CH3 plays). Set once at power-on.
+    void set_model(Model model) { model_ = model; }
+    // CGB PCM12/PCM34 (0xFF76/0xFF77): the current 4-bit digital output of CH1|CH2 and
+    // CH3|CH4 (low nibble = the lower channel).
+    [[nodiscard]] std::uint8_t pcm12() const;
+    [[nodiscard]] std::uint8_t pcm34() const;
 
 private:
     struct Envelope {
@@ -97,9 +107,11 @@ private:
 
     void step_channels(int t_cycles);
     void mix_and_sample();
+    [[nodiscard]] int channel_amplitude(int ch) const;  // 0-15, before the DAC
 
     std::array<std::uint8_t, 0x30> regs_{};  // raw FF10-FF3F (wave RAM at the end)
     bool powered_ = true;
+    Model model_ = Model::Dmg;
     int frame_step_ = 0;  // next frame sequencer step to run (0-7)
 
     std::array<Square, 2> squares_{};
