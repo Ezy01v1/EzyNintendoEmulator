@@ -39,3 +39,22 @@ Performance (`python -I tools/gb_bench.py`, Release, median of 3, 3600 frames):
 
 - cgb-acid2.gbc: 9.78 s for 60.3 s emulated = 16.2 % of one core
 - pokemon-silver.gbc: 15.11 s for 60.3 s emulated = 25.1 % of one core
+
+### After the accuracy pass (2026-11-06)
+
+Mooneye: **80** pass with `--model dmg`, **80** with `--model cgb` (54 and 54 before). No ROM that passed before fails now. 46 of the timing ROMs are in ctest.
+
+Still failing among the ones the design required:
+
+- `ppu/hblank_ly_scx_timing-GS`: passed before only by accident of the old interrupt timing.
+- `ppu/lcdon_timing-GS`, `ppu/lcdon_write_timing-GS`: line 0 right after the LCD is switched on needs its own offsets (knobs in `ppu.cpp`, currently 0).
+- `misc/ppu/vblank_stat_intr-C` (CGB).
+
+Other failures are boot-state ROMs for other models (`boot_*`), MBC2 and the MBC1 multicart.
+
+Performance (same method as the baseline):
+
+- cgb-acid2.gbc: 19.97 s for 60.3 s emulated = 33.1 % of one core
+- pokemon-silver.gbc: 19.13 s for 60.3 s emulated = 31.7 % of one core
+
+Real speed needs 100 %; both stay far below. The 25 % soft goal is missed: the per-dot PPU loop costs about 7 points on Pokémon Silver. The obvious optimisation is to skip the per-dot loop in modes 0, 1 and 2, where nothing happens dot by dot.
