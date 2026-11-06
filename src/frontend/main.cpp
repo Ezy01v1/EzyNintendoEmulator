@@ -20,6 +20,7 @@
 #include "chip8_system.hpp"
 #include "debugger.hpp"
 #include "gameboy_system.hpp"
+#include "gba_system.hpp"
 #include "system.hpp"
 
 namespace {
@@ -43,6 +44,9 @@ std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
 std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom) {
     std::string ext = std::filesystem::path(path).extension().string();
     std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext == ".gba") {
+        return ezy::frontend::GbaSystem::create(rom, {}, std::filesystem::path(path).replace_extension(".sav"));
+    }
     if (ext == ".gb" || ext == ".gbc") {
         return ezy::frontend::GameBoySystem::create(rom, std::filesystem::path(path).replace_extension(".sav"));
     }
@@ -65,7 +69,7 @@ bool handle_shortcut(SDL_Scancode scancode, RunState& run) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb>\n";
+        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gba>\n";
         return 1;
     }
 
