@@ -1,8 +1,10 @@
 #include "gba/gba.hpp"
 
+#include <array>
 #include <vector>
 
 #include "gba/hle_bios.hpp"
+#include "gba/state.hpp"
 
 namespace ezy::gba {
 
@@ -95,6 +97,64 @@ void Gba::run_until(std::uint64_t cycle) {
 void Gba::run_frame() {
     frame_done_ = false;
     while (!frame_done_) step();
+}
+
+namespace {
+
+constexpr std::uint32_t kStateMagic = 0x41424745;  // "EGBA"
+constexpr std::uint32_t kStateVersion = 1;          // bump whenever a serialize() changes
+
+struct StateHeader {
+    std::uint32_t magic = kStateMagic;
+    std::uint32_t version = kStateVersion;
+    std::array<char, 4> game_code{};
+    std::uint8_t header_checksum = 0;
+};
+
+StateHeader header_for(const CartridgeHeader& cart) {
+    StateHeader h;
+    for (std::size_t i = 0; i < h.game_code.size() && i < cart.game_code.size(); ++i) h.game_code[i] = cart.game_code[i];
+    h.header_checksum = cart.header_checksum;
+    return h;
+}
+
+}  // namespace
+
+std::vector<std::uint8_t> Gba::save_state() {
+    StateWriter writer;
+    StateHeader h = header_for(header_);
+    writer(h.magic);
+    writer(h.version);
+    writer(h.game_code);
+    writer(h.header_checksum);
+    serialize(writer);
+    return writer.take();
+}
+
+bool Gba::load_state(std::span<const std::uint8_t> state) {
+    StateReader reader(state);
+    StateHeader h;
+    reader(h.magic);
+    reader(h.version);
+    reader(h.game_code);
+    reader(h.header_checksum);
+    const StateHeader want = header_for(header_);
+    if (reader.failed() || h.magic != want.magic || h.version != want.version || h.game_code != want.game_code ||
+        h.header_checksum != want.header_checksum) {
+        return false;
+    }
+    std::vector<std::uint8_t> previous = save_state();
+    serialize(reader);
+    if (reader.failed() || !reader.at_end()) {
+        StateReader undo(previous);
+        undo(h.magic);
+        undo(h.version);
+        undo(h.game_code);
+        undo(h.header_checksum);
+        serialize(undo);
+        return false;
+    }
+    return true;
 }
 
 }  // namespace ezy::gba

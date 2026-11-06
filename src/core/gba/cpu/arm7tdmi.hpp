@@ -91,6 +91,18 @@ public:
     // Jumps to an address and refills the pipeline (like a branch).
     void jump(std::uint32_t addr);
 
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(r_);
+        ar(cpsr_);
+        ar(spsr_);
+        ar(bank_r8_r12_);
+        ar(bank_r13_r14_);
+        ar(pipeline_);
+        ar(flushed_);
+    }
+
 private:
     // --- Core ---
     void switch_mode(std::uint32_t new_mode);

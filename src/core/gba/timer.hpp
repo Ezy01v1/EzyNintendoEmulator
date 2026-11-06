@@ -43,6 +43,12 @@ public:
     // The counter as the CPU reads it from TMxCNT_L.
     [[nodiscard]] std::uint16_t counter(int index) const;
 
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(timers_);
+    }
+
 private:
     struct Timer {
         std::uint16_t reload = 0;

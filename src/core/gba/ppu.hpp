@@ -75,6 +75,21 @@ public:
     // BGR555 pixels (bit 15 clear), row by row.
     [[nodiscard]] std::span<const std::uint16_t> framebuffer() const { return framebuffer_; }
 
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(affine_x_);
+        ar(affine_y_);
+        ar(mosaic_ref_x_);
+        ar(mosaic_ref_y_);
+        ar(vcount_);
+        ar(vblank_);
+        ar(hblank_);
+        ar(vcount_match_);
+        ar(frame_done_);
+        ar(framebuffer_);
+    }
+
 private:
     [[nodiscard]] std::uint16_t io16(std::uint32_t offset) const;
     [[nodiscard]] std::uint16_t palette16(std::uint32_t index) const;

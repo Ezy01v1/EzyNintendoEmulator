@@ -123,6 +123,28 @@ public:
     // Cycles one access costs: 1 plus the region's waitstates. `size` is 1, 2 or 4.
     [[nodiscard]] std::uint32_t access_cycles(std::uint32_t addr, std::uint32_t size, Access access) const;
 
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(ewram_);
+        ar(iwram_);
+        ar(io_);
+        ar(palette_);
+        ar(vram_);
+        ar(oam_);
+        backup_.serialize(ar);
+        if (gpio_) gpio_->serialize(ar);
+        ar(open_bus_);
+        ar(prefetch_);
+        ar(keys_pressed_);
+        ar(halted_);
+        ar(dma_);
+        ar(dma_running_);
+        ppu_.serialize(ar);
+        timers_.serialize(ar);
+        apu_.serialize(ar);
+    }
+
 private:
     enum class DmaTiming : std::uint16_t { Immediate = 0, VBlank = 1, HBlank = 2, Special = 3 };
 
@@ -159,6 +181,8 @@ private:
         std::uint32_t count = 0;      // halfwords ready, from `next` on
         std::uint32_t countdown = 0;  // cycles left on the halfword being fetched
         std::uint32_t duty = 0;       // cycles per halfword (1 + S waitstates)
+        template <class Ar>
+        void serialize(Ar& ar) { ar(active); ar(next); ar(count); ar(countdown); ar(duty); }
     };
     // Cycles a CPU or DMA access takes, running the prefetcher along.
     [[nodiscard]] std::uint32_t timed_access(std::uint32_t addr, std::uint32_t size, Access access);

@@ -37,6 +37,24 @@ public:
     static constexpr std::uint32_t kFirst = 0xC4;
     static constexpr std::uint32_t kLast = 0xC9;
 
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(data_);
+        ar(direction_);
+        ar(control_);
+        ar(pins_);
+        ar(sio_out_);
+        ar(state_);
+        ar(shift_);
+        ar(bit_);
+        ar(byte_);
+        ar(length_);
+        ar(reg_);
+        ar(buffer_);
+        ar(rtc_control_);
+    }
+
 private:
     enum class State { Idle, Command, Write, Read };
 

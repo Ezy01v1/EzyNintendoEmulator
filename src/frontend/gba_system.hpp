@@ -49,6 +49,9 @@ private:
 
     void load_save();
     void flush_save();  // writes the .sav if the chip changed since the last write
+    // Save states (F2 save, F4 load), one slot next to the .sav: <rom>.ss1.
+    void save_state();
+    void load_state();
 
     std::vector<std::uint8_t> rom_;
     std::vector<std::uint8_t> bios_;

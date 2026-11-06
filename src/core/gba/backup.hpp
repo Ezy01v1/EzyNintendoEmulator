@@ -64,6 +64,26 @@ public:
     [[nodiscard]] bool dirty() const { return dirty_; }
     void clear_dirty() { dirty_ = false; }
 
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(data_);
+        ar(flash_state_);
+        ar(flash_next_);
+        ar(erase_prefix_);
+        ar(id_mode_);
+        ar(bank_);
+        ar(address_bits_);
+        ar(size_known_);
+        ar(eeprom_state_);
+        ar(bits_left_);
+        ar(command_);
+        ar(address_);
+        ar(buffer_);
+        ar(read_bit_);
+        if constexpr (Ar::kLoading) dirty_ = true;  // the save memory changed: write it out
+    }
+
 private:
     enum class FlashState : std::uint8_t { Ready, Unlock1, Unlock2 };
     enum class FlashNext : std::uint8_t { None, EraseArmed, Program, Bank };

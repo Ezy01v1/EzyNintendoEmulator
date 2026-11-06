@@ -52,10 +52,19 @@ public:
     // Due::when (not now()) so lateness never accumulates.
     [[nodiscard]] std::optional<Due> pop_due();
 
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(now_);
+        ar(slots_);
+    }
+
 private:
     struct Slot {
         bool active = false;
         std::uint64_t when = 0;
+        template <class Ar>
+        void serialize(Ar& ar) { ar(active); ar(when); }
     };
 
     static constexpr std::size_t index(EventType type) { return static_cast<std::size_t>(type); }

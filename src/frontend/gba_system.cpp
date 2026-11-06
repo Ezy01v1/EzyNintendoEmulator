@@ -105,29 +105,63 @@ void GbaSystem::load_save() {
     }
 }
 
+namespace {
+
+// Writes to a temp file and renames it, so a crash mid-write never corrupts the old file.
+bool write_file_atomically(const std::filesystem::path& path, std::span<const std::uint8_t> data) {
+    std::filesystem::path tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        if (!file) {
+            std::cerr << "Could not write " << tmp.string() << "\n";
+            return false;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::cerr << "Could not replace " << path.string() << ": " << ec.message() << "\n";
+        return false;
+    }
+    return true;
+}
+
+std::filesystem::path state_path(const std::filesystem::path& save_path) {
+    return std::filesystem::path(save_path).replace_extension(".ss1");
+}
+
+}  // namespace
+
 void GbaSystem::flush_save() {
     frames_since_flush_ = 0;
     gba::Backup& backup = gba_->bus().backup();
     if (save_path_.empty() || !backup.persists() || !backup.dirty()) return;
-    // Write to a temp file and rename, so a crash mid-write never corrupts the old save.
-    std::filesystem::path tmp = save_path_;
-    tmp += ".tmp";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        const auto data = backup.data();
-        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-        if (!file) {
-            std::cerr << "Could not write " << tmp.string() << "\n";
-            return;
-        }
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, save_path_, ec);
-    if (ec) {
-        std::cerr << "Could not replace " << save_path_.string() << ": " << ec.message() << "\n";
+    if (write_file_atomically(save_path_, backup.data())) backup.clear_dirty();
+}
+
+void GbaSystem::save_state() {
+    if (save_path_.empty()) return;
+    const std::filesystem::path path = state_path(save_path_);
+    if (write_file_atomically(path, gba_->save_state())) std::cerr << "Saved state to " << path.string() << "\n";
+}
+
+void GbaSystem::load_state() {
+    if (save_path_.empty()) return;
+    const std::filesystem::path path = state_path(save_path_);
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        std::cerr << "No save state at " << path.string() << "\n";
         return;
     }
-    backup.clear_dirty();
+    const std::vector<std::uint8_t> data(std::istreambuf_iterator<char>(file), {});
+    if (!gba_->load_state(data)) {
+        std::cerr << path.string() << " is not a save state of this game and version; ignoring it\n";
+        return;
+    }
+    gba_->bus().set_keys(keys_);  // the keys held now, not the ones in the state
+    std::cerr << "Loaded state from " << path.string() << "\n";
 }
 
 void GbaSystem::run_frame() {
@@ -143,6 +177,8 @@ void GbaSystem::reset() {
 }
 
 void GbaSystem::handle_key(SDL_Scancode scancode, bool pressed) {
+    if (pressed && scancode == SDL_SCANCODE_F2) save_state();
+    if (pressed && scancode == SDL_SCANCODE_F4) load_state();
     for (const auto& [key, bit] : kKeymap) {
         if (key != scancode) continue;
         keys_ = static_cast<std::uint16_t>(pressed ? keys_ | bit : keys_ & ~bit);

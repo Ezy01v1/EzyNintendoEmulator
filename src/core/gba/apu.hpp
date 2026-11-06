@@ -52,6 +52,21 @@ public:
     [[nodiscard]] int fifo_size(int fifo) const { return fifos_[static_cast<std::size_t>(fifo)].count; }
     [[nodiscard]] std::int8_t fifo_sample(int fifo) const { return fifos_[static_cast<std::size_t>(fifo)].current; }
 
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        ar(squares_);
+        ar(sweep_);
+        ar(wave_);
+        ar(noise_);
+        ar(wave_ram_);
+        ar(fifos_);
+        ar(master_);
+        ar(frame_step_);
+        ar(sequencer_cycles_);
+        if constexpr (Ar::kLoading) samples_.clear();
+    }
+
 private:
     struct Envelope {
         int volume = 0;
@@ -71,12 +86,16 @@ private:
         int duty_pos = 0;
         Envelope env;
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) { ar(on); ar(timer); ar(duty_pos); ar(env); ar(len); }
     };
 
     struct Sweep {
         bool enabled = false;
         int timer = 0;
         int shadow = 0;
+        template <class Ar>
+        void serialize(Ar& ar) { ar(enabled); ar(timer); ar(shadow); }
     };
 
     struct Wave {
@@ -84,6 +103,8 @@ private:
         int timer = 0;
         int pos = 0;  // sample index, 0-31 (one bank) or 0-63 (both)
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) { ar(on); ar(timer); ar(pos); ar(len); }
     };
 
     struct Noise {
@@ -92,6 +113,8 @@ private:
         std::uint16_t lfsr = 0x7FFF;
         Envelope env;
         Length len;
+        template <class Ar>
+        void serialize(Ar& ar) { ar(on); ar(timer); ar(lfsr); ar(env); ar(len); }
     };
 
     struct Fifo {
@@ -99,6 +122,8 @@ private:
         int read = 0;
         int count = 0;
         std::int8_t current = 0;  // the sample being played
+        template <class Ar>
+        void serialize(Ar& ar) { ar(data); ar(read); ar(count); ar(current); }
         void push(std::uint8_t byte);
         void reset() { read = count = 0; }
     };

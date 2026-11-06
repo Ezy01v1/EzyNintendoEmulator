@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <vector>
 
 #include "gba/bus.hpp"
 #include "gba/cartridge.hpp"
@@ -46,6 +47,23 @@ public:
     [[nodiscard]] const Scheduler& scheduler() const { return scheduler_; }
     [[nodiscard]] const CartridgeHeader& header() const { return header_; }
     [[nodiscard]] std::uint64_t frame_count() const { return frames_; }
+
+    // Save states: the whole machine (CPU, memory, I/O, PPU, APU, timers, DMA, save chip,
+    // RTC) as bytes. load_state() refuses states of another game or format version and,
+    // if a state turns out to be truncated, leaves the machine as it was.
+    [[nodiscard]] std::vector<std::uint8_t> save_state();
+    [[nodiscard]] bool load_state(std::span<const std::uint8_t> state);
+
+    // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
+    template <class Ar>
+    void serialize(Ar& ar) {
+        scheduler_.serialize(ar);
+        bus_.serialize(ar);
+        cpu_.serialize(ar);
+        ar(frames_);
+        ar(frame_done_);
+        ar(intr_waiting_);
+    }
 
 private:
     Gba(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> bios, CartridgeHeader header);
