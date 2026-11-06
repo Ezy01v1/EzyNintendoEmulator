@@ -33,7 +33,7 @@ inline constexpr int kDotsPerFrame = kDotsPerLine * kLinesPerFrame;  // 70224 T-
 // The CPU can't reach OAM in modes 2-3 or VRAM in mode 3 (the bus checks *_accessible()).
 class Ppu {
 public:
-    void tick();  // one M-cycle = 4 dots
+    void tick(int dots = 4);  // 4 dots per CPU M-cycle at normal speed, 2 in double speed
 
     // CPU-side VRAM access goes through the bank selected by VBK (always 0 on a DMG).
     [[nodiscard]] std::uint8_t read_vram(std::uint16_t addr) const { return vram_[vram_index(vram_bank_, addr)]; }

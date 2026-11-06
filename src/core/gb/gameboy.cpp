@@ -26,8 +26,8 @@ GameBoy::GameBoy(Cartridge cartridge, Model model) : bus_(std::move(cartridge), 
 }
 
 void GameBoy::run_frame() {
-    const std::uint64_t start = bus_.t_cycles();
-    while (bus_.t_cycles() - start < kDotsPerFrame) {
+    const std::uint64_t start = bus_.dots();
+    while (bus_.dots() - start < kDotsPerFrame) {
         cpu_.step();
         if (bus_.ppu().take_frame_ready()) return;
     }

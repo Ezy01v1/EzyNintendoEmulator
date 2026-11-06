@@ -45,6 +45,7 @@ public:
     std::uint8_t read(std::uint16_t addr) override;
     void write(std::uint16_t addr, std::uint8_t value) override;
     void tick() override;  // one internal M-cycle with no memory access (e.g. 16-bit ALU ops)
+    void stop() override;
 
     [[nodiscard]] std::uint8_t pending_interrupts() const override { return ie_ & if_ & 0x1F; }
     void acknowledge_interrupt(std::uint8_t bit) override { if_ &= static_cast<std::uint8_t>(~bit); }
@@ -52,7 +53,12 @@ public:
     [[nodiscard]] std::uint8_t peek(std::uint16_t addr) const;
     void poke(std::uint16_t addr, std::uint8_t value);
 
+    // CPU clock (T-cycles): 4 per M-cycle at either speed.
     [[nodiscard]] std::uint64_t t_cycles() const { return t_cycles_; }
+    // Dot clock (4.19 MHz): what the PPU, APU and frame timing run on.
+    [[nodiscard]] std::uint64_t dots() const { return dots_; }
+    // CGB double speed: the CPU, timer, serial and OAM DMA run twice as fast.
+    [[nodiscard]] bool double_speed() const { return double_speed_; }
 
     void request_interrupt(std::uint8_t bits) { if_ |= bits; }
     [[nodiscard]] std::uint8_t interrupt_flags() const { return if_; }
@@ -107,6 +113,10 @@ private:
 
     std::string serial_output_;
     std::uint64_t t_cycles_ = 0;
+    std::uint64_t dots_ = 0;
+    bool double_speed_ = false;
+    bool speed_switch_armed_ = false;  // KEY1 bit 0
+    bool apu_half_cycle_ = false;      // double speed: the APU ticks every other M-cycle
 };
 
 }  // namespace ezy::gb

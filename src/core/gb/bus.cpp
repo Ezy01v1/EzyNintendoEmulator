@@ -38,14 +38,18 @@ void Bus::write(std::uint16_t addr, std::uint8_t value) {
 void Bus::tick() { advance(); }
 
 void Bus::advance() {
+    const int dots = double_speed_ ? 2 : 4;
     t_cycles_ += 4;
+    dots_ += static_cast<std::uint64_t>(dots);
     const std::uint16_t counter_before = timer_.counter();
     timer_.tick();
     clock_frame_sequencer(counter_before);
-    apu_.tick();
-    cartridge_.tick(4);
+    // The APU runs on the dot clock: every other CPU M-cycle in double speed.
+    apu_half_cycle_ = !apu_half_cycle_;
+    if (!double_speed_ || apu_half_cycle_) apu_.tick();
+    cartridge_.tick(dots);  // the RTC counts real time
     if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
-    ppu_.tick();
+    ppu_.tick(dots);
     request_interrupt(ppu_.take_interrupts());
     if (ppu_.take_hblank_started() && hdma_.hblank_active() && !in_vram_dma_) run_vram_dma(1);
 }
@@ -58,7 +62,8 @@ void Bus::run_vram_dma(int blocks) {
         for (std::uint16_t i = 0; i < 16; ++i) {
             ppu_.write_vram(static_cast<std::uint16_t>(block.dest + i), peek(static_cast<std::uint16_t>(block.source + i)));
         }
-        for (int cycle = 0; cycle < 8; ++cycle) advance();
+        // 32 dots per block: 8 CPU M-cycles, or 16 in double speed.
+        for (int cycle = 0; cycle < (double_speed_ ? 16 : 8); ++cycle) advance();
     }
     in_vram_dma_ = false;
 }
@@ -98,7 +103,7 @@ std::size_t Bus::wram_index(std::uint16_t addr) const {
 // there: reads return 0xFF and writes are dropped. Returns nullopt / false for addresses
 // that aren't CGB registers.
 std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
-    const bool cgb_register = addr == 0xFF4C || addr == 0xFF4F || (addr >= 0xFF51 && addr <= 0xFF56) ||
+    const bool cgb_register = addr == 0xFF4C || addr == 0xFF4D || addr == 0xFF4F || (addr >= 0xFF51 && addr <= 0xFF56) ||
                               (addr >= 0xFF68 && addr <= 0xFF6C) ||
                               addr == 0xFF70 || (addr >= 0xFF72 && addr <= 0xFF75);
     if (!cgb_register) return std::nullopt;
@@ -111,6 +116,8 @@ std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
         case 0xFF69:
         case 0xFF6A:
         case 0xFF6B: return ppu_.read_register(addr);
+        case 0xFF4D:
+            return static_cast<std::uint8_t>(0x7E | (double_speed_ ? 0x80 : 0) | (speed_switch_armed_ ? 1 : 0));
         case 0xFF55: return hdma_.read_control();
         case 0xFF56: return static_cast<std::uint8_t>(0x3E | rp_);  // bit 1 = 1: no light received
         case 0xFF6C: return static_cast<std::uint8_t>(0xFE | ppu_.opri());
@@ -133,6 +140,7 @@ bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
         case 0xFF69:
         case 0xFF6A:
         case 0xFF6B: ppu_.write_register(addr, value); break;
+        case 0xFF4D: speed_switch_armed_ = (value & 1) != 0; break;
         case 0xFF51:
         case 0xFF52:
         case 0xFF53:
@@ -156,8 +164,18 @@ bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
     return true;
 }
 
+void Bus::stop() {
+    // STOP always resets DIV.
+    write_io(0xFF04, 0);
+    if (!cgb_mode_ || !speed_switch_armed_) return;
+    double_speed_ = !double_speed_;
+    speed_switch_armed_ = false;
+    for (int cycle = 0; cycle < 2050; ++cycle) advance();  // the CPU is stopped meanwhile
+}
+
 void Bus::clock_frame_sequencer(std::uint16_t counter_before) {
-    constexpr std::uint16_t kBit = 1U << 12;
+    // 512 Hz either way: in double speed DIV counts twice as fast, so one bit higher.
+    const auto kBit = static_cast<std::uint16_t>(double_speed_ ? 1U << 13 : 1U << 12);
     if ((counter_before & kBit) != 0 && (timer_.counter() & kBit) == 0) apu_.div_falling_edge();
 }
 

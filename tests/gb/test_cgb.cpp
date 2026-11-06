@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <initializer_list>
 #include <vector>
 
 #include "gb/gameboy.hpp"
@@ -166,4 +167,73 @@ TEST_CASE("OPRI, the undocumented registers and RP in CGB mode") {
     CHECK(bus.peek(0xFF56) == 0x3E);
     bus.poke(0xFF56, 0xC1);
     CHECK(bus.peek(0xFF56) == 0xFF);
+}
+
+namespace {
+
+// Runs a tiny program from WRAM: the instructions in `code`, then JR -2 forever.
+void load_program(GameBoy& gb, std::initializer_list<std::uint8_t> code) {
+    std::uint16_t addr = 0xC000;
+    for (const auto byte : code) gb.bus().poke(addr++, byte);
+    gb.bus().poke(addr++, 0x18);
+    gb.bus().poke(addr, 0xFE);
+    gb.cpu().regs().pc = 0xC000;
+}
+
+}  // namespace
+
+TEST_CASE("STOP with KEY1 armed switches to double speed") {
+    auto gb = GameBoy::create(make_cgb_rom());
+    REQUIRE(gb);
+    CHECK(gb->bus().peek(0xFF4D) == 0x7E);
+    // LD A,1; LDH (0x4D),A; STOP 0
+    load_program(*gb, {0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00});
+    for (int i = 0; i < 3; ++i) gb->step();
+    CHECK(gb->bus().double_speed());
+    CHECK(gb->bus().peek(0xFF4D) == 0xFE);
+    CHECK(gb->bus().peek(0xFF04) == 0x00 + (2050 * 4 >> 8));  // DIV reset, then the switch delay
+}
+
+TEST_CASE("STOP without arming does not switch and resets DIV") {
+    auto gb = GameBoy::create(make_cgb_rom());
+    REQUIRE(gb);
+    load_program(*gb, {0x10, 0x00});
+    gb->step();
+    CHECK_FALSE(gb->bus().double_speed());
+    CHECK(gb->bus().peek(0xFF04) == 0x00);
+}
+
+TEST_CASE("KEY1 does not exist outside CGB mode") {
+    auto gb = GameBoy::create(make_rom());
+    REQUIRE(gb);
+    gb->bus().poke(0xFF4D, 0x01);
+    CHECK(gb->bus().peek(0xFF4D) == 0xFF);
+    load_program(*gb, {0x10, 0x00});
+    gb->step();
+    CHECK_FALSE(gb->bus().double_speed());
+}
+
+TEST_CASE("a frame takes twice the CPU M-cycles in double speed") {
+    auto gb = GameBoy::create(make_cgb_rom());
+    REQUIRE(gb);
+    load_program(*gb, {0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00});
+    for (int i = 0; i < 3; ++i) gb->step();
+    REQUIRE(gb->bus().double_speed());
+    gb->run_frame();  // sync to a frame boundary
+    const auto t0 = gb->bus().t_cycles();
+    const auto d0 = gb->bus().dots();
+    gb->run_frame();
+    CHECK(gb->bus().dots() - d0 == kDotsPerFrame);
+    CHECK(gb->bus().t_cycles() - t0 == 2 * kDotsPerFrame);
+}
+
+TEST_CASE("timer runs at CPU speed in double speed") {
+    auto gb = GameBoy::create(make_cgb_rom());
+    REQUIRE(gb);
+    load_program(*gb, {0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00});
+    for (int i = 0; i < 3; ++i) gb->step();
+    gb->bus().poke(0xFF04, 0);
+    for (int i = 0; i < 64; ++i) gb->bus().tick();  // 64 CPU M-cycles = 256 CPU T-cycles
+    CHECK(gb->bus().peek(0xFF04) == 1);
+    CHECK(gb->bus().dots() % 2 == 0);
 }

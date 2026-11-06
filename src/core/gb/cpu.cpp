@@ -223,7 +223,10 @@ void Cpu::execute_block0(int y, int z, int p, int q) {
                     bus_.write(u16(addr + 1), u8(r_.sp >> 8));
                     break;
                 }
-                case 2: read8(); break;  // STOP: treated as a 2-byte NOP for now
+                case 2:  // STOP: 2 bytes. Low-power mode isn't modelled; the bus handles the rest.
+                    read8();
+                    bus_.stop();
+                    break;
                 case 3: jr(true); break;  // JR e
                 default: jr(condition(y - 4)); break;  // JR cc, e
             }

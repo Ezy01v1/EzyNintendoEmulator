@@ -33,10 +33,10 @@ struct Sprite {
 
 }  // namespace
 
-void Ppu::tick() {
+void Ppu::tick(int dots) {
     if (!lcd_on()) return;
 
-    dot_ += 4;
+    dot_ += dots;
     if (dot_ == kDotsPerLine) {
         dot_ = 0;
         ++ly_;
