@@ -175,8 +175,8 @@ bool Ppu::take_frame_ready() {
 
 // A tile is 16 bytes: 8 rows of 2 bytes (low bit-plane, high bit-plane).
 // Bit 7 is the leftmost pixel.
-std::uint8_t Ppu::tile_color_index(std::uint16_t tile_addr, int row, int col) const {
-    const std::size_t offset = static_cast<std::size_t>(tile_addr - 0x8000 + row * 2);
+std::uint8_t Ppu::tile_color_index(int bank, std::uint16_t tile_addr, int row, int col) const {
+    const std::size_t offset = vram_index(bank, static_cast<std::uint16_t>(tile_addr + row * 2));
     const std::uint8_t lo = vram_[offset];
     const std::uint8_t hi = vram_[offset + 1];
     const int bit = 7 - col;
@@ -184,13 +184,19 @@ std::uint8_t Ppu::tile_color_index(std::uint16_t tile_addr, int row, int col) co
 }
 
 // Pixel (x, y) of the 256x256 background/window plane stored at `map_base`.
-std::uint8_t Ppu::bg_color_index(std::uint16_t map_base, int x, int y) const {
-    const std::uint8_t tile_index = vram_[static_cast<std::size_t>(map_base - 0x8000 + (y / 8) * 32 + (x / 8))];
+// In CGB mode, VRAM bank 1 holds an attribute byte for each map entry: bits 0-2 palette,
+// bit 3 tile bank, bit 5 X-flip, bit 6 Y-flip, bit 7 BG-over-OBJ priority.
+Ppu::BgPixel Ppu::bg_pixel(std::uint16_t map_base, int x, int y) const {
+    const auto map_addr = static_cast<std::uint16_t>(map_base + (y / 8) * 32 + (x / 8));
+    const std::uint8_t tile_index = read_vram_bank(0, map_addr);
+    const std::uint8_t attributes = cgb_mode_ ? read_vram_bank(1, map_addr) : 0;
     // LCDC.4 selects unsigned addressing from 0x8000 or signed addressing around 0x9000.
     const std::uint16_t tile_addr =
         (lcdc_ & kLcdcTileData) ? static_cast<std::uint16_t>(0x8000 + tile_index * 16)
                                 : static_cast<std::uint16_t>(0x9000 + static_cast<std::int8_t>(tile_index) * 16);
-    return tile_color_index(tile_addr, y % 8, x % 8);
+    const int row = (attributes & 0x40) ? 7 - y % 8 : y % 8;
+    const int col = (attributes & 0x20) ? 7 - x % 8 : x % 8;
+    return {tile_color_index((attributes & 0x08) ? 1 : 0, tile_addr, row, col), attributes};
 }
 
 // The final colour of a BG/window pixel. CGB mode: straight from CGB palette `palette`.
@@ -212,27 +218,30 @@ std::uint16_t Ppu::obj_color(std::uint8_t attributes, std::uint8_t index) const 
 
 void Ppu::render_scanline() {
     std::uint16_t* line = &frame_[static_cast<std::size_t>(ly_) * kLcdWidth];
-    std::array<std::uint8_t, kLcdWidth> bg_index{};  // pre-palette, for sprite priority
+    std::array<std::uint8_t, kLcdWidth> bg_index{};       // pre-palette, for sprite priority
+    std::array<std::uint8_t, kLcdWidth> bg_attributes{};  // CGB: bit 7 = BG over sprites
 
     if (ly_ == wy_) window_y_hit_ = true;
 
-    // --- Background and window (on DMG, LCDC.0 turns both off: the line is blank). ---
-    if (lcdc_ & kLcdcBgEnable) {
+    // --- Background and window. On DMG (and in compatibility mode) LCDC.0 turns both off
+    // and the line is blank; in CGB mode it only removes their priority over sprites. ---
+    if (cgb_mode_ || (lcdc_ & kLcdcBgEnable)) {
         const bool window_visible = (lcdc_ & kLcdcWindowEnable) && window_y_hit_ && wx_ <= 166;
         const std::uint16_t bg_map = (lcdc_ & kLcdcBgMap) ? 0x9C00 : 0x9800;
         const std::uint16_t win_map = (lcdc_ & kLcdcWindowMap) ? 0x9C00 : 0x9800;
         bool window_drawn = false;
 
         for (int x = 0; x < kLcdWidth; ++x) {
-            std::uint8_t index = 0;
+            BgPixel pixel{};
             if (window_visible && x + 7 >= wx_) {
-                index = bg_color_index(win_map, x + 7 - wx_, window_line_);
+                pixel = bg_pixel(win_map, x + 7 - wx_, window_line_);
                 window_drawn = true;
             } else {
-                index = bg_color_index(bg_map, (x + scx_) & 0xFF, (ly_ + scy_) & 0xFF);
+                pixel = bg_pixel(bg_map, (x + scx_) & 0xFF, (ly_ + scy_) & 0xFF);
             }
-            bg_index[static_cast<std::size_t>(x)] = index;
-            line[x] = bg_color(0, index);
+            bg_index[static_cast<std::size_t>(x)] = pixel.index;
+            bg_attributes[static_cast<std::size_t>(x)] = pixel.attributes;
+            line[x] = bg_color(pixel.attributes & 0x07, pixel.index);
         }
         if (window_drawn) ++window_line_;
     } else {
@@ -252,9 +261,12 @@ void Ppu::render_scanline() {
             sprites[count++] = {y, oam_[i * 4 + 1] - 8, oam_[i * 4 + 2], oam_[i * 4 + 3]};
         }
     }
-    // DMG priority: smaller X wins; equal X keeps OAM order (hence stable_sort).
-    std::stable_sort(sprites.begin(), sprites.begin() + static_cast<std::ptrdiff_t>(count),
-                     [](const Sprite& a, const Sprite& b) { return a.x < b.x; });
+    // DMG priority (OPRI = 1): smaller X wins; equal X keeps OAM order (hence stable_sort).
+    // CGB priority (OPRI = 0): OAM order alone.
+    if (opri_ & 1) {
+        std::stable_sort(sprites.begin(), sprites.begin() + static_cast<std::ptrdiff_t>(count),
+                         [](const Sprite& a, const Sprite& b) { return a.x < b.x; });
+    }
 
     for (int x = 0; x < kLcdWidth; ++x) {
         for (std::size_t s = 0; s < count; ++s) {
@@ -267,11 +279,19 @@ void Ppu::render_scanline() {
             if (sprite.attributes & 0x40) row = height - 1 - row;
             const std::uint8_t tile = height == 16 ? (sprite.tile & 0xFE) : sprite.tile;
             // Row 8-15 of a tall sprite falls naturally into the next tile (+16 bytes).
-            const std::uint8_t index = tile_color_index(static_cast<std::uint16_t>(0x8000 + tile * 16), row, col);
+            const int bank = cgb_mode_ && (sprite.attributes & 0x08) ? 1 : 0;
+            const std::uint8_t index =
+                tile_color_index(bank, static_cast<std::uint16_t>(0x8000 + tile * 16), row, col);
             if (index == 0) continue;  // transparent: a lower-priority sprite may show
 
             // The highest-priority opaque sprite decides this pixel, even if it is behind BG.
-            const bool behind_bg = (sprite.attributes & 0x80) && bg_index[static_cast<std::size_t>(x)] != 0;
+            // CGB mode: with LCDC.0 clear sprites always win; otherwise either the sprite's or
+            // the map entry's priority bit puts a non-zero BG pixel in front.
+            const auto px = static_cast<std::size_t>(x);
+            const bool bg_opaque = bg_index[px] != 0;
+            const bool behind_bg =
+                cgb_mode_ ? (lcdc_ & kLcdcBgEnable) && bg_opaque && ((sprite.attributes | bg_attributes[px]) & 0x80)
+                          : (sprite.attributes & 0x80) && bg_opaque;
             if (!behind_bg) line[x] = obj_color(sprite.attributes, index);
             break;
         }

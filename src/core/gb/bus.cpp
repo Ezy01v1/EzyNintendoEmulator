@@ -90,7 +90,7 @@ std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
         case 0xFF6A:
         case 0xFF6B: return ppu_.read_register(addr);
         case 0xFF56: return static_cast<std::uint8_t>(0x3E | rp_);  // bit 1 = 1: no light received
-        case 0xFF6C: return static_cast<std::uint8_t>(0xFE | opri_);
+        case 0xFF6C: return static_cast<std::uint8_t>(0xFE | ppu_.opri());
         case 0xFF70: return static_cast<std::uint8_t>(0xF8 | svbk_);
         case 0xFF75: return static_cast<std::uint8_t>(0x8F | undocumented_[3]);
         case 0xFF72:
@@ -111,7 +111,7 @@ bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
         case 0xFF6A:
         case 0xFF6B: ppu_.write_register(addr, value); break;
         case 0xFF56: rp_ = value & 0xC1; break;
-        case 0xFF6C: opri_ = value & 1; break;
+        case 0xFF6C: ppu_.set_opri(value); break;
         case 0xFF70: svbk_ = value & 0x07; break;
         case 0xFF75: undocumented_[3] = value & 0x70; break;
         case 0xFF72:

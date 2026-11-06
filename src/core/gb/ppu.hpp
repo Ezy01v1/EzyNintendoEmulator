@@ -40,6 +40,9 @@ public:
     void write_vram_bank(int bank, std::uint16_t addr, std::uint8_t value) { vram_[vram_index(bank, addr)] = value; }
     [[nodiscard]] int vram_bank() const { return vram_bank_; }
     void set_vram_bank(int bank) { vram_bank_ = bank & 1; }
+    // OPRI bit 0: 0 = sprites ordered by OAM index (CGB), 1 = by X coordinate (DMG).
+    [[nodiscard]] std::uint8_t opri() const { return opri_; }
+    void set_opri(std::uint8_t value) { opri_ = value & 1; }
     [[nodiscard]] std::uint8_t read_oam(std::uint16_t addr) const { return oam_[addr - 0xFE00]; }
     void write_oam(std::uint16_t addr, std::uint8_t value) { oam_[addr - 0xFE00] = value; }
 
@@ -78,8 +81,12 @@ private:
     [[nodiscard]] std::uint16_t bg_color(int palette, std::uint8_t index) const;
     [[nodiscard]] std::uint16_t obj_color(std::uint8_t attributes, std::uint8_t index) const;
     void update_stat_line();
-    [[nodiscard]] std::uint8_t bg_color_index(std::uint16_t map_base, int x, int y) const;
-    [[nodiscard]] std::uint8_t tile_color_index(std::uint16_t tile_addr, int row, int col) const;
+    struct BgPixel {
+        std::uint8_t index;       // colour index 0-3, before palettes
+        std::uint8_t attributes;  // CGB map attributes (0 outside CGB mode)
+    };
+    [[nodiscard]] BgPixel bg_pixel(std::uint16_t map_base, int x, int y) const;
+    [[nodiscard]] std::uint8_t tile_color_index(int bank, std::uint16_t tile_addr, int row, int col) const;
 
     [[nodiscard]] static std::size_t vram_index(int bank, std::uint16_t addr) {
         return static_cast<std::size_t>(bank) * 0x2000 + (addr - 0x8000);
@@ -97,6 +104,7 @@ private:
     std::array<std::uint16_t, kLcdWidth * kLcdHeight> frame_{};
     Model model_ = Model::Dmg;
     bool cgb_mode_ = false;
+    std::uint8_t opri_ = 1;
     std::array<std::uint16_t, 4> dmg_colors_ = kDmgGreys;
     std::array<std::uint8_t, 64> bg_palettes_{};
     std::array<std::uint8_t, 64> obj_palettes_{};

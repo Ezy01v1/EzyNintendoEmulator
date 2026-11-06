@@ -26,9 +26,9 @@ public:
     explicit Bus(Cartridge cartridge, Model model = Model::Dmg)
         : cartridge_(std::move(cartridge)),
           model_(model),
-          cgb_mode_(model == Model::Cgb && cartridge_.header().supports_cgb()),
-          opri_(cgb_mode_ ? 0 : 1) {
+          cgb_mode_(model == Model::Cgb && cartridge_.header().supports_cgb()) {
         ppu_.set_model(model_, cgb_mode_);
+        ppu_.set_opri(cgb_mode_ ? 0 : 1);
     }
 
     [[nodiscard]] Model model() const { return model_; }
@@ -39,7 +39,7 @@ public:
     // WRAM bank mapped at 0xD000-0xDFFF (1-7; always 1 outside CGB mode).
     [[nodiscard]] int wram_bank() const { return svbk_ == 0 ? 1 : svbk_; }
     // OPRI bit 0: 0 = sprites ordered by OAM index (CGB), 1 = by X coordinate (DMG).
-    [[nodiscard]] std::uint8_t opri() const { return opri_; }
+    [[nodiscard]] std::uint8_t opri() const { return ppu_.opri(); }
 
     std::uint8_t read(std::uint16_t addr) override;
     void write(std::uint16_t addr, std::uint8_t value) override;
@@ -91,7 +91,6 @@ private:
     std::array<std::uint8_t, 0x8000> wram_{};  // 8 banks of 4 KiB (banks 2-7 only on CGB)
     // CGB registers.
     std::uint8_t svbk_ = 1;  // 0xFF70, bits 0-2
-    std::uint8_t opri_;      // 0xFF6C, bit 0
     std::array<std::uint8_t, 4> undocumented_{};  // 0xFF72-0xFF75
     std::uint8_t rp_ = 0;    // 0xFF56, writable bits 0 and 6-7
     std::array<std::uint8_t, 0x80> io_{};  // raw storage for I/O registers not modelled yet

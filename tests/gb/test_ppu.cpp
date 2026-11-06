@@ -157,3 +157,111 @@ TEST_CASE("compat mode maps BGP through palette RAM") {
     run_dots(ppu, 456);
     CHECK(ppu.framebuffer()[0] == 0x7C00);
 }
+
+namespace {
+
+// A CGB-mode PPU with BG palette 0 = {white, red, green, blue} and OBJ palette 2 = the same.
+Ppu make_cgb_ppu() {
+    Ppu ppu;
+    ppu.set_model(Model::Cgb, true);
+    ppu.set_opri(0);  // what the bus sets for a CGB game
+    const std::array<std::uint16_t, 4> colors = {0x7FFF, 0x001F, 0x03E0, 0x7C00};
+    for (const std::uint16_t spec : {std::uint16_t{0xFF68}, std::uint16_t{0xFF6A}}) {
+        for (int palette = 0; palette < 8; ++palette) {
+            ppu.write_register(spec, static_cast<std::uint8_t>(0x80 | (palette * 8)));
+            for (const auto c : colors) {
+                ppu.write_register(static_cast<std::uint16_t>(spec + 1), static_cast<std::uint8_t>(c & 0xFF));
+                ppu.write_register(static_cast<std::uint16_t>(spec + 1), static_cast<std::uint8_t>(c >> 8));
+            }
+        }
+    }
+    return ppu;
+}
+
+// Tile 0 row r: left pixel color index 1, the other 7 pixels index 0. Rows 0-3 only.
+void write_marker_tile(Ppu& ppu, int bank) {
+    for (int row = 0; row < 4; ++row) {
+        ppu.write_vram_bank(bank, static_cast<std::uint16_t>(0x8000 + row * 2), 0x80);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("BG attribute flips and bank") {
+    Ppu ppu = make_cgb_ppu();
+    write_marker_tile(ppu, 1);  // only bank 1 has the marker
+    // Attribute for map entry (0,0): tile bank 1, X-flip, Y-flip.
+    ppu.write_vram_bank(1, 0x9800, 0x08 | 0x20 | 0x40);
+    run_dots(ppu, 456 * 8);  // draw lines 0-7
+    const auto fb = ppu.framebuffer();
+    // Flipped both ways: the marker column moves to x = 7 and rows 4-7.
+    CHECK(fb[0] == 0x7FFF);
+    CHECK(fb[7] == 0x7FFF);  // row 0 is now a blank row (source row 7)
+    CHECK(fb[static_cast<std::size_t>(7 * kLcdWidth + 7)] == 0x001F);
+    CHECK(fb[static_cast<std::size_t>(7 * kLcdWidth + 0)] == 0x7FFF);
+}
+
+TEST_CASE("BG attribute palette") {
+    Ppu ppu = make_cgb_ppu();
+    fill_tile(ppu, 0x8000, 1);
+    ppu.write_register(0xFF68, 0x80 | (3 * 8 + 2));  // palette 3, colour 1
+    ppu.write_register(0xFF69, 0x34);
+    ppu.write_register(0xFF69, 0x12);
+    ppu.write_vram_bank(1, 0x9800, 0x03);
+    run_dots(ppu, 456);
+    CHECK(ppu.framebuffer()[0] == 0x1234);
+    CHECK(ppu.framebuffer()[8] == 0x001F);  // map entry (1,0) still palette 0
+}
+
+TEST_CASE("CGB sprites: palette from attributes, BG priority and LCDC bit 0") {
+    Ppu ppu = make_cgb_ppu();
+    fill_tile(ppu, 0x8000, 1);  // BG tile 0: colour 1 everywhere
+    fill_tile(ppu, 0x8010, 3);  // sprite tile 1: colour 3
+    ppu.write_vram_bank(1, 0x9800, 0x80);  // map (0,0) has BG-over-OBJ priority
+    ppu.write_oam(0xFE00, 16);  // y
+    ppu.write_oam(0xFE01, 8);   // x
+    ppu.write_oam(0xFE02, 1);
+    ppu.write_oam(0xFE03, 0x02);  // OBJ palette 2
+    ppu.write_oam(0xFE04, 16);
+    ppu.write_oam(0xFE05, 16);
+    ppu.write_oam(0xFE06, 1);
+    ppu.write_oam(0xFE07, 0x02);
+    ppu.write_register(0xFF40, 0x93);  // LCD on, OBJ on, BG "priority" on
+    run_dots(ppu, 456);
+    CHECK(ppu.framebuffer()[0] == 0x001F);  // BG wins over the first sprite
+    CHECK(ppu.framebuffer()[8] == 0x7C00);  // second sprite shows (no BG priority there)
+
+    Ppu ppu2 = make_cgb_ppu();
+    fill_tile(ppu2, 0x8000, 1);
+    fill_tile(ppu2, 0x8010, 3);
+    ppu2.write_vram_bank(1, 0x9800, 0x80);
+    ppu2.write_oam(0xFE00, 16);
+    ppu2.write_oam(0xFE01, 8);
+    ppu2.write_oam(0xFE02, 1);
+    ppu2.write_register(0xFF40, 0x92);  // LCDC bit 0 = 0: sprites always on top, BG still drawn
+    run_dots(ppu2, 456);
+    CHECK(ppu2.framebuffer()[0] == 0x7C00);
+    CHECK(ppu2.framebuffer()[8] == 0x001F);
+}
+
+TEST_CASE("CGB sprite tile bank and OAM-order priority") {
+    Ppu ppu = make_cgb_ppu();
+    fill_tile(ppu, 0x8010, 2);
+    for (int row = 0; row < 8; ++row) {  // bank 1 tile 1: colour 3
+        ppu.write_vram_bank(1, static_cast<std::uint16_t>(0x8010 + row * 2), 0xFF);
+        ppu.write_vram_bank(1, static_cast<std::uint16_t>(0x8011 + row * 2), 0xFF);
+    }
+    // Sprite 0 at x=4 from bank 1; sprite 1 at x=0 from bank 0. They overlap at x 4-7.
+    ppu.write_oam(0xFE00, 16);
+    ppu.write_oam(0xFE01, 12);
+    ppu.write_oam(0xFE02, 1);
+    ppu.write_oam(0xFE03, 0x08);
+    ppu.write_oam(0xFE04, 16);
+    ppu.write_oam(0xFE05, 8);
+    ppu.write_oam(0xFE06, 1);
+    ppu.write_oam(0xFE07, 0x00);
+    ppu.write_register(0xFF40, 0x93);
+    run_dots(ppu, 456);
+    CHECK(ppu.framebuffer()[0] == 0x03E0);  // sprite 1 (colour 2) alone
+    CHECK(ppu.framebuffer()[4] == 0x7C00);  // overlap: OAM index 0 wins on CGB despite larger X
+}
