@@ -169,3 +169,44 @@ TEST_CASE("Gba frames end at VBlank, 280896 cycles apart, without accumulating l
     CHECK(gba->scheduler().now() >= kFirst + 9ULL * kCyclesPerFrame);
     CHECK(gba->scheduler().now() < kFirst + 9ULL * kCyclesPerFrame + 32);
 }
+
+TEST_CASE("ROM prefetch buffer hides waitstates of sequential opcode fetches") {
+    const auto code_seq = static_cast<Access>(kCode | kSeq);
+    const auto code_nonseq = static_cast<Access>(kCode | kNonseq);
+    Scheduler s;
+    Bus bus(std::vector<std::uint8_t>(0x1000), {}, &s);
+
+    // Without prefetch (WAITCNT = 0x0317): every fetch pays WS0's S = 1 waitstate.
+    bus.write16(Bus::kWaitcnt, 0x0317);
+    CHECK(cost(bus, s, 0x08000000, 2, code_nonseq) == 4);
+    for (int i = 0; i < 4; ++i) bus.idle();
+    CHECK(cost(bus, s, 0x08000002, 2, code_seq) == 2);
+
+    // With prefetch: the first fetch restarts the buffer, which fills while the CPU is
+    // busy elsewhere (2 cycles per halfword); buffered halfwords then take 1 cycle.
+    bus.write16(Bus::kWaitcnt, 0x4317);
+    CHECK(cost(bus, s, 0x08000100, 2, code_nonseq) == 4);
+    for (int i = 0; i < 4; ++i) bus.idle();                  // 2 halfwords prefetched
+    CHECK(cost(bus, s, 0x08000102, 2, code_seq) == 1);
+    CHECK(cost(bus, s, 0x08000104, 2, code_seq) == 1);
+    CHECK(cost(bus, s, 0x08000106, 2, code_seq) == 1);       // finished during those fetches
+    // Buffer empty, 0x108 half fetched: the CPU waits only for the rest.
+    CHECK(cost(bus, s, 0x08000108, 2, code_seq) == 1);
+    // An ARM fetch needs two halfwords.
+    for (int i = 0; i < 4; ++i) bus.idle();
+    CHECK(cost(bus, s, 0x0800010A, 4, code_seq) == 1);
+
+    // A branch (non-matching address) misses and pays the normal N cost again.
+    CHECK(cost(bus, s, 0x08000200, 2, code_nonseq) == 4);
+    // A data load from ROM stops the prefetcher.
+    for (int i = 0; i < 4; ++i) bus.idle();
+    CHECK(cost(bus, s, 0x08000800, 2, kNonseq) == 4);
+    CHECK(cost(bus, s, 0x08000202, 2, code_seq) == 2);       // the buffer was discarded: S cost
+
+    // Accesses to other regions also let the buffer fill.
+    CHECK(cost(bus, s, 0x03000000, 4, kNonseq) == 1);
+    CHECK(cost(bus, s, 0x02000000, 4, kNonseq) == 6);         // 3 halfwords' worth
+    CHECK(cost(bus, s, 0x08000204, 2, code_seq) == 1);
+    CHECK(cost(bus, s, 0x08000206, 2, code_seq) == 1);
+    CHECK(cost(bus, s, 0x08000208, 2, code_seq) == 1);
+}

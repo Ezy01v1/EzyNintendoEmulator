@@ -52,7 +52,8 @@ inline constexpr std::size_t kSramSize = 64 * 1024;  // the save chip's address 
 // the PPU's affine reference points, IF write-1-to-clear, KEYINPUT read-only, HALTCNT,
 // timers, DMA. Everything else in I/O is plain storage.
 //
-// Not modelled yet: the ROM prefetch buffer, the non-sequential penalty at 128 KiB ROM
+// Not modelled yet: the exact prefetch behaviour of a ROM data access while a
+// prefetch is under way, the non-sequential penalty at 128 KiB ROM
 // boundaries, I/O register side effects (plain storage for now), BIOS read protection,
 // open bus inside unused I/O registers and during DMA (we return the last opcode
 // fetched for unmapped regions only, without the per-region Thumb rules).
@@ -117,7 +118,7 @@ public:
     void write8(std::uint32_t addr, std::uint8_t value, Access access) override;
     void write16(std::uint32_t addr, std::uint16_t value, Access access) override;
     void write32(std::uint32_t addr, std::uint32_t value, Access access) override;
-    void idle() override { charge(1); }
+    void idle() override { charge(1); step_prefetch(1); }
 
     // Cycles one access costs: 1 plus the region's waitstates. `size` is 1, 2 or 4.
     [[nodiscard]] std::uint32_t access_cycles(std::uint32_t addr, std::uint32_t size, Access access) const;
@@ -148,6 +149,21 @@ private:
         if (scheduler_ != nullptr) scheduler_->advance(cycles);
     }
 
+    // The ROM prefetch buffer (WAITCNT bit 14): while the CPU isn't using the cartridge
+    // bus, it keeps fetching the halfwords after the last opcode, up to 8. An opcode
+    // fetch that hits it costs 1 cycle, or just the rest of a fetch under way. A branch
+    // restarts it; a data access to ROM (or DMA) discards it.
+    struct Prefetch {
+        bool active = false;
+        std::uint32_t next = 0;       // address of the next opcode halfword to hand out
+        std::uint32_t count = 0;      // halfwords ready, from `next` on
+        std::uint32_t countdown = 0;  // cycles left on the halfword being fetched
+        std::uint32_t duty = 0;       // cycles per halfword (1 + S waitstates)
+    };
+    // Cycles a CPU or DMA access takes, running the prefetcher along.
+    [[nodiscard]] std::uint32_t timed_access(std::uint32_t addr, std::uint32_t size, Access access);
+    void step_prefetch(std::uint32_t cycles);
+
     template <typename T>
     [[nodiscard]] T read(std::uint32_t addr) const;
     template <typename T>
@@ -170,6 +186,7 @@ private:
     std::optional<Gpio> gpio_;  // likewise
     // Last opcode fetched (Thumb: the halfword twice); unmapped reads return it.
     std::uint32_t open_bus_ = 0;
+    Prefetch prefetch_;
     Scheduler* scheduler_ = nullptr;
     std::uint16_t keys_pressed_ = 0;
     bool halted_ = false;

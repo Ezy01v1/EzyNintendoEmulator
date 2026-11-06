@@ -301,13 +301,63 @@ std::uint32_t Bus::access_cycles(std::uint32_t addr, std::uint32_t size, Access 
     return 1;  // BIOS, IWRAM, I/O, OAM (32-bit, no waitstates) and unmapped space
 }
 
+void Bus::step_prefetch(std::uint32_t cycles) {
+    Prefetch& p = prefetch_;
+    if (!p.active) return;
+    while (cycles > 0 && p.count < 8) {
+        if (p.countdown > cycles) {
+            p.countdown -= cycles;
+            return;
+        }
+        cycles -= p.countdown;
+        ++p.count;
+        p.countdown = p.duty;
+    }
+}
+
+std::uint32_t Bus::timed_access(std::uint32_t addr, std::uint32_t size, Access access) {
+    const std::uint32_t region = region_of(addr);
+    if (!is_rom(region) || is_eeprom_address(addr)) {
+        const std::uint32_t cycles = access_cycles(addr, size, access);
+        step_prefetch(cycles);  // the cartridge bus is free meanwhile
+        return cycles;
+    }
+    const bool enabled = (io_[0x205] & 0x40) != 0;
+    Prefetch& p = prefetch_;
+    if ((access & kCode) == 0 || (access & kDma) != 0 || !enabled) {
+        p.active = false;
+        return access_cycles(addr, size, access);
+    }
+    const std::uint32_t halves = size == 4 ? 2 : 1;
+    if (p.active && (addr & ~1U) == p.next) {
+        std::uint32_t cycles = 1;
+        if (p.count < halves) {
+            // Wait for the fetch under way (and, for a word, the one after it).
+            cycles = p.countdown + (halves - p.count - 1) * p.duty;
+            p.count = halves;
+            p.countdown = p.duty;
+        }
+        p.count -= halves;
+        p.next += 2 * halves;
+        if (cycles == 1) step_prefetch(1);
+        return cycles;
+    }
+    // Miss: a normal access, after which the buffer starts on the following halfwords.
+    const std::uint32_t cycles = access_cycles(addr, size, access);
+    const auto waitcnt = static_cast<std::uint32_t>(io_[0x204] | (io_[0x205] << 8));
+    const std::uint32_t window = (region - kRomFirst) / 2;
+    p = {true, (addr & ~1U) + 2 * halves, 0, 0, 1 + kWaitS[window][(waitcnt >> (4 + window * 3)) & 1]};
+    p.countdown = p.duty;
+    return cycles;
+}
+
 std::uint8_t Bus::read8(std::uint32_t addr, Access access) {
-    charge(access_cycles(addr, 1, access));
+    charge(timed_access(addr, 1, access));
     return read<std::uint8_t>(addr);
 }
 
 std::uint16_t Bus::read16(std::uint32_t addr, Access access) {
-    charge(access_cycles(addr, 2, access));
+    charge(timed_access(addr, 2, access));
     if (is_eeprom_address(addr)) return backup_.eeprom_read();
     const auto value = read<std::uint16_t>(addr);
     if ((access & kCode) != 0) open_bus_ = value * 0x00010001U;  // Thumb: both halves
@@ -322,24 +372,24 @@ bool Bus::is_eeprom_address(std::uint32_t addr) const {
 }
 
 std::uint32_t Bus::read32(std::uint32_t addr, Access access) {
-    charge(access_cycles(addr, 4, access));
+    charge(timed_access(addr, 4, access));
     const auto value = read<std::uint32_t>(addr);
     if ((access & kCode) != 0) open_bus_ = value;
     return value;
 }
 
 void Bus::write8(std::uint32_t addr, std::uint8_t value, Access access) {
-    charge(access_cycles(addr, 1, access));
+    charge(timed_access(addr, 1, access));
     write(addr, value);
 }
 
 void Bus::write16(std::uint32_t addr, std::uint16_t value, Access access) {
-    charge(access_cycles(addr, 2, access));
+    charge(timed_access(addr, 2, access));
     write(addr, value);
 }
 
 void Bus::write32(std::uint32_t addr, std::uint32_t value, Access access) {
-    charge(access_cycles(addr, 4, access));
+    charge(timed_access(addr, 4, access));
     write(addr, value);
 }
 
