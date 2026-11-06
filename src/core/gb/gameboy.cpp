@@ -20,7 +20,18 @@ std::uint8_t compat_title_checksum(const CartridgeHeader& header) {
 std::unique_ptr<GameBoy> GameBoy::create(std::span<const std::uint8_t> rom, Options options) {
     auto cartridge = Cartridge::load(rom);
     if (!cartridge) return nullptr;
-    auto gameboy = std::unique_ptr<GameBoy>(new GameBoy(std::move(*cartridge), resolve_model(options.model)));
+    const Model model = resolve_model(options.model);
+    constexpr std::size_t kCgbBootRomSize = 0x900;
+    const bool real_boot = options.boot_rom && model == Model::Cgb;
+    if (real_boot && options.boot_rom->size() != kCgbBootRomSize) return nullptr;
+
+    auto gameboy = std::unique_ptr<GameBoy>(new GameBoy(std::move(*cartridge), model));
+    if (real_boot) {
+        // Start from scratch at 0x0000 and let Nintendo's code do the rest.
+        gameboy->bus().map_boot_rom(std::move(*options.boot_rom));
+        gameboy->cpu().regs() = Registers{};
+        return gameboy;
+    }
     if (gameboy->model() == Model::Cgb && !gameboy->bus().cgb_mode()) {
         // What the CGB boot ROM does for a DMG game: pick its colours.
         const CompatPalette p = select_compat_palette(gameboy->bus().cartridge().header(), options.held_buttons);

@@ -68,7 +68,16 @@ void Bus::run_vram_dma(int blocks) {
     in_vram_dma_ = false;
 }
 
+void Bus::map_boot_rom(std::vector<std::uint8_t> boot_rom) {
+    boot_rom_ = std::move(boot_rom);
+    cgb_mode_ = true;
+    ppu_.set_cgb_mode(true);
+    ppu_.set_opri(0);
+}
+
 std::uint8_t Bus::peek(std::uint16_t addr) const {
+    // The cartridge header (0x0100-0x01FF) stays visible: the boot ROM reads it.
+    if (!boot_rom_.empty() && (addr < 0x0100 || (addr >= 0x0200 && addr < 0x0900))) return boot_rom_[addr];
     if (addr < 0x8000) return cartridge_.read_rom(addr);
     if (addr < 0xA000) return ppu_.read_vram(addr);
     if (addr < 0xC000) return cartridge_.read_ram(addr);
@@ -128,7 +137,7 @@ std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
         case 0xFF72:
         case 0xFF73:
         case 0xFF74: return undocumented_[addr - 0xFF72];
-        default: return std::uint8_t{0xFF};  // KEY0: locked once the boot ROM is gone
+        default: return boot_rom_.empty() ? std::uint8_t{0xFF} : key0_;  // KEY0
     }
 }
 
@@ -161,7 +170,9 @@ bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
         case 0xFF72:
         case 0xFF73:
         case 0xFF74: undocumented_[addr - 0xFF72] = value; break;
-        default: break;  // KEY0
+        default:  // KEY0: only the boot ROM can write it
+            if (!boot_rom_.empty()) key0_ = value;
+            break;
     }
     return true;
 }
@@ -233,6 +244,13 @@ void Bus::write_io(std::uint16_t addr, std::uint8_t value) {
             break;
         case kInterruptFlag: if_ = value & 0x1F; break;
         case kOamDma: oam_dma(value); break;
+        case 0xFF50:  // unmap the boot ROM, for good
+            if (!boot_rom_.empty()) {
+                boot_rom_.clear();
+                cgb_mode_ = (key0_ & 0x04) == 0;
+                ppu_.set_cgb_mode(cgb_mode_);
+            }
+            break;
         default: io_[addr - 0xFF00] = value; break;
     }
 }

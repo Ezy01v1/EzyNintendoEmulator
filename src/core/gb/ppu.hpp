@@ -61,6 +61,8 @@ public:
 
     // Set once by the bus at power-on. cgb_mode = a CGB game on a CGB.
     void set_model(Model model, bool cgb_mode);
+    // A real boot ROM switching to DMG compatibility mode: keeps the palettes it wrote.
+    void set_cgb_mode(bool cgb_mode) { cgb_mode_ = cgb_mode; }
     // The colours the DMG model uses for its 4 shades (kDmgGreys by default).
     void set_dmg_colors(const std::array<std::uint16_t, 4>& colors) { dmg_colors_ = colors; }
     // DMG compatibility mode: the palettes the CGB boot ROM picked for a DMG game. BGP/OBP0/OBP1

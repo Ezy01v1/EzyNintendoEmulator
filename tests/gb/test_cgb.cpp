@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <vector>
@@ -243,4 +245,58 @@ TEST_CASE("a DMG game on a CGB gets its compatibility palette at power-on") {
     REQUIRE(gb);
     const auto ram = gb->bus().ppu().bg_palette_ram();
     CHECK((ram[2] | (ram[3] << 8)) == 0x1BEF);
+}
+
+namespace {
+
+// A fake 2304-byte CGB boot ROM: LD A,0x11; LDH (0x50),A; then 0xAA filler.
+std::vector<std::uint8_t> make_boot_rom() {
+    std::vector<std::uint8_t> boot(0x900, 0xAA);
+    const std::array<std::uint8_t, 4> code = {0x3E, 0x11, 0xE0, 0x50};
+    std::copy(code.begin(), code.end(), boot.begin());
+    return boot;
+}
+
+}  // namespace
+
+TEST_CASE("boot ROM overlays 0x0000-0x00FF and 0x0200-0x08FF but not the header") {
+    auto rom = make_cgb_rom();
+    rom[0x0005] = 0x55;
+    rom[0x0300] = 0x66;
+    auto gb = GameBoy::create(rom, Options{.boot_rom = make_boot_rom()});
+    REQUIRE(gb);
+    CHECK(gb->cpu().regs().pc == 0x0000);
+    CHECK(gb->cpu().regs().af() == 0x0000);
+    CHECK(gb->bus().peek(0x0000) == 0x3E);
+    CHECK(gb->bus().peek(0x0005) == 0xAA);
+    CHECK(gb->bus().peek(0x0134) == 'C');  // header from the cartridge
+    CHECK(gb->bus().peek(0x0300) == 0xAA);
+    CHECK(gb->bus().peek(0x0900) == rom[0x0900]);
+}
+
+TEST_CASE("writing 0xFF50 unmaps the boot ROM") {
+    auto rom = make_cgb_rom();
+    rom[0x0005] = 0x55;
+    auto gb = GameBoy::create(rom, Options{.boot_rom = make_boot_rom()});
+    REQUIRE(gb);
+    gb->step();
+    gb->step();
+    CHECK(gb->bus().peek(0x0005) == 0x55);
+    CHECK(gb->bus().cgb_mode());
+}
+
+TEST_CASE("KEY0 written by the boot ROM selects DMG compatibility mode") {
+    auto gb = GameBoy::create(make_rom(), Options{.boot_rom = make_boot_rom()});
+    REQUIRE(gb);
+    CHECK(gb->bus().cgb_mode());  // the boot ROM itself runs in CGB mode
+    gb->bus().poke(0xFF4C, 0x04);
+    gb->bus().poke(0xFF50, 0x11);
+    CHECK_FALSE(gb->bus().cgb_mode());
+    gb->bus().poke(0xFF4C, 0x00);  // locked now
+    gb->bus().poke(0xFF4F, 0x01);
+    CHECK(gb->bus().peek(0xFF4F) == 0xFF);
+}
+
+TEST_CASE("wrong-size boot ROM is rejected") {
+    CHECK(GameBoy::create(make_cgb_rom(), Options{.boot_rom = std::vector<std::uint8_t>(0x100)}) == nullptr);
 }

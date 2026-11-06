@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "gb/apu.hpp"
 #include "gb/cartridge.hpp"
@@ -34,6 +35,12 @@ public:
     }
 
     [[nodiscard]] Model model() const { return model_; }
+
+    // Maps a real CGB boot ROM (2304 bytes) over 0x0000-0x00FF and 0x0200-0x08FF until the
+    // program writes 0xFF50. It runs in CGB mode; KEY0 (0xFF4C) bit 2, which it writes just
+    // before leaving, decides whether the game then runs in DMG compatibility mode.
+    void map_boot_rom(std::vector<std::uint8_t> boot_rom);
+    [[nodiscard]] bool boot_rom_mapped() const { return !boot_rom_.empty(); }
     // True when CGB features are enabled: a CGB game on CGB hardware. A DMG game on a CGB
     // runs in DMG compatibility mode, where most CGB registers are hidden.
     [[nodiscard]] bool cgb_mode() const { return cgb_mode_; }
@@ -105,6 +112,8 @@ private:
     std::array<std::uint8_t, 4> undocumented_{};  // 0xFF72-0xFF75
     std::uint8_t rp_ = 0;
     Hdma hdma_;
+    std::vector<std::uint8_t> boot_rom_;  // empty once unmapped (or never used)
+    std::uint8_t key0_ = 0;
     bool in_vram_dma_ = false;    // 0xFF56, writable bits 0 and 6-7
     std::array<std::uint8_t, 0x80> io_{};  // raw storage for I/O registers not modelled yet
     std::array<std::uint8_t, 0x7F> hram_{};
