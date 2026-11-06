@@ -23,7 +23,7 @@ void Ppu::tick(int dots) {
 // The LY register runs a few dots ahead of the line itself: it shows the next line number
 // 3 dots before the line ends (the same 3-dot offset as the mode 3 calibration in
 // ppu_draw.cpp). Line 153 is special: LY reads 153 for 4 dots, then 0 for the rest of it.
-constexpr int kLyEarlyDots = 3;
+constexpr int kLyEarlyDots = kLineOriginOffsetDots;
 constexpr int kFirstLineStartDot = 0;   // line 0 after LCD on starts this far in
 constexpr int kFirstLineDrawDelay = 0;   // ...and its mode 3 starts this much later
 

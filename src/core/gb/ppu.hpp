@@ -17,6 +17,11 @@ inline constexpr int kLinesPerFrame = 154;
 // The DMG model shows its 4 shades as these plain greys, lightest to darkest.
 inline constexpr std::array<std::uint16_t, 4> kDmgGreys = {0x7FFF, 0x56B5, 0x294A, 0x0000};
 
+// Our line timing is measured from an origin about 3 dots after the hardware's (found by
+// calibrating against Mooneye's hardware-verified PPU timing ROMs). Both the mode 3
+// dummy fetch (ppu_draw.cpp) and the early LY change (ppu.cpp) come from this one value.
+inline constexpr int kLineOriginOffsetDots = 3;
+
 inline constexpr int kDotsPerFrame = kDotsPerLine * kLinesPerFrame;  // 70224 T-cycles
 
 // Picture Processing Unit (DMG and CGB).

@@ -519,3 +519,35 @@ TEST_CASE("entering VBlank also fires the mode 2 STAT source") {
     while (ppu.ly() != 144) ppu.tick(1);
     CHECK((ppu.take_interrupts() & interrupt::kStat) != 0);
 }
+
+TEST_CASE("window at WX=7 is not shifted by SCX fine scroll") {
+    Ppu ppu;
+    ppu.write_register(0xFF40, 0x00);
+    // Window map (0x9C00) tile 1 = a tile whose leftmost column is colour 3.
+    for (int row = 0; row < 8; ++row) ppu.write_vram(static_cast<std::uint16_t>(0x8010 + row * 2), 0x80);
+    for (int row = 0; row < 8; ++row) ppu.write_vram(static_cast<std::uint16_t>(0x8011 + row * 2), 0x80);
+    for (std::uint16_t i = 0; i < 32; ++i) ppu.write_vram(static_cast<std::uint16_t>(0x9C00 + i), 1);
+    ppu.write_register(0xFF43, 3);    // SCX fine scroll
+    ppu.write_register(0xFF4A, 0);    // WY
+    ppu.write_register(0xFF4B, 7);    // WX = 7: window covers the whole line
+    ppu.write_register(0xFF47, 0xE4);
+    ppu.write_register(0xFF40, 0x91 | 0x20 | 0x40);  // window on, window map 0x9C00
+    mode3_dots(ppu);
+    const auto line = ppu.framebuffer().subspan(kLcdWidth, kLcdWidth);
+    CHECK(line[0] == kDmgGreys[3]);  // window column 0 lands on screen x 0
+    CHECK(line[8] == kDmgGreys[3]);
+    CHECK(line[1] == kDmgGreys[0]);
+}
+
+TEST_CASE("switching to 8x8 sprites mid-line with a Y-flipped tall sprite stays in VRAM") {
+    Ppu ppu = make_sprite_ppu({});
+    ppu.write_register(0xFF40, 0x00);
+    ppu.write_oam(0xFE00, 16 + 1 - 10);  // a 16-px sprite whose row 10 is on line 1
+    ppu.write_oam(0xFE01, 80);
+    ppu.write_oam(0xFE03, 0x40);         // Y-flip
+    ppu.write_register(0xFF40, 0x97);    // tall sprites
+    while (!(ppu.ly() == 1 && ppu.mode() == 3)) ppu.tick(1);
+    ppu.write_register(0xFF40, 0x93);    // back to 8x8 before the sprite is fetched
+    while (ppu.mode() == 3) ppu.tick(1);  // must not read outside VRAM
+    CHECK(ppu.mode() == 0);
+}

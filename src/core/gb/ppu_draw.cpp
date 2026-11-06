@@ -31,7 +31,7 @@ constexpr std::uint8_t kLcdcTileData = 0x10;
 constexpr std::uint8_t kLcdcWindowEnable = 0x20;
 constexpr std::uint8_t kLcdcWindowMap = 0x40;
 
-constexpr int kDummyFetchDots = 3;  // calibrated against Mooneye, see above
+constexpr int kDummyFetchDots = 6 - kLineOriginOffsetDots;  // = 3, see above
 constexpr int kFetchDots = 6;
 constexpr int kSpriteFetchDots = 6;
 
@@ -132,7 +132,9 @@ int Ppu::sprite_at_current_x() const {
 // pixel already there wins, which gives lower X priority. On CGB the lower OAM index wins.
 void Ppu::merge_sprite(const LineSprite& sprite) {
     const int height = (lcdc_ & kLcdcObjTall) ? 16 : 8;
-    int row = ly_ - (sprite.y - 16);
+    // The row is taken modulo the *current* height: LCDC.2 can change after the OAM scan
+    // picked the sprite with the other height (the hardware just uses the low bits).
+    int row = (ly_ - (sprite.y - 16)) & (height - 1);
     if (sprite.attributes & 0x40) row = height - 1 - row;
     const std::uint8_t tile = height == 16 ? (sprite.tile & 0xFE) : sprite.tile;
     const int bank = cgb_mode_ && (sprite.attributes & 0x08) ? 1 : 0;
@@ -181,7 +183,9 @@ bool Ppu::draw_dot() {
         bg_fifo_.clear();
         fetch_step_ = 0;
         fetch_tile_ = 0;
-        if (lx_ == 0 && wx_ < 7) discard_ = 7 - wx_;  // window partly off the left edge
+        // The window has no fine scroll of its own: drop the BG's SCX % 8 discard, and only
+        // discard what is off the left edge when WX < 7.
+        discard_ = (lx_ == 0 && wx_ < 7) ? 7 - wx_ : 0;
     }
 
     if (discard_ == 0) {

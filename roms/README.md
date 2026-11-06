@@ -46,7 +46,7 @@ Mooneye: **80** pass with `--model dmg`, **80** with `--model cgb` (54 and 54 be
 
 Still failing among the ones the design required:
 
-- `ppu/hblank_ly_scx_timing-GS`: passed before only by accident of the old interrupt timing.
+- `ppu/hblank_ly_scx_timing-GS`: **regression from this pass.** It passed before, and started failing when interrupt sampling moved to the end of the opcode fetch (needed for the timer ROMs). Open item.
 - `ppu/lcdon_timing-GS`, `ppu/lcdon_write_timing-GS`: line 0 right after the LCD is switched on needs its own offsets (knobs in `ppu.cpp`, currently 0).
 - `misc/ppu/vblank_stat_intr-C` (CGB).
 
