@@ -20,15 +20,17 @@ inline constexpr int kDotsPerFrame = kDotsPerLine * kLinesPerFrame;  // 70224 T-
 
 // Picture Processing Unit (DMG).
 //
-// Timing per visible line: mode 2 (OAM scan, 80 dots) -> mode 3 (drawing, fixed 172 dots
-// here) -> mode 0 (HBlank, rest of the 456). Lines 144-153 are mode 1 (VBlank).
+// Timing per visible line: mode 2 (OAM scan, 80 dots) -> mode 3 (drawing, 172 dots plus
+// penalties) -> mode 0 (HBlank, rest of the 456). Lines 144-153 are mode 1 (VBlank).
+// The mode 3 length is estimated when it starts (Pan Docs, "Mode 3 length"): +SCX % 8 for
+// the discarded pixels, +6 if the window shows on the line, and 6 to 11 per sprite.
 //
 // Rendering model: a *scanline* renderer. The whole line is drawn when mode 3 ends, using
 // the register values at that moment. Real hardware draws pixel by pixel through a FIFO,
 // so mid-line register changes are not reproduced. That is enough for dmg-acid2 and nearly
 // all games; a FIFO renderer can replace render_scanline() later without touching the rest.
 //
-// Not modelled yet: VRAM/OAM access blocking during modes 2/3, variable mode 3 length.
+// The CPU can't reach OAM in modes 2-3 or VRAM in mode 3 (the bus checks *_accessible()).
 class Ppu {
 public:
     void tick();  // one M-cycle = 4 dots
@@ -74,6 +76,8 @@ public:
     [[nodiscard]] int mode() const { return mode_; }
     [[nodiscard]] std::uint8_t lcdc() const { return lcdc_; }
     [[nodiscard]] bool lcd_on() const { return (lcdc_ & 0x80) != 0; }
+    [[nodiscard]] bool vram_accessible() const { return !lcd_on() || mode_ != 3; }
+    [[nodiscard]] bool oam_accessible() const { return !lcd_on() || (mode_ != 2 && mode_ != 3); }
 
 private:
     void render_scanline();
@@ -81,6 +85,7 @@ private:
     [[nodiscard]] std::uint16_t bg_color(int palette, std::uint8_t index) const;
     [[nodiscard]] std::uint16_t obj_color(std::uint8_t attributes, std::uint8_t index) const;
     void update_stat_line();
+    [[nodiscard]] int mode3_length() const;
     struct BgPixel {
         std::uint8_t index;       // colour index 0-3, before palettes
         std::uint8_t attributes;  // CGB map attributes (0 outside CGB mode)
@@ -119,6 +124,7 @@ private:
     std::uint8_t wy_ = 0, wx_ = 0;
 
     int dot_ = 0;
+    int hblank_start_ = 80 + 172;  // dot where this line's mode 3 ends
     int mode_ = 2;
     bool stat_line_ = false;     // STAT interrupt fires on the rising edge of this
     bool window_y_hit_ = false;  // WY matched LY at some point this frame

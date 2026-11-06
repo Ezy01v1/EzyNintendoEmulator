@@ -9,8 +9,7 @@ namespace ezy::gb {
 namespace {
 
 constexpr int kOamScanDots = 80;
-constexpr int kDrawingDots = 172;
-constexpr int kHBlankStart = kOamScanDots + kDrawingDots;  // 252
+constexpr int kDrawingDots = 172;  // minimum mode 3 length
 
 constexpr std::uint8_t kLcdcBgEnable = 0x01;
 constexpr std::uint8_t kLcdcObjEnable = 0x02;
@@ -56,12 +55,33 @@ void Ppu::tick() {
         new_mode = 1;
     } else if (dot_ < kOamScanDots) {
         new_mode = 2;
-    } else if (dot_ < kHBlankStart) {
-        new_mode = 3;
+    } else {
+        if (mode_ == 2) hblank_start_ = kOamScanDots + mode3_length();
+        if (dot_ < hblank_start_) new_mode = 3;
     }
     if (new_mode == 0 && mode_ == 3) render_scanline();
     mode_ = new_mode;
     update_stat_line();
+}
+
+int Ppu::mode3_length() const {
+    int length = kDrawingDots + scx_ % 8;
+    const bool window = (lcdc_ & kLcdcWindowEnable) && (window_y_hit_ || ly_ == wy_) && wx_ <= 166;
+    if (window) length += 6;
+    if (lcdc_ & kLcdcObjEnable) {
+        const int height = (lcdc_ & kLcdcObjTall) ? 16 : 8;
+        int count = 0;
+        for (std::size_t i = 0; i < 40 && count < 10; ++i) {
+            const int y = oam_[i * 4] - 16;
+            if (ly_ < y || ly_ >= y + height) continue;
+            ++count;
+            // 6 dots to fetch the sprite, plus up to 5 more waiting for the BG fetcher,
+            // depending on where the sprite falls within a background tile.
+            const int offset = (oam_[i * 4 + 1] + scx_) % 8;
+            length += 6 + std::max(0, 5 - offset);
+        }
+    }
+    return length;
 }
 
 void Ppu::update_stat_line() {

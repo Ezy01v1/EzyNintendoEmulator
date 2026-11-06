@@ -22,6 +22,7 @@ TEST_CASE("ROM area reads from the cartridge and ignores writes") {
 
 TEST_CASE("RAM regions store values") {
     Bus bus(make_cartridge());
+    bus.poke(0xFF40, 0x00);  // LCD off, so VRAM and OAM are not locked
     constexpr std::array<std::uint16_t, 8> kAddrs = {0x8000, 0x9FFF, 0xC000, 0xDFFF, 0xFE00, 0xFE9F, 0xFF80, 0xFFFE};
     for (const std::uint16_t addr : kAddrs) {
         bus.write(addr, 0x5A);
@@ -89,4 +90,22 @@ TEST_CASE("bus routes 0xA000-0xBFFF to cartridge RAM") {
     bus.poke(0x0000, 0x0A);
     bus.poke(0xA000, 0x99);
     CHECK(bus.peek(0xA000) == 0x99);
+}
+
+TEST_CASE("CPU reads of VRAM return 0xFF during mode 3, peek still sees it") {
+    Bus bus(make_cartridge());
+    bus.poke(0x8000, 0x42);
+    while (bus.ppu().mode() != 3) bus.tick();
+    CHECK(bus.read(0x8000) == 0xFF);
+    bus.write(0x8000, 0x99);  // dropped
+    CHECK(bus.peek(0x8000) == 0x42);
+}
+
+TEST_CASE("CPU reads of OAM return 0xFF during mode 2") {
+    Bus bus(make_cartridge());
+    bus.poke(0xFE00, 0x42);
+    while (bus.ppu().mode() != 0) bus.tick();
+    while (bus.ppu().mode() != 2) bus.tick();
+    CHECK(bus.read(0xFE00) == 0xFF);
+    CHECK(bus.peek(0xFE00) == 0x42);
 }

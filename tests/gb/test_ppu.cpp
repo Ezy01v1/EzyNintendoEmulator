@@ -265,3 +265,50 @@ TEST_CASE("CGB sprite tile bank and OAM-order priority") {
     CHECK(ppu.framebuffer()[0] == 0x03E0);  // sprite 1 (colour 2) alone
     CHECK(ppu.framebuffer()[4] == 0x7C00);  // overlap: OAM index 0 wins on CGB despite larger X
 }
+
+TEST_CASE("VRAM and OAM locks follow the PPU mode") {
+    Ppu ppu;  // LCD on after boot: line 0 starts in mode 2
+    CHECK_FALSE(ppu.oam_accessible());
+    CHECK(ppu.vram_accessible());
+    run_dots(ppu, 80);
+    REQUIRE(ppu.mode() == 3);
+    CHECK_FALSE(ppu.oam_accessible());
+    CHECK_FALSE(ppu.vram_accessible());
+    run_dots(ppu, 172);
+    REQUIRE(ppu.mode() == 0);
+    CHECK(ppu.oam_accessible());
+    CHECK(ppu.vram_accessible());
+}
+
+TEST_CASE("locks are lifted while the LCD is off") {
+    Ppu ppu;
+    run_dots(ppu, 80);
+    ppu.write_register(0xFF40, 0x00);
+    CHECK(ppu.oam_accessible());
+    CHECK(ppu.vram_accessible());
+}
+
+TEST_CASE("SCX fine scroll lengthens mode 3") {
+    Ppu ppu;
+    ppu.write_register(0xFF43, 5);
+    run_dots(ppu, 80 + 172);
+    CHECK(ppu.mode() == 3);
+    run_dots(ppu, 4);
+    CHECK(ppu.mode() == 3);  // 177 dots: still drawing at 256
+    run_dots(ppu, 4);
+    CHECK(ppu.mode() == 0);
+}
+
+TEST_CASE("sprites on the line lengthen mode 3") {
+    Ppu ppu;
+    ppu.write_register(0xFF40, 0x00);
+    for (std::uint16_t i = 0; i < 2; ++i) {
+        ppu.write_oam(static_cast<std::uint16_t>(0xFE00 + i * 4), 16);  // on line 0
+        ppu.write_oam(static_cast<std::uint16_t>(0xFE01 + i * 4), 8);
+    }
+    ppu.write_register(0xFF40, 0x93);
+    run_dots(ppu, 80 + 172 + 8);
+    CHECK(ppu.mode() == 3);  // 2 sprites add at least 12 dots
+    run_dots(ppu, 40);
+    CHECK(ppu.mode() == 0);
+}

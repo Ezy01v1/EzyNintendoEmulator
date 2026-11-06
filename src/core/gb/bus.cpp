@@ -17,14 +17,22 @@ constexpr bool is_ppu(std::uint16_t addr) { return addr >= 0xFF40 && addr <= 0xF
 
 }  // namespace
 
+// The CPU is locked out of VRAM and OAM while the PPU uses them: reads return 0xFF and
+// writes are lost. peek()/poke() (debugger, DMA) ignore the locks.
+bool Bus::cpu_can_access(std::uint16_t addr) const {
+    if (addr >= 0x8000 && addr < 0xA000) return ppu_.vram_accessible();
+    if (addr >= 0xFE00 && addr < 0xFEA0) return ppu_.oam_accessible();
+    return true;
+}
+
 std::uint8_t Bus::read(std::uint16_t addr) {
     advance();
-    return peek(addr);
+    return cpu_can_access(addr) ? peek(addr) : 0xFF;
 }
 
 void Bus::write(std::uint16_t addr, std::uint8_t value) {
     advance();
-    poke(addr, value);
+    if (cpu_can_access(addr)) poke(addr, value);
 }
 
 void Bus::tick() { advance(); }
