@@ -24,6 +24,7 @@ public:
     void write(std::uint16_t addr, std::uint8_t value) override {
         ++m_cycles;
         memory[addr] = value;
+        if (addr == 0xFFFF) ie = value;  // IE is a register, as on the real bus
     }
     void tick() override { ++m_cycles; }
 

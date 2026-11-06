@@ -49,20 +49,44 @@ void Cpu::step() {
         return;
     }
     if (halted_) {
-        if (bus_.pending_interrupts() == 0) {
-            bus_.tick();
+        // Like the opcode fetch, each halted cycle samples IF at its end. A pending
+        // interrupt wakes the CPU (even with IME off); with IME on, this cycle already
+        // counts as the first of the 5 dispatch cycles.
+        // A halted CPU keeps fetching the opcode after HALT every cycle. When an interrupt
+        // becomes pending, that fetch is either thrown away for the dispatch (IME on) or
+        // simply executed (IME off), so waking up costs no extra cycle.
+        const std::uint8_t opcode = bus_.read(r_.pc);
+        if (bus_.pending_interrupts() == 0) return;
+        halted_ = false;
+        bus_.set_cpu_halted(false);
+        if (ime_) {
+            service_interrupt();
             return;
         }
-        halted_ = false;  // any pending interrupt wakes the CPU, even with IME off
-        bus_.set_cpu_halted(false);
+        ++r_.pc;
+        run_opcode(opcode);
+        return;
     }
+    // The CPU samples interrupts at the end of the opcode fetch cycle. If one is pending
+    // (and IME is on), the fetched opcode is thrown away and that fetch becomes the first of
+    // the 5 dispatch cycles. Sampling here, not before the fetch, is what lets an IF bit set
+    // during the fetch cycle (e.g. a TIMA reload) be serviced right away, like the hardware.
+    const std::uint16_t pc_before = r_.pc;
+    const bool halt_bug_before = halt_bug_;
+    const std::uint8_t opcode = fetch_opcode();
     if (ime_ && bus_.pending_interrupts() != 0) {
+        r_.pc = pc_before;
+        halt_bug_ = halt_bug_before;
         service_interrupt();
         return;
     }
 
+    run_opcode(opcode);
+}
+
+void Cpu::run_opcode(std::uint8_t opcode) {
     const bool enable_ime_after = ime_pending_;
-    execute(fetch_opcode());
+    execute(opcode);
     if (enable_ime_after && ime_pending_) {  // a DI in between cancels the EI
         ime_ = true;
         ime_pending_ = false;
@@ -70,15 +94,22 @@ void Cpu::step() {
 }
 
 void Cpu::service_interrupt() {
-    // 5 M-cycles: 2 wait states, push PC (2), jump (1). Lowest bit has priority.
-    const std::uint8_t pending = bus_.pending_interrupts();
-    const int index = std::countr_zero(pending);
-    bus_.tick();
-    bus_.tick();
-    push16(r_.pc);
-    bus_.acknowledge_interrupt(u8(1 << index));
-    r_.pc = u16(0x40 + index * 8);
+    // 5 M-cycles: the discarded opcode fetch (already done by step()), an internal cycle,
+    // push PC high, push PC low, jump. Which interrupt wins is decided *after* the high
+    // byte is pushed: if that push overwrote IE (SP = 0x0000) and nothing is pending any
+    // more, the CPU jumps to 0x0000 and no IF bit is cleared (Mooneye ie_push).
     ime_ = false;
+    bus_.tick();
+    bus_.write(--r_.sp, u8(r_.pc >> 8));
+    const std::uint8_t pending = bus_.pending_interrupts();
+    bus_.write(--r_.sp, u8(r_.pc & 0xFF));
+    if (pending == 0) {
+        r_.pc = 0x0000;
+    } else {
+        const int index = std::countr_zero(pending);
+        bus_.acknowledge_interrupt(u8(1 << index));
+        r_.pc = u16(0x40 + index * 8);
+    }
     bus_.tick();
 }
 
