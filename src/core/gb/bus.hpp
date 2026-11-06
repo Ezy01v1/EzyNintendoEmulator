@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "gb/apu.hpp"
@@ -25,12 +26,18 @@ public:
     explicit Bus(Cartridge cartridge, Model model = Model::Dmg)
         : cartridge_(std::move(cartridge)),
           model_(model),
-          cgb_mode_(model == Model::Cgb && cartridge_.header().supports_cgb()) {}
+          cgb_mode_(model == Model::Cgb && cartridge_.header().supports_cgb()),
+          opri_(cgb_mode_ ? 0 : 1) {}
 
     [[nodiscard]] Model model() const { return model_; }
     // True when CGB features are enabled: a CGB game on CGB hardware. A DMG game on a CGB
     // runs in DMG compatibility mode, where most CGB registers are hidden.
     [[nodiscard]] bool cgb_mode() const { return cgb_mode_; }
+
+    // WRAM bank mapped at 0xD000-0xDFFF (1-7; always 1 outside CGB mode).
+    [[nodiscard]] int wram_bank() const { return svbk_ == 0 ? 1 : svbk_; }
+    // OPRI bit 0: 0 = sprites ordered by OAM index (CGB), 1 = by X coordinate (DMG).
+    [[nodiscard]] std::uint8_t opri() const { return opri_; }
 
     std::uint8_t read(std::uint16_t addr) override;
     void write(std::uint16_t addr, std::uint8_t value) override;
@@ -75,7 +82,16 @@ private:
     Ppu ppu_;
     Apu apu_;
     Joypad joypad_;
-    std::array<std::uint8_t, 0x2000> wram_{};
+    [[nodiscard]] std::size_t wram_index(std::uint16_t addr) const;  // addr in 0xC000-0xDFFF
+    [[nodiscard]] std::optional<std::uint8_t> read_cgb_io(std::uint16_t addr) const;
+    [[nodiscard]] bool write_cgb_io(std::uint16_t addr, std::uint8_t value);
+
+    std::array<std::uint8_t, 0x8000> wram_{};  // 8 banks of 4 KiB (banks 2-7 only on CGB)
+    // CGB registers.
+    std::uint8_t svbk_ = 1;  // 0xFF70, bits 0-2
+    std::uint8_t opri_;      // 0xFF6C, bit 0
+    std::array<std::uint8_t, 4> undocumented_{};  // 0xFF72-0xFF75
+    std::uint8_t rp_ = 0;    // 0xFF56, writable bits 0 and 6-7
     std::array<std::uint8_t, 0x80> io_{};  // raw storage for I/O registers not modelled yet
     std::array<std::uint8_t, 0x7F> hram_{};
     std::uint8_t if_ = 0;

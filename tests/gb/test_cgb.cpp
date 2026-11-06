@@ -81,3 +81,89 @@ TEST_CASE("CGB-E post-boot registers for a DMG game in compatibility mode") {
     const std::uint8_t sum = 'T' + 'E' + 'S' + 'T';
     CHECK(nintendo->cpu().regs().b == sum);
 }
+
+namespace {
+
+Bus make_cgb_bus() { return Bus(ezy::gb::test::make_cartridge(make_cgb_rom()), Model::Cgb); }
+
+}  // namespace
+
+TEST_CASE("VBK switches the 0x8000 window between two banks") {
+    Bus bus = make_cgb_bus();
+    CHECK(bus.peek(0xFF4F) == 0xFE);
+    bus.poke(0x8000, 0x11);
+    bus.poke(0xFF4F, 0x01);
+    CHECK(bus.peek(0xFF4F) == 0xFF);
+    CHECK(bus.peek(0x8000) == 0x00);
+    bus.poke(0x8000, 0x22);
+    bus.poke(0xFF4F, 0x00);
+    CHECK(bus.peek(0x8000) == 0x11);
+    CHECK(bus.ppu().read_vram_bank(1, 0x8000) == 0x22);
+}
+
+TEST_CASE("SVBK selects the WRAM bank at 0xD000, and 0 selects bank 1") {
+    Bus bus = make_cgb_bus();
+    CHECK(bus.peek(0xFF70) == 0xF9);  // bank 1 after boot
+    bus.poke(0xD000, 0x01);
+    bus.poke(0xFF70, 0x02);
+    CHECK(bus.peek(0xD000) == 0x00);
+    bus.poke(0xD000, 0x02);
+    bus.poke(0xFF70, 0x00);
+    CHECK(bus.wram_bank() == 1);
+    CHECK(bus.peek(0xFF70) == 0xF8);
+    CHECK(bus.peek(0xD000) == 0x01);
+    bus.poke(0xFF70, 0x07);
+    CHECK(bus.wram_bank() == 7);
+}
+
+TEST_CASE("WRAM bank 0 at 0xC000 never switches, echo RAM mirrors the banked WRAM") {
+    Bus bus = make_cgb_bus();
+    bus.poke(0xC010, 0xAA);
+    bus.poke(0xFF70, 0x03);
+    bus.poke(0xD010, 0xBB);
+    CHECK(bus.peek(0xC010) == 0xAA);
+    CHECK(bus.peek(0xE010) == 0xAA);
+    CHECK(bus.peek(0xF010) == 0xBB);
+}
+
+TEST_CASE("CGB registers are invisible in DMG compatibility mode") {
+    Bus bus(ezy::gb::test::make_cartridge(make_rom()), Model::Cgb);
+    REQUIRE_FALSE(bus.cgb_mode());
+    bus.poke(0x8000, 0x11);
+    bus.poke(0xFF4F, 0x01);
+    CHECK(bus.peek(0xFF4F) == 0xFF);
+    CHECK(bus.peek(0x8000) == 0x11);
+    bus.poke(0xFF70, 0x03);
+    CHECK(bus.peek(0xFF70) == 0xFF);
+    CHECK(bus.wram_bank() == 1);
+    CHECK(bus.opri() == 1);  // compatibility mode: sprites ordered by X like a DMG
+    CHECK(bus.peek(0xFF74) == 0xFF);
+}
+
+TEST_CASE("CGB registers are invisible on a DMG") {
+    Bus bus(ezy::gb::test::make_cartridge(make_cgb_rom()), Model::Dmg);
+    bus.poke(0xFF4F, 0x01);
+    CHECK(bus.peek(0xFF4F) == 0xFF);
+    CHECK(bus.peek(0xFF56) == 0xFF);
+    CHECK(bus.peek(0xFF6C) == 0xFF);
+}
+
+TEST_CASE("OPRI, the undocumented registers and RP in CGB mode") {
+    Bus bus = make_cgb_bus();
+    CHECK(bus.opri() == 0);
+    CHECK(bus.peek(0xFF6C) == 0xFE);
+    bus.poke(0xFF72, 0x5A);
+    bus.poke(0xFF73, 0xA5);
+    bus.poke(0xFF74, 0x3C);
+    bus.poke(0xFF75, 0xFF);
+    CHECK(bus.peek(0xFF72) == 0x5A);
+    CHECK(bus.peek(0xFF73) == 0xA5);
+    CHECK(bus.peek(0xFF74) == 0x3C);
+    CHECK(bus.peek(0xFF75) == 0xFF);
+    bus.poke(0xFF75, 0x00);
+    CHECK(bus.peek(0xFF75) == 0x8F);
+    // RP: bit 1 reads 1 = no infrared light received.
+    CHECK(bus.peek(0xFF56) == 0x3E);
+    bus.poke(0xFF56, 0xC1);
+    CHECK(bus.peek(0xFF56) == 0xFF);
+}

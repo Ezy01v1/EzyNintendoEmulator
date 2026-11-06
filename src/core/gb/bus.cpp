@@ -45,8 +45,8 @@ std::uint8_t Bus::peek(std::uint16_t addr) const {
     if (addr < 0x8000) return cartridge_.read_rom(addr);
     if (addr < 0xA000) return ppu_.read_vram(addr);
     if (addr < 0xC000) return cartridge_.read_ram(addr);
-    if (addr < 0xE000) return wram_[addr - 0xC000];
-    if (addr < 0xFE00) return wram_[addr - 0xE000];  // echo RAM mirrors C000-DDFF
+    if (addr < 0xE000) return wram_[wram_index(addr)];
+    if (addr < 0xFE00) return wram_[wram_index(addr - 0x2000)];  // echo RAM mirrors C000-DDFF
     if (addr < 0xFEA0) return ppu_.read_oam(addr);
     if (addr < 0xFF00) return 0xFF;  // unusable area
     if (addr < 0xFF80) return read_io(addr);
@@ -58,13 +58,59 @@ void Bus::poke(std::uint16_t addr, std::uint8_t value) {
     if (addr < 0x8000) { cartridge_.write_rom(addr, value); return; }  // MBC registers
     if (addr < 0xA000) { ppu_.write_vram(addr, value); return; }
     if (addr < 0xC000) { cartridge_.write_ram(addr, value); return; }
-    if (addr < 0xE000) { wram_[addr - 0xC000] = value; return; }
-    if (addr < 0xFE00) { wram_[addr - 0xE000] = value; return; }
+    if (addr < 0xE000) { wram_[wram_index(addr)] = value; return; }
+    if (addr < 0xFE00) { wram_[wram_index(addr - 0x2000)] = value; return; }
     if (addr < 0xFEA0) { ppu_.write_oam(addr, value); return; }
     if (addr < 0xFF00) return;  // unusable area
     if (addr < 0xFF80) { write_io(addr, value); return; }
     if (addr < kInterruptEnable) { hram_[addr - 0xFF80] = value; return; }
     ie_ = value;
+}
+
+std::size_t Bus::wram_index(std::uint16_t addr) const {
+    if (addr < 0xD000) return addr - 0xC000;
+    return static_cast<std::size_t>(wram_bank()) * 0x1000 + (addr - 0xD000);
+}
+
+// CGB-only registers. Outside CGB mode (a DMG, or a DMG game on a CGB) they are not
+// there: reads return 0xFF and writes are dropped. Returns nullopt / false for addresses
+// that aren't CGB registers.
+std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
+    const bool cgb_register = addr == 0xFF4C || addr == 0xFF4F || addr == 0xFF56 || addr == 0xFF6C ||
+                              addr == 0xFF70 || (addr >= 0xFF72 && addr <= 0xFF75);
+    if (!cgb_register) return std::nullopt;
+    // 0xFF72/73/75 exist on any CGB, even in compatibility mode; 0xFF74 only in CGB mode.
+    const bool always_on_cgb = addr == 0xFF72 || addr == 0xFF73 || addr == 0xFF75;
+    if (!cgb_mode_ && !(model_ == Model::Cgb && always_on_cgb)) return std::uint8_t{0xFF};
+    switch (addr) {
+        case 0xFF4F: return static_cast<std::uint8_t>(0xFE | ppu_.vram_bank());
+        case 0xFF56: return static_cast<std::uint8_t>(0x3E | rp_);  // bit 1 = 1: no light received
+        case 0xFF6C: return static_cast<std::uint8_t>(0xFE | opri_);
+        case 0xFF70: return static_cast<std::uint8_t>(0xF8 | svbk_);
+        case 0xFF75: return static_cast<std::uint8_t>(0x8F | undocumented_[3]);
+        case 0xFF72:
+        case 0xFF73:
+        case 0xFF74: return undocumented_[addr - 0xFF72];
+        default: return std::uint8_t{0xFF};  // KEY0: locked once the boot ROM is gone
+    }
+}
+
+bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
+    if (!read_cgb_io(addr)) return false;
+    const bool always_on_cgb = addr == 0xFF72 || addr == 0xFF73 || addr == 0xFF75;
+    if (!cgb_mode_ && !(model_ == Model::Cgb && always_on_cgb)) return true;
+    switch (addr) {
+        case 0xFF4F: ppu_.set_vram_bank(value & 1); break;
+        case 0xFF56: rp_ = value & 0xC1; break;
+        case 0xFF6C: opri_ = value & 1; break;
+        case 0xFF70: svbk_ = value & 0x07; break;
+        case 0xFF75: undocumented_[3] = value & 0x70; break;
+        case 0xFF72:
+        case 0xFF73:
+        case 0xFF74: undocumented_[addr - 0xFF72] = value; break;
+        default: break;  // KEY0
+    }
+    return true;
 }
 
 void Bus::clock_frame_sequencer(std::uint16_t counter_before) {
@@ -77,6 +123,7 @@ void Bus::set_button(Button button, bool pressed) {
 }
 
 std::uint8_t Bus::read_io(std::uint16_t addr) const {
+    if (const auto value = read_cgb_io(addr)) return *value;
     if (is_timer(addr)) return timer_.read(addr);
     if (is_apu(addr)) return apu_.read(addr);
     if (is_ppu(addr)) return ppu_.read_register(addr);
@@ -90,6 +137,7 @@ std::uint8_t Bus::read_io(std::uint16_t addr) const {
 }
 
 void Bus::write_io(std::uint16_t addr, std::uint8_t value) {
+    if (write_cgb_io(addr, value)) return;
     if (is_timer(addr)) {
         const std::uint16_t counter_before = timer_.counter();
         timer_.write(addr, value);

@@ -27,8 +27,13 @@ class Ppu {
 public:
     void tick();  // one M-cycle = 4 dots
 
-    [[nodiscard]] std::uint8_t read_vram(std::uint16_t addr) const { return vram_[addr - 0x8000]; }
-    void write_vram(std::uint16_t addr, std::uint8_t value) { vram_[addr - 0x8000] = value; }
+    // CPU-side VRAM access goes through the bank selected by VBK (always 0 on a DMG).
+    [[nodiscard]] std::uint8_t read_vram(std::uint16_t addr) const { return vram_[vram_index(vram_bank_, addr)]; }
+    void write_vram(std::uint16_t addr, std::uint8_t value) { vram_[vram_index(vram_bank_, addr)] = value; }
+    [[nodiscard]] std::uint8_t read_vram_bank(int bank, std::uint16_t addr) const { return vram_[vram_index(bank, addr)]; }
+    void write_vram_bank(int bank, std::uint16_t addr, std::uint8_t value) { vram_[vram_index(bank, addr)] = value; }
+    [[nodiscard]] int vram_bank() const { return vram_bank_; }
+    void set_vram_bank(int bank) { vram_bank_ = bank & 1; }
     [[nodiscard]] std::uint8_t read_oam(std::uint16_t addr) const { return oam_[addr - 0xFE00]; }
     void write_oam(std::uint16_t addr, std::uint8_t value) { oam_[addr - 0xFE00] = value; }
 
@@ -55,7 +60,12 @@ private:
     [[nodiscard]] std::uint8_t bg_color_index(std::uint16_t map_base, int x, int y) const;
     [[nodiscard]] std::uint8_t tile_color_index(std::uint16_t tile_addr, int row, int col) const;
 
-    std::array<std::uint8_t, 0x2000> vram_{};
+    [[nodiscard]] static std::size_t vram_index(int bank, std::uint16_t addr) {
+        return static_cast<std::size_t>(bank) * 0x2000 + (addr - 0x8000);
+    }
+
+    std::array<std::uint8_t, 0x4000> vram_{};  // 2 banks of 8 KiB (bank 1 only used on CGB)
+    int vram_bank_ = 0;
     std::array<std::uint8_t, 0xA0> oam_{};
     std::array<std::uint8_t, kLcdWidth * kLcdHeight> frame_{};
 
