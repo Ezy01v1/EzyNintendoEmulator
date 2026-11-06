@@ -86,6 +86,7 @@ public:
 
     // KEYINPUT (0x130) is active-low: a 0 bit means pressed. `pressed` uses the same bit
     // layout (A, B, Select, Start, Right, Left, Up, Down, R, L) with 1 = pressed.
+    // Also raises the keypad IRQ (IF bit 12) when KEYCNT's condition holds.
     void set_keys(std::uint16_t pressed);
 
     // HALTCNT (0x301): any write halts the CPU until (IE & IF) != 0 (IME doesn't matter).
@@ -125,6 +126,7 @@ private:
         std::uint32_t count = 0;
     };
 
+    void check_keypad_interrupt();
     void after_dma_control_write(int index, std::uint16_t old_control);
     void trigger_dma(DmaTiming timing);
     // `sound_fifo`: a FIFO refill (special timing on DMA 1/2): 4 words, destination fixed.

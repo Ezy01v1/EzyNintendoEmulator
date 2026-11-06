@@ -63,6 +63,8 @@ namespace {
 
 constexpr std::uint32_t kIoIf = 0x202;
 constexpr std::uint32_t kIoKeyinput = 0x130;
+constexpr std::uint32_t kIoKeycnt = 0x132;
+constexpr std::uint16_t kIrqKeypad = 1U << 12;
 constexpr std::uint32_t kIoHaltcnt = 0x301;
 constexpr std::uint32_t kIoTimerFirst = 0x100;
 constexpr std::uint32_t kIoTimerLast = 0x10F;
@@ -94,6 +96,18 @@ void Bus::set_keys(std::uint16_t pressed) {
     const auto keyinput = static_cast<std::uint16_t>(~keys_pressed_ & 0x03FF);
     io_[kIoKeyinput] = static_cast<std::uint8_t>(keyinput);
     io_[kIoKeyinput + 1] = static_cast<std::uint8_t>(keyinput >> 8);
+    check_keypad_interrupt();
+}
+
+// KEYCNT: bits 0-9 select keys, bit 14 enables the IRQ, bit 15 picks AND (all selected
+// keys held) over OR (any of them). Checked whenever the keys or KEYCNT change.
+void Bus::check_keypad_interrupt() {
+    const auto keycnt = static_cast<std::uint16_t>(io_[kIoKeycnt] | (io_[kIoKeycnt + 1] << 8));
+    if ((keycnt & 0x4000) == 0) return;
+    const std::uint16_t selected = keycnt & 0x03FF;
+    const std::uint16_t held = keys_pressed_ & selected;
+    const bool fire = (keycnt & 0x8000) != 0 ? (selected != 0 && held == selected) : held != 0;
+    if (fire) request_interrupt(kIrqKeypad);
 }
 
 template <typename Self>
@@ -209,6 +223,7 @@ void Bus::write(std::uint32_t addr, T value) {
         if (overlaps(offset, sizeof(T), b, b)) io_[b] = static_cast<std::uint8_t>(old_if[b - kIoIf] & ~io_[b]);
     }
     if (overlaps(offset, sizeof(T), kIoKeyinput, kIoKeyinput + 1)) set_keys(keys_pressed_);  // read-only
+    if (overlaps(offset, sizeof(T), kIoKeycnt, kIoKeycnt + 1)) check_keypad_interrupt();
     if (overlaps(offset, sizeof(T), kIoPpuStatusFirst, kIoPpuStatusLast)) ppu_.after_io_write();
     for (std::uint32_t r = 0; r < 4; ++r) {
         // Writing BGxX/BGxY reloads that internal reference point at once.

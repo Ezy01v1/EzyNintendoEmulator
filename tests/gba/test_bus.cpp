@@ -129,3 +129,34 @@ TEST_CASE("GBA unmapped regions read 0 and ignore writes") {
     CHECK(bus.read32(0x04000400) == 0);  // past the I/O registers
     CHECK(bus.read32(0x10000000) == 0);
 }
+
+TEST_CASE("KEYCNT raises the keypad interrupt in OR and AND mode") {
+    constexpr std::uint16_t kKeypadIrq = 1U << 12;
+    Bus bus(make_rom());
+    bus.write16(0x04000202, 0xFFFF);  // clear IF
+
+    // OR mode: any selected key (A or B) fires.
+    bus.write16(0x04000132, 0x4003);
+    CHECK((bus.interrupt_flags() & kKeypadIrq) == 0);
+    bus.set_keys(0x0008);  // Start: not selected
+    CHECK((bus.interrupt_flags() & kKeypadIrq) == 0);
+    bus.set_keys(0x0002);  // B
+    CHECK((bus.interrupt_flags() & kKeypadIrq) != 0);
+
+    // AND mode: all selected keys must be held.
+    bus.write16(0x04000202, kKeypadIrq);
+    bus.set_keys(0);
+    bus.write16(0x04000132, 0xC003);
+    bus.set_keys(0x0001);
+    CHECK((bus.interrupt_flags() & kKeypadIrq) == 0);
+    bus.set_keys(0x0003);
+    CHECK((bus.interrupt_flags() & kKeypadIrq) != 0);
+
+    // Writing KEYCNT while the condition already holds fires too; disabled never fires.
+    bus.write16(0x04000202, kKeypadIrq);
+    bus.write16(0x04000132, 0x0003);
+    bus.set_keys(0x0003);
+    CHECK((bus.interrupt_flags() & kKeypadIrq) == 0);
+    bus.write16(0x04000132, 0x4001);
+    CHECK((bus.interrupt_flags() & kKeypadIrq) != 0);
+}
