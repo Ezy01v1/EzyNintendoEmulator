@@ -40,15 +40,51 @@ std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
     return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(file), {});
 }
 
+// Game Boy options after the ROM path: --model auto|dmg|cgb, --boot-rom <file>,
+// --no-color-correction. Returns nullopt (after printing why) on a bad option.
+std::optional<ezy::frontend::GameBoySettings> parse_gb_options(int argc, char* argv[]) {
+    ezy::frontend::GameBoySettings settings;
+    for (int i = 2; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--model" && i + 1 < argc) {
+            const std::string model = argv[++i];
+            if (model == "auto") {
+                settings.model = ezy::gb::ModelChoice::Auto;
+            } else if (model == "dmg") {
+                settings.model = ezy::gb::ModelChoice::Dmg;
+            } else if (model == "cgb") {
+                settings.model = ezy::gb::ModelChoice::Cgb;
+            } else {
+                std::cerr << "Unknown model: " << model << " (use auto, dmg or cgb)\n";
+                return std::nullopt;
+            }
+        } else if (arg == "--boot-rom" && i + 1 < argc) {
+            settings.boot_rom = read_file(argv[++i]);
+            if (!settings.boot_rom) {
+                std::cerr << "Could not read boot ROM: " << argv[i] << '\n';
+                return std::nullopt;
+            }
+        } else if (arg == "--no-color-correction") {
+            settings.color_correction = false;
+        } else {
+            std::cerr << "Unknown option: " << arg << '\n';
+            return std::nullopt;
+        }
+    }
+    return settings;
+}
+
 // Picks the console from the file extension.
-std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom) {
+std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom,
+                                      ezy::frontend::GameBoySettings gb_settings) {
     std::string ext = std::filesystem::path(path).extension().string();
     std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (ext == ".gba") {
         return ezy::frontend::GbaSystem::create(rom, {}, std::filesystem::path(path).replace_extension(".sav"));
     }
     if (ext == ".gb" || ext == ".gbc") {
-        return ezy::frontend::GameBoySystem::create(rom, std::filesystem::path(path).replace_extension(".sav"));
+        return ezy::frontend::GameBoySystem::create(rom, std::filesystem::path(path).replace_extension(".sav"),
+                                                    std::move(gb_settings));
     }
     return ezy::frontend::Chip8System::create(rom);
 }
@@ -69,12 +105,17 @@ bool handle_shortcut(SDL_Scancode scancode, RunState& run) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gba>\n";
+        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba> [Game Boy options]\n"
+                     "  --model auto|dmg|cgb    hardware to emulate (auto = Game Boy Color)\n"
+                     "  --boot-rom <file>       run a real CGB boot ROM dump (2304 bytes)\n"
+                     "  --no-color-correction   show raw CGB colours\n";
         return 1;
     }
 
+    auto gb_settings = parse_gb_options(argc, argv);
+    if (!gb_settings) return 1;
     const auto rom = read_file(argv[1]);
-    std::unique_ptr<System> system = rom ? create_system(argv[1], *rom) : nullptr;
+    std::unique_ptr<System> system = rom ? create_system(argv[1], *rom, std::move(*gb_settings)) : nullptr;
     if (!system) {
         std::cerr << "Could not load ROM: " << argv[1] << '\n';
         return 1;

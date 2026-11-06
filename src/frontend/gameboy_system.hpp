@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -11,12 +12,20 @@
 
 namespace ezy::frontend {
 
+struct GameBoySettings {
+    gb::ModelChoice model = gb::ModelChoice::Auto;
+    std::optional<std::vector<std::uint8_t>> boot_rom;  // a real CGB boot ROM, if given
+    bool color_correction = true;                       // imitate the GBC screen
+};
+
 class GameBoySystem final : public System {
 public:
-    // Returns nullptr if the ROM header can't be parsed. If the cartridge has a battery,
-    // external RAM is loaded from save_path (when it exists) and written back to it.
+    // Returns nullptr if the ROM header can't be parsed (or the boot ROM has the wrong size).
+    // If the cartridge has a battery, external RAM is loaded from save_path (when it exists)
+    // and written back to it.
     [[nodiscard]] static std::unique_ptr<GameBoySystem> create(std::span<const std::uint8_t> rom,
-                                                               std::filesystem::path save_path = {});
+                                                               std::filesystem::path save_path = {},
+                                                               GameBoySettings settings = {});
     // The clock keeps ticking without game writes, so RTC carts always save on exit.
     ~GameBoySystem() override { flush_save(/*force=*/gameboy_->bus().cartridge().has_rtc()); }
     GameBoySystem(const GameBoySystem&) = delete;
@@ -41,8 +50,18 @@ public:
     void draw_debug_windows() override;
 
 private:
-    GameBoySystem(std::vector<std::uint8_t> rom, std::unique_ptr<gb::GameBoy> gameboy, std::filesystem::path save_path)
-        : rom_(std::move(rom)), gameboy_(std::move(gameboy)), save_path_(std::move(save_path)) {}
+    GameBoySystem(std::vector<std::uint8_t> rom, std::unique_ptr<gb::GameBoy> gameboy, std::filesystem::path save_path,
+                  GameBoySettings settings)
+        : rom_(std::move(rom)),
+          gameboy_(std::move(gameboy)),
+          save_path_(std::move(save_path)),
+          settings_(std::move(settings)) {}
+
+    // Save states (F2 save, F4 load), one slot next to the .sav: <rom>.ss1.
+    void save_state();
+    void load_state();
+    // Re-applies the keys held right now (after a reset or loading a state).
+    void sync_held_keys();
 
     [[nodiscard]] bool persists_save() const;
     void load_save();
@@ -52,7 +71,9 @@ private:
     std::vector<std::uint8_t> rom_;
     std::unique_ptr<gb::GameBoy> gameboy_;
     std::filesystem::path save_path_;
+    GameBoySettings settings_;
     int frames_since_flush_ = 0;
+    int debug_vram_bank_ = 0;
 };
 
 }  // namespace ezy::frontend
