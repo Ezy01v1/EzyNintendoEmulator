@@ -41,6 +41,7 @@ public:
     // before leaving, decides whether the game then runs in DMG compatibility mode.
     void map_boot_rom(std::vector<std::uint8_t> boot_rom);
     [[nodiscard]] bool boot_rom_mapped() const { return !boot_rom_.empty(); }
+    [[nodiscard]] bool oam_dma_active() const { return dma_index_ < 0xA0; }
 
     // Save states: everything but the model (checked by GameBoy) and the serial log.
     template <class Ar>
@@ -48,6 +49,7 @@ public:
         ar(cartridge_), ar(timer_), ar(ppu_), ar(apu_), ar(joypad_), ar(hdma_);
         ar(cgb_mode_), ar(wram_), ar(svbk_), ar(undocumented_), ar(rp_), ar(key0_);
         ar(io_), ar(hram_), ar(if_), ar(ie_), ar(dma_);
+        ar(dma_source_), ar(dma_index_), ar(dma_pending_source_), ar(dma_start_delay_), ar(dma_byte_);
         ar(t_cycles_), ar(dots_), ar(double_speed_), ar(speed_switch_armed_), ar(apu_half_cycle_);
         // The boot ROM itself isn't stored, only whether it is still mapped. A state taken
         // during the boot animation can only be loaded while the boot ROM is still mapped.
@@ -118,6 +120,8 @@ private:
     void write_io(std::uint16_t addr, std::uint8_t value);
     [[nodiscard]] std::uint8_t read_io(std::uint16_t addr) const;
     void oam_dma(std::uint8_t page);
+    void step_oam_dma();  // one M-cycle of OAM DMA
+    [[nodiscard]] bool dma_blocks(std::uint16_t addr) const;
     // Copies `blocks` VRAM DMA blocks, stalling the CPU while the rest of the system runs.
     void run_vram_dma(int blocks);
 
@@ -148,6 +152,11 @@ private:
     std::uint8_t if_ = 0;
     std::uint8_t ie_ = 0;
     std::uint8_t dma_ = 0xFF;
+    std::uint16_t dma_source_ = 0;
+    int dma_index_ = 0xA0;  // next byte to copy; 0xA0 = idle
+    std::uint16_t dma_pending_source_ = 0;
+    int dma_start_delay_ = 0;  // M-cycles until a just-requested transfer starts
+    std::uint8_t dma_byte_ = 0xFF;  // last byte the DMA moved (what the CPU sees meanwhile)
 
     std::string serial_output_;
     std::uint64_t t_cycles_ = 0;

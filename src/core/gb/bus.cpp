@@ -21,23 +21,36 @@ constexpr bool is_ppu(std::uint16_t addr) { return addr >= 0xFF40 && addr <= 0xF
 // writes are lost. peek()/poke() (debugger, DMA) ignore the locks.
 bool Bus::cpu_can_access(std::uint16_t addr) const {
     if (addr >= 0x8000 && addr < 0xA000) return ppu_.vram_accessible();
-    if (addr >= 0xFE00 && addr < 0xFEA0) return ppu_.oam_accessible();
+    if (addr >= 0xFE00 && addr < 0xFEA0) return ppu_.oam_accessible() && !oam_dma_active();
     return true;
+}
+
+// During OAM DMA the DMA owns the bus it reads from. There are two: the VRAM bus
+// (0x8000-0x9FFF) and the external bus (ROM, cartridge RAM, WRAM and its echo). A CPU
+// access on the DMA's bus reads the byte the DMA is moving, and writes are lost; the
+// other bus, I/O, HRAM and IE stay usable. (OAM itself is handled by cpu_can_access.)
+bool Bus::dma_blocks(std::uint16_t addr) const {
+    if (!oam_dma_active() || addr >= 0xFE00) return false;
+    const auto on_vram_bus = [](std::uint16_t a) { return a >= 0x8000 && a < 0xA000; };
+    return on_vram_bus(addr) == on_vram_bus(dma_source_);
 }
 
 std::uint8_t Bus::read(std::uint16_t addr) {
     advance();
+    if (dma_blocks(addr)) return dma_byte_;
     return cpu_can_access(addr) ? peek(addr) : 0xFF;
 }
 
 void Bus::write(std::uint16_t addr, std::uint8_t value) {
     advance();
+    if (dma_blocks(addr)) return;
     if (cpu_can_access(addr)) poke(addr, value);
 }
 
 void Bus::tick() { advance(); }
 
 void Bus::advance() {
+    step_oam_dma();
     const int dots = double_speed_ ? 2 : 4;
     t_cycles_ += 4;
     dots_ += static_cast<std::uint64_t>(dots);
@@ -258,14 +271,26 @@ void Bus::write_io(std::uint16_t addr, std::uint8_t value) {
     }
 }
 
-// Copies 160 bytes from page `page` (XX00-XX9F) to OAM.
-// Simplification: done instantly; on hardware it takes 160 M-cycles during which the
-// CPU can only access HRAM (games wait in HRAM, so this rarely matters).
+// OAM DMA: a write to 0xFF46 copies XX00-XX9F to OAM, one byte per M-cycle after a
+// 1-cycle start-up (Pan Docs, "OAM DMA Transfer"). Writing again restarts it; the old
+// transfer keeps going during the new one's start-up cycle.
 void Bus::oam_dma(std::uint8_t page) {
     dma_ = page;
-    const auto source = static_cast<std::uint16_t>(page << 8);
-    for (std::uint16_t i = 0; i < 0xA0; ++i) {
-        ppu_.write_oam(static_cast<std::uint16_t>(0xFE00 + i), peek(static_cast<std::uint16_t>(source + i)));
+    dma_pending_source_ = static_cast<std::uint16_t>(page << 8);
+    dma_start_delay_ = 2;
+}
+
+void Bus::step_oam_dma() {
+    if (dma_index_ < 0xA0) {
+        std::uint16_t source = static_cast<std::uint16_t>(dma_source_ + dma_index_);
+        if (source >= 0xE000) source = static_cast<std::uint16_t>(source - 0x2000);  // 0xFE/0xFF read the WRAM echo
+        dma_byte_ = peek(source);
+        ppu_.write_oam(static_cast<std::uint16_t>(0xFE00 + dma_index_), dma_byte_);
+        ++dma_index_;
+    }
+    if (dma_start_delay_ > 0 && --dma_start_delay_ == 0) {
+        dma_source_ = dma_pending_source_;
+        dma_index_ = 0;
     }
 }
 
