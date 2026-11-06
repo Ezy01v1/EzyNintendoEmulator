@@ -54,6 +54,7 @@ void Cpu::step() {
             return;
         }
         halted_ = false;  // any pending interrupt wakes the CPU, even with IME off
+        bus_.set_cpu_halted(false);
     }
     if (ime_ && bus_.pending_interrupts() != 0) {
         service_interrupt();
@@ -86,6 +87,7 @@ void Cpu::halt() {
         halt_bug_ = true;  // HALT is skipped and the next byte is read twice
     } else {
         halted_ = true;
+        bus_.set_cpu_halted(true);
     }
 }
 

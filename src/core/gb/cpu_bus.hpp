@@ -19,6 +19,8 @@ public:
     // The STOP instruction, after its second byte was fetched. On a CGB it performs an
     // armed speed switch. The default (test buses) does nothing.
     virtual void stop() {}
+    // Told whenever the CPU enters or leaves HALT.
+    virtual void set_cpu_halted(bool /*halted*/) {}
 
     // IE & IF, masked to the 5 interrupt bits.
     [[nodiscard]] virtual std::uint8_t pending_interrupts() const = 0;

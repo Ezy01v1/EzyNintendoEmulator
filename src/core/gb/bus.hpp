@@ -54,9 +54,16 @@ public:
         bool mapped = !boot_rom_.empty();
         ar(mapped);
         if constexpr (Ar::kLoading) {
-            if (!mapped) boot_rom_.clear();
+            // Applied by finish_load() only once the whole state is known to be good, so a
+            // failed load can still roll back to a machine that has its boot ROM.
+            loaded_boot_mapped_ = mapped;
             if (mapped && boot_rom_.empty()) ar.fail();
         }
+        ar(cpu_halted_);
+    }
+    // Completes a successful load_state().
+    void finish_load() {
+        if (!loaded_boot_mapped_) boot_rom_.clear();
     }
     // True when CGB features are enabled: a CGB game on CGB hardware. A DMG game on a CGB
     // runs in DMG compatibility mode, where most CGB registers are hidden.
@@ -71,6 +78,8 @@ public:
     void write(std::uint16_t addr, std::uint8_t value) override;
     void tick() override;  // one internal M-cycle with no memory access (e.g. 16-bit ALU ops)
     void stop() override;
+    // HALT state from the CPU: HBlank DMA does not run while the CPU is halted.
+    void set_cpu_halted(bool halted) override { cpu_halted_ = halted; }
 
     [[nodiscard]] std::uint8_t pending_interrupts() const override { return ie_ & if_ & 0x1F; }
     void acknowledge_interrupt(std::uint8_t bit) override { if_ &= static_cast<std::uint8_t>(~bit); }
@@ -132,6 +141,8 @@ private:
     std::vector<std::uint8_t> boot_rom_;  // empty once unmapped (or never used)
     std::uint8_t key0_ = 0;
     bool in_vram_dma_ = false;
+    bool cpu_halted_ = false;
+    bool loaded_boot_mapped_ = false;  // see serialize()
     std::array<std::uint8_t, 0x80> io_{};  // raw storage for I/O registers not modelled yet
     std::array<std::uint8_t, 0x7F> hram_{};
     std::uint8_t if_ = 0;

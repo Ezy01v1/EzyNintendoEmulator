@@ -94,3 +94,18 @@ TEST_CASE("a state with another format version is rejected") {
     state[4] ^= 0xFF;  // the version follows the 4-byte magic
     CHECK_FALSE(gb->load_state(state));
 }
+
+TEST_CASE("a damaged state loaded during the boot animation keeps the boot ROM") {
+    const auto rom = make_busy_rom();
+    std::vector<std::uint8_t> boot(0x900, 0x00);  // NOPs: the boot ROM stays mapped
+    auto booting = GameBoy::create(rom, Options{.boot_rom = boot});
+    auto running = GameBoy::create(rom);
+    REQUIRE(booting);
+    REQUIRE(running);
+    auto state = running->save_state();  // boot ROM not mapped in this one
+    state.push_back(0x00);               // trailing garbage: rejected at the very end
+    CHECK_FALSE(booting->load_state(state));
+    CHECK(booting->bus().boot_rom_mapped());
+    CHECK(booting->bus().peek(0x0100) == rom[0x0100]);
+    CHECK(booting->bus().peek(0x0000) == 0x00);
+}

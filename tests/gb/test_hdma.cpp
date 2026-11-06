@@ -92,3 +92,27 @@ TEST_CASE("VRAM DMA registers do not exist outside CGB mode") {
     bus.poke(0xFF55, 0x00);
     CHECK(bus.peek(0xFF55) == 0xFF);
 }
+
+TEST_CASE("HDMA started during HBlank copies its first block at once") {
+    Bus bus = make_cgb_bus();
+    setup_transfer(bus);
+    while (bus.ppu().mode() != 0) bus.tick();
+    bus.poke(0xFF55, 0x81);
+    CHECK(bus.peek(0x800F) == 0x0F);
+    CHECK(bus.peek(0xFF55) == 0x00);
+}
+
+TEST_CASE("HBlank HDMA pauses while the CPU is halted") {
+    Bus bus = make_cgb_bus();
+    setup_transfer(bus);
+    while (bus.ppu().mode() != 2) bus.tick();
+    bus.poke(0xFF55, 0x80);
+    bus.set_cpu_halted(true);
+    while (bus.ppu().mode() != 0) bus.tick();
+    CHECK(bus.peek(0x800F) == 0x00);  // nothing while halted
+    CHECK(bus.peek(0xFF55) == 0x00);  // the block is still pending
+    bus.set_cpu_halted(false);
+    while (bus.ppu().mode() != 2) bus.tick();
+    while (bus.ppu().mode() != 0) bus.tick();
+    CHECK(bus.peek(0x800F) == 0x0F);
+}

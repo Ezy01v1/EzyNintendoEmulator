@@ -1,6 +1,7 @@
 #include "gb/gameboy.hpp"
 
 #include <array>
+#include <cassert>
 
 #include "common/state.hpp"
 #include "gb/compat_palettes.hpp"
@@ -100,8 +101,10 @@ bool GameBoy::load_state(std::span<const std::uint8_t> state) {
         undo(skip);
         undo(cpu_);
         undo(bus_);
+        assert(!undo.failed());  // our own state of a moment ago always loads
         return false;
     }
+    bus_.finish_load();
     return true;
 }
 

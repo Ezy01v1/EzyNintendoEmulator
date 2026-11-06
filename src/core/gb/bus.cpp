@@ -51,7 +51,8 @@ void Bus::advance() {
     if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
     ppu_.tick(dots);
     request_interrupt(ppu_.take_interrupts());
-    if (ppu_.take_hblank_started() && hdma_.hblank_active() && !in_vram_dma_) run_vram_dma(1);
+    // HBlank DMA skips the HBlanks that pass while the CPU is halted (Pan Docs).
+    if (ppu_.take_hblank_started() && hdma_.hblank_active() && !in_vram_dma_ && !cpu_halted_) run_vram_dma(1);
 }
 
 // 2 bytes per M-cycle: a 16-byte block costs the CPU 8 M-cycles.
@@ -159,8 +160,10 @@ bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
         case 0xFF55:
             if (const int blocks = hdma_.write_control(value); blocks > 0) {
                 run_vram_dma(blocks);
-            } else if (hdma_.hblank_active() && !ppu_.lcd_on()) {
-                run_vram_dma(1);  // with the LCD off one block goes right away
+            } else if (hdma_.hblank_active() &&
+                       (!ppu_.lcd_on() || (ppu_.mode() == 0 && ppu_.ly() < kLcdHeight))) {
+                // With the LCD off, or when started inside an HBlank, one block goes right away.
+                run_vram_dma(1);
             }
             break;
         case 0xFF56: rp_ = value & 0xC1; break;
