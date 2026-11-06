@@ -312,3 +312,66 @@ TEST_CASE("sprites on the line lengthen mode 3") {
     run_dots(ppu, 40);
     CHECK(ppu.mode() == 0);
 }
+
+namespace {
+
+// Dots spent in mode 3 on line 0 of a fresh frame (LCD switched off, configured, back on).
+int mode3_dots(Ppu& ppu) {
+    while (!(ppu.ly() == 1 && ppu.mode() == 2)) ppu.tick(1);  // finish the special first line
+    while (ppu.mode() != 3) ppu.tick(1);
+    int dots = 0;
+    while (ppu.mode() == 3) {
+        ppu.tick(1);
+        ++dots;
+    }
+    return dots;
+}
+
+}  // namespace
+
+TEST_CASE("FIFO: mode 3 lasts 172 dots with SCX = 0 and no sprites") {
+    Ppu ppu;
+    CHECK(mode3_dots(ppu) == 172);
+}
+
+TEST_CASE("FIFO: SCX % 8 adds its value to mode 3") {
+    Ppu ppu;
+    ppu.write_register(0xFF43, 3);
+    CHECK(mode3_dots(ppu) == 175);
+}
+
+TEST_CASE("FIFO: the window adds 6 dots") {
+    Ppu ppu;
+    ppu.write_register(0xFF4A, 0);   // WY
+    ppu.write_register(0xFF4B, 87);  // WX: window from x = 80
+    ppu.write_register(0xFF40, 0x91 | 0x20);
+    CHECK(mode3_dots(ppu) == 178);
+}
+
+TEST_CASE("FIFO: a mid-line BGP write changes only the pixels after it") {
+    Ppu ppu;
+    ppu.write_register(0xFF40, 0x00);
+    fill_tile(ppu, 0x8000, 3);       // every BG tile: colour 3
+    ppu.write_register(0xFF47, 0xFF);  // colour 3 -> shade 3
+    ppu.write_register(0xFF40, 0x91);
+    while (!(ppu.ly() == 1 && ppu.mode() == 3)) ppu.tick(1);
+    for (int i = 0; i < 12 + 80; ++i) ppu.tick(1);  // about 80 pixels out
+    ppu.write_register(0xFF47, 0x00);  // colour 3 -> shade 0
+    while (ppu.mode() == 3) ppu.tick(1);
+    const auto line = ppu.framebuffer().subspan(kLcdWidth, kLcdWidth);
+    CHECK(line[0] == kDmgGreys[3]);
+    CHECK(line[70] == kDmgGreys[3]);
+    CHECK(line[90] == kDmgGreys[0]);
+    CHECK(line[159] == kDmgGreys[0]);
+}
+
+TEST_CASE("FIFO: VRAM lock follows the real mode 3 end") {
+    Ppu ppu;
+    ppu.write_register(0xFF43, 7);
+    while (!(ppu.ly() == 1 && ppu.mode() == 3)) ppu.tick(1);
+    for (int i = 0; i < 179; ++i) {  // 172 + SCX % 8
+        CHECK_FALSE(ppu.vram_accessible());
+        ppu.tick(1);
+    }
+    CHECK(ppu.vram_accessible());
+}
