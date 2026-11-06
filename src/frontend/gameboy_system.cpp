@@ -29,6 +29,16 @@ std::int64_t unix_now() {
 // The 4 shades of the original DMG screen, lightest to darkest.
 constexpr std::array<std::uint32_t, 4> kShades = {0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820};
 
+// The DMG model's greys are shown with the DMG's green tint; anything else is a CGB colour.
+std::uint32_t to_argb(std::uint16_t color) {
+    for (std::size_t shade = 0; shade < 4; ++shade) {
+        if (gb::kDmgGreys[shade] == color) return kShades[shade];
+    }
+    const auto expand = [](std::uint32_t c) { return (c << 3) | (c >> 2); };
+    return 0xFF000000 | (expand(color & 0x1F) << 16) | (expand((color >> 5) & 0x1F) << 8) |
+           expand((color >> 10) & 0x1F);
+}
+
 constexpr std::array<std::pair<SDL_Scancode, Button>, 8> kKeymap = {{
     {SDL_SCANCODE_RIGHT, Button::Right},
     {SDL_SCANCODE_LEFT, Button::Left},
@@ -167,7 +177,7 @@ void GameBoySystem::handle_key(SDL_Scancode scancode, bool pressed) {
 void GameBoySystem::render(std::span<std::uint32_t> argb_pixels) const {
     const auto fb = gameboy_->framebuffer();
     for (std::size_t i = 0; i < argb_pixels.size(); ++i) {
-        argb_pixels[i] = kShades[fb[i] & 0x03];
+        argb_pixels[i] = to_argb(fb[i]);
     }
 }
 

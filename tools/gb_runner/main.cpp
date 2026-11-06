@@ -31,11 +31,21 @@ namespace {
 // The 4 DMG shades as plain greys (what dmg-acid2's reference image uses).
 constexpr std::array<std::uint8_t, 4> kGrey = {0xFF, 0xAA, 0x55, 0x00};
 
+// RGB555 -> 8-bit channels. The DMG greys map to exactly kGrey; any other colour is
+// expanded by repeating its top bits.
+std::array<std::uint8_t, 3> to_rgb888(std::uint16_t color) {
+    for (std::size_t shade = 0; shade < 4; ++shade) {
+        if (ezy::gb::kDmgGreys[shade] == color) return {kGrey[shade], kGrey[shade], kGrey[shade]};
+    }
+    const auto expand = [](int c) { return static_cast<std::uint8_t>((c << 3) | (c >> 2)); };
+    return {expand(color & 0x1F), expand((color >> 5) & 0x1F), expand((color >> 10) & 0x1F)};
+}
+
 void put_u16(std::ofstream& out, std::uint16_t v) { out.write(reinterpret_cast<const char*>(&v), 2); }
 void put_u32(std::ofstream& out, std::uint32_t v) { out.write(reinterpret_cast<const char*>(&v), 4); }
 
 // Minimal 24-bit uncompressed BMP (bottom-up rows, each padded to 4 bytes).
-bool write_bmp(const char* path, std::span<const std::uint8_t> shades, int width, int height) {
+bool write_bmp(const char* path, std::span<const std::uint16_t> pixels, int width, int height) {
     std::ofstream out(path, std::ios::binary);
     if (!out) return false;
     const int row_size = (width * 3 + 3) & ~3;
@@ -59,9 +69,11 @@ bool write_bmp(const char* path, std::span<const std::uint8_t> shades, int width
     std::vector<char> row(static_cast<std::size_t>(row_size), 0);
     for (int y = height - 1; y >= 0; --y) {
         for (int x = 0; x < width; ++x) {
-            const auto grey = static_cast<char>(kGrey[shades[static_cast<std::size_t>(y * width + x)] & 3]);
-            row[static_cast<std::size_t>(x * 3)] = row[static_cast<std::size_t>(x * 3 + 1)] =
-                row[static_cast<std::size_t>(x * 3 + 2)] = grey;
+            const auto [r, g, b] = to_rgb888(pixels[static_cast<std::size_t>(y * width + x)]);
+            const auto at = static_cast<std::size_t>(x * 3);
+            row[at] = static_cast<char>(b);  // BMP stores BGR
+            row[at + 1] = static_cast<char>(g);
+            row[at + 2] = static_cast<char>(r);
         }
         out.write(row.data(), row_size);
     }

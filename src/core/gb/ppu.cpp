@@ -88,6 +88,11 @@ std::uint8_t Ppu::read_register(std::uint16_t addr) const {
         case 0xFF49: return obp1_;
         case 0xFF4A: return wy_;
         case 0xFF4B: return wx_;
+        case 0xFF68: return static_cast<std::uint8_t>(0x40 | bcps_);
+        case 0xFF6A: return static_cast<std::uint8_t>(0x40 | ocps_);
+        // Palette data can't be reached while the PPU is drawing (mode 3).
+        case 0xFF69: return mode_ == 3 && lcd_on() ? 0xFF : bg_palettes_[bcps_ & 0x3F];
+        case 0xFF6B: return mode_ == 3 && lcd_on() ? 0xFF : obj_palettes_[ocps_ & 0x3F];
         default: return 0xFF;
     }
 }
@@ -103,7 +108,7 @@ void Ppu::write_register(std::uint16_t addr, std::uint8_t value) {
                 mode_ = 0;
                 window_y_hit_ = false;
                 window_line_ = 0;
-                frame_.fill(0);
+                frame_.fill(blank_color());
             } else if (!was_on && lcd_on()) {
                 mode_ = 2;
             }
@@ -119,9 +124,41 @@ void Ppu::write_register(std::uint16_t addr, std::uint8_t value) {
         case 0xFF49: obp1_ = value; break;
         case 0xFF4A: wy_ = value; break;
         case 0xFF4B: wx_ = value; break;
+        case 0xFF68: bcps_ = value & 0xBF; break;
+        case 0xFF6A: ocps_ = value & 0xBF; break;
+        case 0xFF69: write_palette_data(bg_palettes_, bcps_, value); break;
+        case 0xFF6B: write_palette_data(obj_palettes_, ocps_, value); break;
         default: break;
     }
     if (lcd_on()) update_stat_line();
+}
+
+void Ppu::set_model(Model model, bool cgb_mode) {
+    model_ = model;
+    cgb_mode_ = cgb_mode;
+    frame_.fill(blank_color());
+    // Until a compatibility palette is chosen, show a DMG game in greys.
+    if (model == Model::Cgb && !cgb_mode) set_compat_palettes(kDmgGreys, kDmgGreys, kDmgGreys);
+}
+
+void Ppu::set_compat_palettes(const std::array<std::uint16_t, 4>& bg, const std::array<std::uint16_t, 4>& obj0,
+                              const std::array<std::uint16_t, 4>& obj1) {
+    const auto store = [](std::array<std::uint8_t, 64>& ram, int palette, const std::array<std::uint16_t, 4>& colors) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto at = static_cast<std::size_t>(palette) * 8 + i * 2;
+            ram[at] = static_cast<std::uint8_t>(colors[i] & 0xFF);
+            ram[at + 1] = static_cast<std::uint8_t>(colors[i] >> 8);
+        }
+    };
+    store(bg_palettes_, 0, bg);
+    store(obj_palettes_, 0, obj0);
+    store(obj_palettes_, 1, obj1);
+}
+
+// BCPD/OCPD write. During mode 3 the write is lost, but auto-increment still happens.
+void Ppu::write_palette_data(std::array<std::uint8_t, 64>& ram, std::uint8_t& spec, std::uint8_t value) {
+    if (!(mode_ == 3 && lcd_on())) ram[spec & 0x3F] = value;
+    if (spec & 0x80) spec = static_cast<std::uint8_t>(0x80 | ((spec + 1) & 0x3F));
 }
 
 std::uint8_t Ppu::take_interrupts() {
@@ -156,8 +193,25 @@ std::uint8_t Ppu::bg_color_index(std::uint16_t map_base, int x, int y) const {
     return tile_color_index(tile_addr, y % 8, x % 8);
 }
 
+// The final colour of a BG/window pixel. CGB mode: straight from CGB palette `palette`.
+// DMG and compatibility mode: through BGP to a shade first.
+std::uint16_t Ppu::bg_color(int palette, std::uint8_t index) const {
+    if (cgb_mode_) return palette_color(bg_palettes_, palette, index);
+    const std::uint8_t shade = apply_palette(bgp_, index);
+    if (model_ == Model::Dmg) return dmg_colors_[shade];
+    return palette_color(bg_palettes_, 0, shade);
+}
+
+std::uint16_t Ppu::obj_color(std::uint8_t attributes, std::uint8_t index) const {
+    if (cgb_mode_) return palette_color(obj_palettes_, attributes & 0x07, index);
+    const bool obp1 = (attributes & 0x10) != 0;
+    const std::uint8_t shade = apply_palette(obp1 ? obp1_ : obp0_, index);
+    if (model_ == Model::Dmg) return dmg_colors_[shade];
+    return palette_color(obj_palettes_, obp1 ? 1 : 0, shade);
+}
+
 void Ppu::render_scanline() {
-    std::uint8_t* line = &frame_[static_cast<std::size_t>(ly_) * kLcdWidth];
+    std::uint16_t* line = &frame_[static_cast<std::size_t>(ly_) * kLcdWidth];
     std::array<std::uint8_t, kLcdWidth> bg_index{};  // pre-palette, for sprite priority
 
     if (ly_ == wy_) window_y_hit_ = true;
@@ -178,11 +232,11 @@ void Ppu::render_scanline() {
                 index = bg_color_index(bg_map, (x + scx_) & 0xFF, (ly_ + scy_) & 0xFF);
             }
             bg_index[static_cast<std::size_t>(x)] = index;
-            line[x] = apply_palette(bgp_, index);
+            line[x] = bg_color(0, index);
         }
         if (window_drawn) ++window_line_;
     } else {
-        std::fill(line, line + kLcdWidth, std::uint8_t{0});
+        std::fill(line, line + kLcdWidth, bg_color(0, 0));
     }
 
     // --- Sprites ---
@@ -218,7 +272,7 @@ void Ppu::render_scanline() {
 
             // The highest-priority opaque sprite decides this pixel, even if it is behind BG.
             const bool behind_bg = (sprite.attributes & 0x80) && bg_index[static_cast<std::size_t>(x)] != 0;
-            if (!behind_bg) line[x] = apply_palette((sprite.attributes & 0x10) ? obp1_ : obp0_, index);
+            if (!behind_bg) line[x] = obj_color(sprite.attributes, index);
             break;
         }
     }

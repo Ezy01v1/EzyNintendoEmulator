@@ -27,7 +27,9 @@ public:
         : cartridge_(std::move(cartridge)),
           model_(model),
           cgb_mode_(model == Model::Cgb && cartridge_.header().supports_cgb()),
-          opri_(cgb_mode_ ? 0 : 1) {}
+          opri_(cgb_mode_ ? 0 : 1) {
+        ppu_.set_model(model_, cgb_mode_);
+    }
 
     [[nodiscard]] Model model() const { return model_; }
     // True when CGB features are enabled: a CGB game on CGB hardware. A DMG game on a CGB

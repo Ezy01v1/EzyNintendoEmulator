@@ -4,12 +4,18 @@
 #include <cstdint>
 #include <span>
 
+#include "gb/model.hpp"
+
 namespace ezy::gb {
 
 inline constexpr int kLcdWidth = 160;
 inline constexpr int kLcdHeight = 144;
 inline constexpr int kDotsPerLine = 456;
 inline constexpr int kLinesPerFrame = 154;
+// RGB555 (bits 0-4 red, 5-9 green, 10-14 blue), the CGB's native colour format.
+// The DMG model shows its 4 shades as these plain greys, lightest to darkest.
+inline constexpr std::array<std::uint16_t, 4> kDmgGreys = {0x7FFF, 0x56B5, 0x294A, 0x0000};
+
 inline constexpr int kDotsPerFrame = kDotsPerLine * kLinesPerFrame;  // 70224 T-cycles
 
 // Picture Processing Unit (DMG).
@@ -46,8 +52,20 @@ public:
     // True once each time line 144 is reached (a complete frame is in the framebuffer).
     bool take_frame_ready();
 
-    // One byte per pixel: shade 0 (lightest) .. 3 (darkest), after palettes.
-    [[nodiscard]] std::span<const std::uint8_t> framebuffer() const { return frame_; }
+    // Set once by the bus at power-on. cgb_mode = a CGB game on a CGB.
+    void set_model(Model model, bool cgb_mode);
+    // The colours the DMG model uses for its 4 shades (kDmgGreys by default).
+    void set_dmg_colors(const std::array<std::uint16_t, 4>& colors) { dmg_colors_ = colors; }
+    // DMG compatibility mode: the palettes the CGB boot ROM picked for a DMG game. BGP/OBP0/OBP1
+    // shades index into them (BG palette 0, OBJ palettes 0 and 1).
+    void set_compat_palettes(const std::array<std::uint16_t, 4>& bg, const std::array<std::uint16_t, 4>& obj0,
+                             const std::array<std::uint16_t, 4>& obj1);
+
+    // One RGB555 colour per pixel.
+    [[nodiscard]] std::span<const std::uint16_t> framebuffer() const { return frame_; }
+    // CGB palette memory: 8 palettes x 4 colours x 2 bytes (little-endian RGB555).
+    [[nodiscard]] std::span<const std::uint8_t, 64> bg_palette_ram() const { return bg_palettes_; }
+    [[nodiscard]] std::span<const std::uint8_t, 64> obj_palette_ram() const { return obj_palettes_; }
 
     [[nodiscard]] std::uint8_t ly() const { return ly_; }
     [[nodiscard]] int mode() const { return mode_; }
@@ -56,6 +74,9 @@ public:
 
 private:
     void render_scanline();
+    void write_palette_data(std::array<std::uint8_t, 64>& ram, std::uint8_t& spec, std::uint8_t value);
+    [[nodiscard]] std::uint16_t bg_color(int palette, std::uint8_t index) const;
+    [[nodiscard]] std::uint16_t obj_color(std::uint8_t attributes, std::uint8_t index) const;
     void update_stat_line();
     [[nodiscard]] std::uint8_t bg_color_index(std::uint16_t map_base, int x, int y) const;
     [[nodiscard]] std::uint8_t tile_color_index(std::uint16_t tile_addr, int row, int col) const;
@@ -67,7 +88,19 @@ private:
     std::array<std::uint8_t, 0x4000> vram_{};  // 2 banks of 8 KiB (bank 1 only used on CGB)
     int vram_bank_ = 0;
     std::array<std::uint8_t, 0xA0> oam_{};
-    std::array<std::uint8_t, kLcdWidth * kLcdHeight> frame_{};
+    [[nodiscard]] static std::uint16_t palette_color(const std::array<std::uint8_t, 64>& ram, int palette, int index) {
+        const auto i = static_cast<std::size_t>(palette * 8 + index * 2);
+        return static_cast<std::uint16_t>((ram[i] | (ram[i + 1] << 8)) & 0x7FFF);
+    }
+    [[nodiscard]] std::uint16_t blank_color() const { return model_ == Model::Dmg ? dmg_colors_[0] : 0x7FFF; }
+
+    std::array<std::uint16_t, kLcdWidth * kLcdHeight> frame_{};
+    Model model_ = Model::Dmg;
+    bool cgb_mode_ = false;
+    std::array<std::uint16_t, 4> dmg_colors_ = kDmgGreys;
+    std::array<std::uint8_t, 64> bg_palettes_{};
+    std::array<std::uint8_t, 64> obj_palettes_{};
+    std::uint8_t bcps_ = 0, ocps_ = 0;  // bit 7 auto-increment, bits 0-5 index
 
     // Registers (post-boot values).
     std::uint8_t lcdc_ = 0x91;

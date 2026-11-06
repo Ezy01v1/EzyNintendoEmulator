@@ -27,7 +27,7 @@ public:
     void step() { cpu_.step(); }
 
     void set_button(Button button, bool pressed) { bus_.set_button(button, pressed); }
-    [[nodiscard]] std::span<const std::uint8_t> framebuffer() const { return bus_.ppu().framebuffer(); }
+    [[nodiscard]] std::span<const std::uint16_t> framebuffer() const { return bus_.ppu().framebuffer(); }
 
     [[nodiscard]] Cpu& cpu() { return cpu_; }
     [[nodiscard]] const Cpu& cpu() const { return cpu_; }

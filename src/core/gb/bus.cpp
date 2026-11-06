@@ -76,7 +76,8 @@ std::size_t Bus::wram_index(std::uint16_t addr) const {
 // there: reads return 0xFF and writes are dropped. Returns nullopt / false for addresses
 // that aren't CGB registers.
 std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
-    const bool cgb_register = addr == 0xFF4C || addr == 0xFF4F || addr == 0xFF56 || addr == 0xFF6C ||
+    const bool cgb_register = addr == 0xFF4C || addr == 0xFF4F || addr == 0xFF56 ||
+                              (addr >= 0xFF68 && addr <= 0xFF6C) ||
                               addr == 0xFF70 || (addr >= 0xFF72 && addr <= 0xFF75);
     if (!cgb_register) return std::nullopt;
     // 0xFF72/73/75 exist on any CGB, even in compatibility mode; 0xFF74 only in CGB mode.
@@ -84,6 +85,10 @@ std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
     if (!cgb_mode_ && !(model_ == Model::Cgb && always_on_cgb)) return std::uint8_t{0xFF};
     switch (addr) {
         case 0xFF4F: return static_cast<std::uint8_t>(0xFE | ppu_.vram_bank());
+        case 0xFF68:
+        case 0xFF69:
+        case 0xFF6A:
+        case 0xFF6B: return ppu_.read_register(addr);
         case 0xFF56: return static_cast<std::uint8_t>(0x3E | rp_);  // bit 1 = 1: no light received
         case 0xFF6C: return static_cast<std::uint8_t>(0xFE | opri_);
         case 0xFF70: return static_cast<std::uint8_t>(0xF8 | svbk_);
@@ -101,6 +106,10 @@ bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
     if (!cgb_mode_ && !(model_ == Model::Cgb && always_on_cgb)) return true;
     switch (addr) {
         case 0xFF4F: ppu_.set_vram_bank(value & 1); break;
+        case 0xFF68:
+        case 0xFF69:
+        case 0xFF6A:
+        case 0xFF6B: ppu_.write_register(addr, value); break;
         case 0xFF56: rp_ = value & 0xC1; break;
         case 0xFF6C: opri_ = value & 1; break;
         case 0xFF70: svbk_ = value & 0x07; break;
