@@ -82,6 +82,41 @@ constexpr bool overlaps(std::size_t offset, std::size_t size, std::uint32_t firs
     return offset <= last && offset + size > first;
 }
 
+// What a CPU read of each I/O halfword sees, after mGBA's GBAIORead: write-only registers
+// and most unused ones return open bus; a few unused ones (and DMAxCNT_L, which lots of
+// code reads) return 0.
+enum class IoRead : std::uint8_t { Value, Zero, OpenBus };
+
+constexpr IoRead io_read_kind(std::uint32_t half) {
+    if (half <= 0x00E) return IoRead::Value;                      // DISPCNT .. BG3CNT
+    if (half <= 0x046) return IoRead::OpenBus;                    // scroll, affine, windows
+    if (half == 0x048 || half == 0x04A || half == 0x050 || half == 0x052) return IoRead::Value;
+    if (half >= 0x060 && half <= 0x09E) {                         // sound
+        switch (half) {
+            case 0x066: case 0x06A: case 0x06E: case 0x076: case 0x07A: case 0x07E:
+            case 0x086: case 0x08A: return IoRead::Zero;
+            case 0x08C: case 0x08E: return IoRead::OpenBus;
+            default: return IoRead::Value;
+        }
+    }
+    if (half >= 0x0B0 && half <= 0x0DE) {                         // DMA
+        switch ((half - 0x0B0) % 12) {
+            case 8: return IoRead::Zero;                          // CNT_L
+            case 10: return IoRead::Value;                        // CNT_H
+            default: return IoRead::OpenBus;                      // SAD, DAD
+        }
+    }
+    if (half >= 0x100 && half <= 0x10E) return IoRead::Value;     // timers
+    if (half >= 0x120 && half <= 0x12A) return IoRead::Value;     // serial
+    switch (half) {
+        case 0x130: case 0x132: case 0x134: case 0x140:
+        case 0x150: case 0x152: case 0x154: case 0x156: case 0x158:
+        case 0x200: case 0x202: case 0x204: case 0x208: case 0x300: return IoRead::Value;
+        case 0x136: case 0x142: case 0x15A: case 0x206: case 0x20A: case 0x302: return IoRead::Zero;
+        default: return IoRead::OpenBus;
+    }
+}
+
 }  // namespace
 
 void Bus::request_interrupt(std::uint16_t bits) {
@@ -185,6 +220,23 @@ T Bus::read(std::uint32_t addr) const {
             if (at < kIoTimerFirst || at > kIoTimerLast || (at - kIoTimerFirst) % 4 >= 2) continue;
             const auto counter = timers_.counter(static_cast<int>((at - kIoTimerFirst) / 4));
             const auto byte = static_cast<std::uint8_t>(counter >> (8 * ((at - kIoTimerFirst) % 2)));
+            value = static_cast<T>((value & ~(static_cast<T>(0xFF) << (8 * b))) | (static_cast<T>(byte) << (8 * b)));
+        }
+    }
+    return value;
+}
+
+template <typename T>
+T Bus::cpu_read(std::uint32_t addr) const {
+    T value = read<T>(addr);
+    addr &= ~static_cast<std::uint32_t>(sizeof(T) - 1);
+    if (region_of(addr) == kIo && (addr & 0x00FFFFFF) < kIoSize) {
+        const std::uint32_t offset = addr & (kIoSize - 1);
+        for (std::size_t b = 0; b < sizeof(T); ++b) {
+            const auto at = static_cast<std::uint32_t>(offset + b);
+            const IoRead kind = io_read_kind(at & ~1U);
+            if (kind == IoRead::Value) continue;
+            const auto byte = kind == IoRead::Zero ? 0U : (open_bus_ >> (8 * (at & 3))) & 0xFF;
             value = static_cast<T>((value & ~(static_cast<T>(0xFF) << (8 * b))) | (static_cast<T>(byte) << (8 * b)));
         }
     }
@@ -353,13 +405,13 @@ std::uint32_t Bus::timed_access(std::uint32_t addr, std::uint32_t size, Access a
 
 std::uint8_t Bus::read8(std::uint32_t addr, Access access) {
     charge(timed_access(addr, 1, access));
-    return read<std::uint8_t>(addr);
+    return cpu_read<std::uint8_t>(addr);
 }
 
 std::uint16_t Bus::read16(std::uint32_t addr, Access access) {
     charge(timed_access(addr, 2, access));
     if (is_eeprom_address(addr)) return backup_.eeprom_read();
-    const auto value = read<std::uint16_t>(addr);
+    const auto value = cpu_read<std::uint16_t>(addr);
     if ((access & kCode) != 0) open_bus_ = value * 0x00010001U;  // Thumb: both halves
     return value;
 }
@@ -373,7 +425,7 @@ bool Bus::is_eeprom_address(std::uint32_t addr) const {
 
 std::uint32_t Bus::read32(std::uint32_t addr, Access access) {
     charge(timed_access(addr, 4, access));
-    const auto value = read<std::uint32_t>(addr);
+    const auto value = cpu_read<std::uint32_t>(addr);
     if ((access & kCode) != 0) open_bus_ = value;
     return value;
 }
@@ -468,10 +520,15 @@ void Bus::run_dma(int index, bool sound_fifo) {
     charge(2);
     Access access = static_cast<Access>(kDma | kNonseq);
     for (std::uint32_t i = 0; i < ch.count; ++i) {
+        // Each value moved stays on the bus: open-bus reads during (and right after) a DMA
+        // see it until the CPU fetches its next opcode.
         if (word) {
-            write32(ch.dst, read32(ch.src, access), access);
+            open_bus_ = read32(ch.src, access);
+            write32(ch.dst, open_bus_, access);
         } else {
-            write16(ch.dst, read16(ch.src, access), access);
+            const std::uint16_t half = read16(ch.src, access);
+            open_bus_ = half * 0x00010001U;
+            write16(ch.dst, half, access);
         }
         ch.src = static_cast<std::uint32_t>(static_cast<std::int32_t>(ch.src) + src_step);
         ch.dst = static_cast<std::uint32_t>(static_cast<std::int32_t>(ch.dst) + dst_step);

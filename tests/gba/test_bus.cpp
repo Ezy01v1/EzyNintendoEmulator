@@ -182,3 +182,39 @@ TEST_CASE("unmapped reads return the last opcode the CPU fetched (open bus)") {
     (void)bus.read16(0x08000006, static_cast<Access>(kCode | kSeq));
     CHECK(bus.read32(0x10000000) == 0x00030003);
 }
+
+TEST_CASE("write-only and unused I/O registers read as open bus or 0, like mGBA") {
+    // Through the CPU path: the untimed reads show the stored values.
+    Bus bus(make_rom());
+    bus.write32(0x03000000, 0xE1A00000);  // NOP, fetched so the bus holds it
+    (void)bus.read32(0x03000000, static_cast<Access>(kCode | kNonseq));
+
+    bus.write16(0x04000010, 0x0123);              // BG0HOFS: write-only
+    CHECK(bus.read16(0x04000010, kNonseq) == 0x0000);      // low half of the latched opcode
+    CHECK(bus.read16(0x04000012, kNonseq) == 0xE1A0);      // BG0VOFS, high half
+    CHECK(bus.read16(0x040000B0, kNonseq) == 0x0000);      // DMA0SAD
+    CHECK(bus.read16(0x040000B8, kNonseq) == 0);           // DMA0CNT_L: 0, not open bus
+    CHECK(bus.read16(0x04000066, kNonseq) == 0);           // listed unused: 0
+    CHECK(bus.read16(0x0400020A, kNonseq) == 0);           // after IME: 0
+    CHECK(bus.read16(0x040000E2, kNonseq) == 0xE1A0);      // other unused: open bus
+    CHECK(bus.read32(0x04000208, kNonseq) == 0);           // IME = 0 and 0x20A = 0
+
+    // Readable registers are unaffected, including the readable half of a mixed word.
+    bus.write16(0x04000008, 0x1F83);  // BG0CNT
+    CHECK(bus.read16(0x04000008, kNonseq) == 0x1F83);
+    CHECK(bus.read32(0x0400004C, kNonseq) == 0xE1A00000);  // MOSAIC + unused 0x04E
+    bus.write16(0x04000050, 0x3F41);  // BLDCNT
+    CHECK(bus.read32(0x04000050, kNonseq) == 0x00003F41);  // BLDALPHA (readable) is 0
+    CHECK(bus.read8(0x04000011, kNonseq) == 0x00);
+}
+
+TEST_CASE("open bus during DMA holds the last value the DMA moved") {
+    Bus bus(make_rom());
+    bus.write32(0x02000000, 0xCAFEF00D);
+    bus.write32(0x040000D4, 0x02000000);  // DMA3 src
+    bus.write32(0x040000D8, 0x03000100);  // dst
+    bus.write16(0x040000DC, 1);
+    bus.write16(0x040000DE, 0x8400);      // enable, 32-bit, immediate
+    CHECK(bus.read32(0x03000100) == 0xCAFEF00D);
+    CHECK(bus.read32(0x10000000) == 0xCAFEF00D);
+}

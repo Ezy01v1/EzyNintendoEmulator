@@ -55,8 +55,8 @@ inline constexpr std::size_t kSramSize = 64 * 1024;  // the save chip's address 
 // Not modelled yet: the exact prefetch behaviour of a ROM data access while a
 // prefetch is under way, the non-sequential penalty at 128 KiB ROM
 // boundaries, I/O register side effects (plain storage for now), BIOS read protection,
-// open bus inside unused I/O registers and during DMA (we return the last opcode
-// fetched for unmapped regions only, without the per-region Thumb rules).
+// the per-region Thumb open-bus rules (we return the last opcode
+// fetched, or the last DMA value, duplicated in Thumb). I/O reads follow mGBA.
 class Bus final : public CpuBus, private TimerOverflowHook {
 public:
     static constexpr std::uint32_t kWaitcnt = 0x04000204;
@@ -190,6 +190,10 @@ private:
 
     template <typename T>
     [[nodiscard]] T read(std::uint32_t addr) const;
+    // read() plus what the CPU/DMA can't see: write-only and unused I/O (open bus or 0).
+    // The untimed read8/16/32 skip this, so tests and the debugger see stored values.
+    template <typename T>
+    [[nodiscard]] T cpu_read(std::uint32_t addr) const;
     template <typename T>
     void write(std::uint32_t addr, T value);
 
