@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <bit>
 #include <cstdint>
 #include <span>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "gba/backup.hpp"
+#include "gba/gpio.hpp"
 #include "gba/cpu/cpu_bus.hpp"
 #include "gba/ppu.hpp"
 #include "gba/apu.hpp"
@@ -44,6 +46,8 @@ inline constexpr std::size_t kSramSize = 64 * 1024;  // the save chip's address 
 // top of the ROM area (0x0D) carries its serial bits instead. Untimed reads only peek at
 // the EEPROM; CPU and DMA reads advance its serial output.
 //
+// GPIO: games with the RTC driver get the cartridge GPIO port at 0x080000C4-C9 (gpio.hpp).
+//
 // I/O side effects so far: DISPSTAT/VCOUNT read-only bits (PPU), BG2/BG3 X/Y reloading
 // the PPU's affine reference points, IF write-1-to-clear, KEYINPUT read-only, HALTCNT,
 // timers, DMA. Everything else in I/O is plain storage.
@@ -68,6 +72,8 @@ public:
     // The cartridge's save chip, chosen from the ROM's backup ID string.
     [[nodiscard]] Backup& backup() { return backup_; }
     [[nodiscard]] const Backup& backup() const { return backup_; }
+    // The GPIO port with its RTC, if the ROM carries the RTC driver (see has_rtc()).
+    [[nodiscard]] Gpio* gpio() { return gpio_ ? &*gpio_ : nullptr; }
     [[nodiscard]] Apu& apu() { return apu_; }
     [[nodiscard]] const Apu& apu() const { return apu_; }
     [[nodiscard]] Timers& timers() { return timers_; }
@@ -160,6 +166,7 @@ private:
     std::vector<std::uint8_t> vram_;
     std::array<std::uint8_t, kOamSize> oam_{};
     Backup backup_;  // after rom_: detected from it
+    std::optional<Gpio> gpio_;  // likewise
     Scheduler* scheduler_ = nullptr;
     std::uint16_t keys_pressed_ = 0;
     bool halted_ = false;

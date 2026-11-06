@@ -46,6 +46,7 @@ Bus::Bus(std::vector<std::uint8_t> rom, std::span<const std::uint8_t> bios, Sche
       ewram_(kEwramSize, 0),
       vram_(kVramSize, 0),
       backup_(detect_backup_type(rom_)),
+      gpio_(has_rtc(rom_) ? std::optional<Gpio>(std::in_place) : std::nullopt),
       scheduler_(scheduler),
       ppu_(io_, palette_, vram_, oam_, scheduler),
       timers_(io_, scheduler),
@@ -151,6 +152,16 @@ T Bus::read(std::uint32_t addr) const {
     }
     // Untimed reads only peek at the EEPROM's serial output; CPU and DMA reads advance it.
     if (is_eeprom_address(addr)) return static_cast<T>(backup_.eeprom_peek());
+    if (is_rom(region) && gpio_ && gpio_->readable()) {
+        const std::uint32_t at = addr & kRomMask;
+        if (at >= Gpio::kFirst && at <= Gpio::kLast) {
+            // 16-bit registers; a word read at 0xC4 or 0xC8 also sees the next one.
+            std::uint32_t value = gpio_->read(at);
+            if constexpr (sizeof(T) == 4) value |= static_cast<std::uint32_t>(gpio_->read(at + 2)) << 16;
+            if constexpr (sizeof(T) == 1) value >>= 8 * (at & 1);
+            return static_cast<T>(value);
+        }
+    }
 
     std::size_t offset = 0;
     const auto memory = resolve(*this, addr, offset);
@@ -186,6 +197,15 @@ void Bus::write(std::uint32_t addr, T value) {
     if (is_eeprom_address(addr)) {
         backup_.eeprom_write(static_cast<std::uint16_t>(value));  // bit 0 is the serial input
         return;
+    }
+    if (is_rom(region) && gpio_) {
+        const std::uint32_t at = addr & kRomMask;
+        if (at >= Gpio::kFirst && at <= Gpio::kLast && (at & 1) == 0) {
+            gpio_->write(at, static_cast<std::uint16_t>(value));
+            if constexpr (sizeof(T) == 4) {
+                if (at + 2 <= Gpio::kLast) gpio_->write(at + 2, static_cast<std::uint16_t>(value >> 16));
+            }
+        }
     }
     if (region == kBios || is_rom(region)) return;  // read-only
 
