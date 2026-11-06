@@ -59,7 +59,10 @@ void Ppu::tick() {
         if (mode_ == 2) hblank_start_ = kOamScanDots + mode3_length();
         if (dot_ < hblank_start_) new_mode = 3;
     }
-    if (new_mode == 0 && mode_ == 3) render_scanline();
+    if (new_mode == 0 && mode_ == 3) {
+        render_scanline();
+        hblank_started_ = true;
+    }
     mode_ = new_mode;
     update_stat_line();
 }
@@ -185,6 +188,12 @@ std::uint8_t Ppu::take_interrupts() {
     const std::uint8_t bits = interrupts_;
     interrupts_ = 0;
     return bits;
+}
+
+bool Ppu::take_hblank_started() {
+    const bool started = hblank_started_;
+    hblank_started_ = false;
+    return started;
 }
 
 bool Ppu::take_frame_ready() {

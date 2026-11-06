@@ -56,6 +56,8 @@ public:
     std::uint8_t take_interrupts();
     // True once each time line 144 is reached (a complete frame is in the framebuffer).
     bool take_frame_ready();
+    // True once each time a visible line enters HBlank (when HDMA copies a block).
+    bool take_hblank_started();
 
     // Set once by the bus at power-on. cgb_mode = a CGB game on a CGB.
     void set_model(Model model, bool cgb_mode);
@@ -131,6 +133,7 @@ private:
     int window_line_ = 0;        // the window has its own line counter
     std::uint8_t interrupts_ = 0;
     bool frame_ready_ = false;
+    bool hblank_started_ = false;
 };
 
 }  // namespace ezy::gb

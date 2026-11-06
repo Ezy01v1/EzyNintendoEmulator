@@ -8,6 +8,7 @@
 #include "gb/apu.hpp"
 #include "gb/cartridge.hpp"
 #include "gb/cpu_bus.hpp"
+#include "gb/hdma.hpp"
 #include "gb/interrupts.hpp"
 #include "gb/joypad.hpp"
 #include "gb/model.hpp"
@@ -77,6 +78,8 @@ private:
     void write_io(std::uint16_t addr, std::uint8_t value);
     [[nodiscard]] std::uint8_t read_io(std::uint16_t addr) const;
     void oam_dma(std::uint8_t page);
+    // Copies `blocks` VRAM DMA blocks, stalling the CPU while the rest of the system runs.
+    void run_vram_dma(int blocks);
 
     Cartridge cartridge_;
     Model model_;
@@ -93,7 +96,9 @@ private:
     // CGB registers.
     std::uint8_t svbk_ = 1;  // 0xFF70, bits 0-2
     std::array<std::uint8_t, 4> undocumented_{};  // 0xFF72-0xFF75
-    std::uint8_t rp_ = 0;    // 0xFF56, writable bits 0 and 6-7
+    std::uint8_t rp_ = 0;
+    Hdma hdma_;
+    bool in_vram_dma_ = false;    // 0xFF56, writable bits 0 and 6-7
     std::array<std::uint8_t, 0x80> io_{};  // raw storage for I/O registers not modelled yet
     std::array<std::uint8_t, 0x7F> hram_{};
     std::uint8_t if_ = 0;

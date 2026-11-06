@@ -47,6 +47,20 @@ void Bus::advance() {
     if (timer_.take_interrupt()) request_interrupt(interrupt::kTimer);
     ppu_.tick();
     request_interrupt(ppu_.take_interrupts());
+    if (ppu_.take_hblank_started() && hdma_.hblank_active() && !in_vram_dma_) run_vram_dma(1);
+}
+
+// 2 bytes per M-cycle: a 16-byte block costs the CPU 8 M-cycles.
+void Bus::run_vram_dma(int blocks) {
+    in_vram_dma_ = true;
+    for (int b = 0; b < blocks; ++b) {
+        const Hdma::Block block = hdma_.next_block();
+        for (std::uint16_t i = 0; i < 16; ++i) {
+            ppu_.write_vram(static_cast<std::uint16_t>(block.dest + i), peek(static_cast<std::uint16_t>(block.source + i)));
+        }
+        for (int cycle = 0; cycle < 8; ++cycle) advance();
+    }
+    in_vram_dma_ = false;
 }
 
 std::uint8_t Bus::peek(std::uint16_t addr) const {
@@ -84,7 +98,7 @@ std::size_t Bus::wram_index(std::uint16_t addr) const {
 // there: reads return 0xFF and writes are dropped. Returns nullopt / false for addresses
 // that aren't CGB registers.
 std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
-    const bool cgb_register = addr == 0xFF4C || addr == 0xFF4F || addr == 0xFF56 ||
+    const bool cgb_register = addr == 0xFF4C || addr == 0xFF4F || (addr >= 0xFF51 && addr <= 0xFF56) ||
                               (addr >= 0xFF68 && addr <= 0xFF6C) ||
                               addr == 0xFF70 || (addr >= 0xFF72 && addr <= 0xFF75);
     if (!cgb_register) return std::nullopt;
@@ -97,6 +111,7 @@ std::optional<std::uint8_t> Bus::read_cgb_io(std::uint16_t addr) const {
         case 0xFF69:
         case 0xFF6A:
         case 0xFF6B: return ppu_.read_register(addr);
+        case 0xFF55: return hdma_.read_control();
         case 0xFF56: return static_cast<std::uint8_t>(0x3E | rp_);  // bit 1 = 1: no light received
         case 0xFF6C: return static_cast<std::uint8_t>(0xFE | ppu_.opri());
         case 0xFF70: return static_cast<std::uint8_t>(0xF8 | svbk_);
@@ -118,6 +133,17 @@ bool Bus::write_cgb_io(std::uint16_t addr, std::uint8_t value) {
         case 0xFF69:
         case 0xFF6A:
         case 0xFF6B: ppu_.write_register(addr, value); break;
+        case 0xFF51:
+        case 0xFF52:
+        case 0xFF53:
+        case 0xFF54: hdma_.write_address(addr, value); break;
+        case 0xFF55:
+            if (const int blocks = hdma_.write_control(value); blocks > 0) {
+                run_vram_dma(blocks);
+            } else if (hdma_.hblank_active() && !ppu_.lcd_on()) {
+                run_vram_dma(1);  // with the LCD off one block goes right away
+            }
+            break;
         case 0xFF56: rp_ = value & 0xC1; break;
         case 0xFF6C: ppu_.set_opri(value); break;
         case 0xFF70: svbk_ = value & 0x07; break;
