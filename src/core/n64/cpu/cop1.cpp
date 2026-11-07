@@ -3,8 +3,10 @@
 // Arithmetic runs on the host's IEEE float/double with the rounding mode taken from
 // FCR31.RM, and the host's exception flags become FCR31's cause bits. What the VR4300 does
 // differently from a plain IEEE unit (VR4300 manual, chapter 7, "FPU Exceptions"):
-//  - Denormal operands, and denormal results unless FCR31.FS flushes them, raise the
-//    unimplemented operation exception (cause bit E). E is always enabled.
+//  - NaN or denormal operands of arithmetic, and denormal results unless FCR31.FS flushes
+//    them, raise the unimplemented operation exception (cause bit E). E is always enabled.
+//    Compares do handle NaNs (PeterLemon FPUCompare), with the pre-2008 MIPS encoding:
+//    the top fraction bit *set* means signalling, so the default NaN is quiet.
 //  - Converting NaN, infinity or an out-of-range value to an integer is unimplemented too.
 //  - An enabled exception leaves the destination untouched and doesn't set the flags.
 //  - A NaN result is the VR4300's default NaN (0x7FBFFFFF / 0x7FF7FFFFFFFFFFFF).
@@ -88,15 +90,14 @@ auto with_rounding(std::uint32_t rm, std::uint32_t& cause, F fn) {
 template <typename T>
 bool is_denormal(T v) { return std::fpclassify(v) == FP_SUBNORMAL; }
 
-bool is_snan(float v) { return std::isnan(v) && !(std::bit_cast<std::uint32_t>(v) & 0x00400000); }
-bool is_snan(double v) { return std::isnan(v) && !(std::bit_cast<std::uint64_t>(v) & 0x0008000000000000ULL); }
+// MIPS (pre-2008) signalling NaN: the top fraction bit is set.
+bool is_snan(float v) { return std::isnan(v) && (std::bit_cast<std::uint32_t>(v) & 0x00400000) != 0; }
+bool is_snan(double v) { return std::isnan(v) && (std::bit_cast<std::uint64_t>(v) & 0x0008000000000000ULL) != 0; }
 
-// Operand checks shared by arithmetic: denormal -> E, signalling NaN -> V.
+// Operand check shared by arithmetic and conversions: NaN or denormal -> E.
 template <typename T>
 std::uint32_t check_operand(T v) {
-    if (is_denormal(v)) return kE;
-    if (is_snan(v)) return kV;
-    return 0;
+    return (is_denormal(v) || std::isnan(v)) ? kE : 0;
 }
 
 // Result fix-ups: NaN -> default NaN, denormal -> flush (FS) or E.
@@ -197,6 +198,7 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
             if (is_denormal(a) || is_denormal(b)) return unimplemented();
             unordered = std::isnan(a) || std::isnan(b), less = a < b, equal = a == b, snan = is_snan(a) || is_snan(b);
         }
+        // Conditions 8-15 are the signalling ones: any NaN is invalid.
         const int cond = funct & 15;
         if (snan || (unordered && (cond & 8))) cause |= kV;
         const bool result = (less && (cond & 4)) || (equal && (cond & 2)) || (unordered && (cond & 1));

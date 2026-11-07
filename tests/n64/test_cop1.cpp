@@ -146,6 +146,28 @@ TEST_CASE("CTC1 with an enabled cause bit raises FPE") {
     CHECK(exc_code(f) == static_cast<std::uint32_t>(ExceptionCode::FPE));
 }
 
+// PeterLemon FPUCompare. MIPS (pre-2008) NaNs: the top fraction bit *set* means
+// signalling, so 0x7FBFFFFF (the VR4300's default NaN) is quiet.
+TEST_CASE("compare with a quiet NaN: C.EQ.S is false and quiet, C.LT.S signals invalid") {
+    CpuFixture f;
+    fpu_ready(f, true);
+    f.cpu.set_gpr(t0, 0x7FBFFFFF);
+    f.cpu.set_gpr(t1, std::bit_cast<std::uint32_t>(1.0f));
+    f.load({mtc1(t0, 1), mtc1(t1, 2), fop(kS, 2, 1, 0, 0x32), cfc1(t2, 31), fop(kS, 2, 1, 0, 0x3C), cfc1(t0, 31)});
+    f.run(6);
+    CHECK(f.cpu.gpr(t2) == 0);                    // C.EQ.S: false, no flags
+    CHECK(f.cpu.gpr(t0) == ((1U << 16) | (1U << 6)));  // C.LT.S: V cause and flag, no trap
+}
+
+TEST_CASE("compare with a signalling NaN signals invalid even for C.EQ.S") {
+    CpuFixture f;
+    fpu_ready(f, true);
+    f.cpu.set_gpr(t0, 0x7FC00000);  // top fraction bit set: signalling on MIPS
+    f.load({mtc1(t0, 1), mtc1(t0, 2), fop(kS, 2, 1, 0, 0x32), cfc1(t2, 31)});
+    f.run(4);
+    CHECK((f.cpu.gpr(t2) & (1U << 16)) != 0);
+}
+
 TEST_CASE("FCR0 reads the VR4300 implementation number") {
     CpuFixture f;
     fpu_ready(f, true);
