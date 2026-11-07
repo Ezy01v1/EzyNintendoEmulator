@@ -101,3 +101,42 @@ Results:
 Remaining failures are all outside the DMG/CGB timing work: boot-state ROMs for other
 models (`boot_div-*`, `boot_hwio-*`, `boot_regs-*` for S/MGB/dmg0/SGB), `unused_hwio`,
 MBC2 and the MBC1 multicart.
+
+## Nintendo 64 test ROMs
+
+| Path | Source |
+|------|--------|
+| `n64/peterlemon/<Group>/<Test>/*.N64` + `.bmp` | github.com/PeterLemon/N64, folder `CPUTest` (prebuilt `.N64` files). Each `.png` reference is converted with `ffmpeg -i x.png -pix_fmt bgr24 x.bmp` (640×480). `CP0/COP0Register` and the two `TIMINGNTSC` tests have no reference image. `CPUTest/Exceptions` ships only sources (no prebuilt ROMs). |
+| `n64/n64-systemtest.z64` | Built from github.com/lemmy-64/n64-systemtest (see the N64 results section for the commit). |
+
+### Nintendo 64 results (subproject 1, 2026-11-07)
+
+**PeterLemon CPUTest:** 91 of 94 ROMs with a reference image match it pixel for pixel and
+run in ctest (`n64_peterlemon_*`). Left out, documented in `tests/n64/CMakeLists.txt`:
+`CPU/LOADSTORE/SB` and `SH` (their references draw the last dashed line 1 pixel lower than
+the same font does in every other test: stale images) and `DMAAlignment-PI-ROM-FROM` (one
+cell reads PI_DRAM_ADDR as 0x80024408 right after a DMA, while the same test then checks
+0x24408). `CP0/COP0Register` and the two `TIMINGNTSC` tests have no reference image.
+
+**n64-systemtest** (commit `196f542`, `ezy_n64_runner --isviewer`): runs to the end,
+**Base: 2659 of 3721 pass**. Not in ctest yet: the gate would fail until the RSP exists.
+The failures:
+
+- RSP and SP (subproject 2): every `RSP …`, `SP …` and `spmem: DMA …` test.
+- RDP (subproject 3): `RDP …`.
+- Caches (out of scope by design, the cache contents aren't emulated): `CACHE …`,
+  `ICACHE …`, `DCACHE …`.
+- Still open in the CPU/bus core:
+  - FPU: `64 bit with odd indices (half mode)` (+ conversions), `Comparisons in half mode
+    with odd register indices`, `Upper bits of 32 bit operation/conversions (half mode)`
+    (the FR=0 register addressing of arithmetic is still not exact), and the randomized
+    `ADD/SUB/MUL/DIV/SQRT.S`, `MUL/DIV.D` (rounding or flush details).
+  - `TLB: Store misaligned after 4k page, expect TLBS`.
+  - `COP2Usable (DCFC2/DCTC2)`.
+  - Sub-word writes to RCP memory: `spmem: SB/SH/SD`, `pifram: SB/SH`.
+  - `MI Repeat: …` (MI_MODE repeat mode), `RE …` (reverse-endian user mode),
+    `cart-writing: …` (the PI write latch on the cartridge bus).
+
+**Performance** (Release, this PC, median of 3): `CPUADD.N64` 600 frames (10 s emulated)
+in 4.86 s. n64-systemtest's base set takes about 13 minutes of real time (much of it waiting
+on an RSP that never runs).

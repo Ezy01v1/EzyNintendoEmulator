@@ -29,6 +29,18 @@ _Última actualización: 2026-11-06_
 5. [x] (Opcional) La ventana VRAM del debugger se encima con la ventana Screen (posición fija).
        Ya resuelto en `f82824b`: VRAM va en y=410, debajo de Screen (y=10..400).
 
+## Nintendo 64 (en curso)
+
+Plan en 4 subproyectos (spec y plan en `docs/superpowers/`): 1 CPU+memoria+arranque+video,
+2 RSP, 3 RDP, 4 juegos (audio, guardado, rendimiento).
+
+- [x] **Subproyecto 1** (rama `n64/base`): VR4300 (COP0, TLB, FPU), bus, PI/SI/VI/AI/MI, PIF y
+      arranque HLE con el IPL3 real, frontend (`.z64/.v64/.n64`) y `ezy_n64_runner`.
+      PeterLemon 91/94, n64-systemtest base 2659/3721 (lo que falla está en `roms/README.md`).
+- [ ] Pendientes del subproyecto 1 que siguen abiertos: FPU en modo FR=0 con índices impares y
+      aritmética aleatorizada, escrituras de 8/16 bits a memoria del RCP, PI write latch, RE, MI repeat.
+- [ ] **Subproyecto 2: RSP** (núcleo escalar, unidad vectorial, DMA de SP). Siguiente paso.
+
 ## Roadmap
 
 GBA (terminar pendientes) → **N64** → Nintendo DS → GameCube → Wii.
@@ -54,3 +66,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-06 — Revisión de pendientes: el 5 (ventana VRAM) ya estaba resuelto en `f82824b`; se marca. 1–4 siguen abiertos.
 - 2026-11-06 — PC con Build Tools: se instalan Build Tools y ROMs de prueba. Pendiente 1 hecho (24 % → 12 %), `vblank_stat_intr-C` arreglado. hblank_ly_scx y lcdon siguen abiertos. PR #4 mergeado.
 - 2026-11-06 — Recalibración del PPU (LY 4 dots antes, bloqueos de bus anticipados, modo 3 de 172): pasan hblank_ly_scx y lcdon*, Mooneye 81 → 84. PR #5 mergeado.
+- 2026-11-07 — N64 subproyecto 1 (rama `n64/base`): PeterLemon 91/94, n64-systemtest 2659/3721. Siguiente: RSP.
