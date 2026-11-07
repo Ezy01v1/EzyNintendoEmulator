@@ -105,6 +105,7 @@ private:
     bool in_delay_slot_ = false;    // the instruction being executed is in a delay slot
     bool branch_taken_ = false;     // the last instruction was a branch (its slot runs next)
     bool llbit_ = false;
+    std::uint32_t last_paddr_ = 0;  // physical address of the last load (LL sets LLAddr from it)
     int cycles_ = 0;                // cycles of the instruction being executed
     bool exception_ = false;        // the instruction being executed raised an exception
 };

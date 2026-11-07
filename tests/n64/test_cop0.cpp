@@ -158,6 +158,15 @@ TEST_CASE("unused COP0 registers read back the last value written to COP0") {
     CHECK(f.cpu.gpr(t1) == 0x12345678);
 }
 
+TEST_CASE("LL sets LLAddr to the physical address >> 4") {
+    CpuFixture f;
+    kernel_ready(f);
+    f.cpu.set_gpr(t0, 0xFFFFFFFF80003C04ULL);
+    f.load({i(0x30, t0, t1, 0)});  // LL t1, 0(t0)
+    f.run(1);
+    CHECK(f.cpu.cop0().read(Cop0::kLLAddr) == 0x3C0);
+}
+
 TEST_CASE("PRId and Random") {
     CpuFixture f;
     CHECK(f.cpu.cop0().read(Cop0::kPrId) == 0xB22);

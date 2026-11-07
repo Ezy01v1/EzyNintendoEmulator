@@ -239,6 +239,7 @@ bool Vr4300::load(std::uint64_t vaddr, T& value) {
     }
     Translation t{};
     if (!translate(vaddr, false, t)) return false;
+    last_paddr_ = t.paddr;
     if (!t.cached) cycles_ += static_cast<int>(bus_.uncached_cycles(t.paddr));
     if constexpr (sizeof(T) == 1) value = bus_.read8(t.paddr);
     else if constexpr (sizeof(T) == 2) value = bus_.read16(t.paddr);
@@ -291,12 +292,20 @@ void Vr4300::execute_load_store(std::uint32_t instr) {
         case 0x37: { std::uint64_t v; if (load(vaddr, v)) set_gpr(rt, v); break; }                                                    // LD
         case 0x30: {  // LL
             std::uint32_t v;
-            if (load(vaddr, v)) { set_gpr(rt, sext32(v)); llbit_ = true; }
+            if (load(vaddr, v)) {
+                set_gpr(rt, sext32(v));
+                llbit_ = true;
+                cop0_.raw(Cop0::kLLAddr) = last_paddr_ >> 4;
+            }
             break;
         }
         case 0x34: {  // LLD
             std::uint64_t v;
-            if (load(vaddr, v)) { set_gpr(rt, v); llbit_ = true; }
+            if (load(vaddr, v)) {
+                set_gpr(rt, v);
+                llbit_ = true;
+                cop0_.raw(Cop0::kLLAddr) = last_paddr_ >> 4;
+            }
             break;
         }
         case 0x22: {  // LWL

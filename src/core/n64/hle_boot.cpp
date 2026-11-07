@@ -31,6 +31,7 @@ void hle_boot(Vr4300& cpu, Bus& bus, const Cartridge& cart) {
     cop0.raw(Cop0::kRandom) = 31;
     // What the PIF boot leaves in Cause: BD, CE = 3, ExcCode = 31 (PeterLemon COP0Cause).
     cop0.raw(Cop0::kCause) = 0xB000007C;
+    cop0.raw(Cop0::kLLAddr) = 0xFFFFFFFF;  // PeterLemon LL_LLD_SC_SCD
 
     // RDRAM interface as the IPL leaves it after RDRAM is set up. RI_SELECT != 0 tells
     // the IPL3 that RDRAM is already initialised (n64brew "RDRAM Interface").
