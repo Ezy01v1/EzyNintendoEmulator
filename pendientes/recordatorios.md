@@ -36,10 +36,10 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 
 ## Cómo trabajar
 
-- En esta PC (Windows, Build Tools 2022 sin Visual Studio completo) CMake viene con las Build Tools:
-  `C:\Program Files (x86)\Microsoft Visual Studio2\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMakein`.
-- ROMs de prueba (todas en `roms/`, ver `roms/README.md`) y `testdata/sm83` (SingleStepTests, git clone).
-
+- En la PC con solo Build Tools 2022 (sin Visual Studio completo), `cmake` no está en el PATH: viene en
+  `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`.
+- ROMs de prueba: todas en `roms/` (de dónde salen: `roms/README.md`). Datos SingleStepTests:
+  `git clone --depth 1 https://github.com/SingleStepTests/sm83.git testdata/sm83`.
 - Uso varios PCs: el código se mueve solo por git (`git pull` al empezar, `git push` al terminar).
 - Compilar solo con presets: `cmake --preset default` → `build/default`,
   `cmake --build --preset debug`, `ctest --preset debug`.
