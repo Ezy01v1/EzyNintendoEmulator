@@ -153,7 +153,7 @@ unsigned dither_channel(unsigned channel, unsigned threshold) {
 
 unsigned Rdp::buffered_draw_words(unsigned op) {
     switch (op) {
-        case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0F:
+        case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E: case 0x0F:
             return command_words(op);
         case 0x24: return 2;
         default: return 0;
@@ -357,7 +357,7 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         if (perspective) w = gradient(16);
     }
     std::array<TextureGradient, 4> shade{};
-    if (shade_color) {
+    if (shaded) {
         // RGBA coefficients share the STW layout: integers and fractions in separate words.
         for (unsigned i = 0; i < shade.size(); ++i) {
             const unsigned at = 48 - 16 * i;
@@ -407,7 +407,7 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         std::int64_t start_s = 0, start_t = 0, start_w = 0;
         std::array<std::int64_t, 4> start_shade{};
         std::int64_t start_z = 0;
-        if (combiner || shade_color || use_depth) {
+        if (combiner || shaded || use_depth) {
             const int edge_x = major.fixed_x(4 * y + (late ? 3 : 0));
             const int x_fraction = (edge_x >> 8) & 255;
             const int lines = y - (yh >> 2);
@@ -440,7 +440,14 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                     const int sample_s = s.sample(start_s, dx), sample_t = t.sample(start_t, dx);
                     const auto [u, v] = perspective ? project_texture_coordinates(sample_s, sample_t, w.sample(start_w, dx))
                                                     : std::array{sample_s, sample_t};
-                    pixel = textured_color(tile, u, v, *combiner);
+                    std::uint32_t shade_rgb = 0;  // Triangles without shade coefficients have zero shade.
+                    if (shaded) {
+                        shade_rgb = (clamp_shade(start_shade[0], shade[0], dx) << 24) |
+                                    (clamp_shade(start_shade[1], shade[1], dx) << 16) |
+                                    (clamp_shade(start_shade[2], shade[2], dx) << 8);
+                        shade_alpha = clamp_shade(start_shade[3], shade[3], dx);
+                    }
+                    pixel = textured_color(tile, u, v, *combiner, shade_rgb);
                 } else if (shade_color) {
                     const int dx = x - texture_x;
                     pixel = (clamp_shade(start_shade[0], shade[0], dx) << 24) |

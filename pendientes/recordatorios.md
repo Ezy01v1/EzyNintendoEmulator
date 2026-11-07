@@ -74,7 +74,9 @@ Plan en 4 subproyectos (spec y plan en `docs/superpowers/`): 1 CPU+memoria+arran
         sin desbordar cobertura, P/A/M/B completos y destinos de cobertura clamp/wrap/zap/save.
   - [ ] Blender: alfa del combinador con términos (A−B)·C y alfa de texel, `cvg_x_alpha`,
         `alpha_compare`, modo de dos ciclos. Los bits ocultos de cobertura en RGBA5551 se asumen en 1.
-  - [ ] Sombreado combinado con texturas (`0x0E`) y shade × primitivo.
+  - [x] Triángulos con sombreado y textura (`0x0E/0x0F`): TEXEL0 × SHADE en el combinador.
+  - [ ] Combinador general (A−B)·C+D en RGB y alfa (hoy solo casos fijos), shade × primitivo,
+        TEXEL0 × SHADE en rectángulos (shade cero) y modo de dos ciclos.
 
 ## Roadmap
 
@@ -132,3 +134,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   n64-systemtest 2984/3721. Siguiente: mezcla con el framebuffer o shade con texturas.
 - 2026-11-07 — N64 subproyecto 3: blender de un ciclo con lectura del framebuffer. Pruebas
   unitarias N64 145/145, n64-systemtest 2984/3721. Siguiente: shade con texturas.
+- 2026-11-07 — N64 subproyecto 3: triángulos con textura modulada por shade. Pruebas unitarias
+  N64 146/146, n64-systemtest 2984/3721. Siguiente: combinador general.

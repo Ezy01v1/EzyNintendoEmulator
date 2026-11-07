@@ -87,9 +87,10 @@ private:
         void serialize(Ar& ar) { ar(descriptor), ar(bounds); }
     };
 
-    enum class TextureCombiner { Direct, Modulate };
+    enum class TextureCombiner { Direct, Modulate, ModulateShade };
     [[nodiscard]] std::optional<TextureCombiner> opaque_texture_combiner(const Tile& tile, bool depth = false) const;
-    [[nodiscard]] std::uint32_t textured_color(const Tile& tile, int s, int t, TextureCombiner combiner) const;
+    [[nodiscard]] std::uint32_t textured_color(const Tile& tile, int s, int t, TextureCombiner combiner,
+                                               std::uint32_t shade = 0) const;
     [[nodiscard]] std::uint16_t read_texel(const Tile& tile, unsigned s, unsigned t, unsigned bank) const;
     [[nodiscard]] std::array<unsigned, 3> sample_texture_rgb(const Tile& tile, int s, int t) const;
 

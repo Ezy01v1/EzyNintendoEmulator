@@ -224,20 +224,22 @@ std::optional<Rdp::TextureCombiner> Rdp::opaque_texture_combiner(const Tile& til
     const unsigned multiplier = static_cast<unsigned>(solid_.combine >> 32) & 31;
     const unsigned addend = static_cast<unsigned>(solid_.combine >> 6) & 7;
     if (source_a == 1 && source_b >= 8 && multiplier == 3 && addend == 7) return TextureCombiner::Modulate;
+    if (source_a == 1 && source_b >= 8 && multiplier == 4 && addend == 7) return TextureCombiner::ModulateShade;
     if (multiplier >= 16 && addend == 1) return TextureCombiner::Direct;
     return std::nullopt;
 }
 
-std::uint32_t Rdp::textured_color(const Tile& tile, int s, int t, TextureCombiner combiner) const {
+std::uint32_t Rdp::textured_color(const Tile& tile, int s, int t, TextureCombiner combiner, std::uint32_t shade) const {
     s = clamp_texture_coord(s, field12(tile.bounds, 44), field12(tile.bounds, 12),
                             static_cast<unsigned>(tile.descriptor));
     t = clamp_texture_coord(t, field12(tile.bounds, 32), field12(tile.bounds, 0),
                             static_cast<unsigned>(tile.descriptor >> 10));
     auto [r, g, b] = sample_texture_rgb(tile, s, t);
-    if (combiner == TextureCombiner::Modulate) {
-        r = (r * (solid_.primitive >> 24) + 128) >> 8;
-        g = (g * ((solid_.primitive >> 16) & 255) + 128) >> 8;
-        b = (b * ((solid_.primitive >> 8) & 255) + 128) >> 8;
+    if (combiner != TextureCombiner::Direct) {
+        const std::uint32_t factor = combiner == TextureCombiner::Modulate ? solid_.primitive : shade;
+        r = (r * (factor >> 24) + 128) >> 8;
+        g = (g * ((factor >> 16) & 255) + 128) >> 8;
+        b = (b * ((factor >> 8) & 255) + 128) >> 8;
     }
     return (r << 24) | (g << 16) | (b << 8);
 }
@@ -247,7 +249,7 @@ void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
     const auto header = draw_command_[0], coefficients = draw_command_[1];
     const auto& tile = texture_.tiles[(header >> 24) & 7];
     const auto combiner = opaque_texture_combiner(tile);
-    if (!combiner) return;
+    if (!combiner || *combiner == TextureCombiner::ModulateShade) return;  // TODO: rectangles have zero shade
 
     const unsigned x0 = field12(header, 12), y0 = field12(header, 0);
     const unsigned left = std::max(x0, field12(scissor_, 44));

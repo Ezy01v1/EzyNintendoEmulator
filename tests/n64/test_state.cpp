@@ -549,6 +549,52 @@ TEST_CASE("RDP one-cycle shaded triangle interpolates and clamps per-vertex colo
     }
 }
 
+TEST_CASE("RDP shaded textured triangle modulates texels by the interpolated shade") {
+    const auto n64 = N64::create(counting_rom("RDP SHADE TEXTURE"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    constexpr std::uint32_t source = 0x2000;
+    for (std::uint32_t at = source; at < source + 32; at += 8) bus.write64(at, ~0ULL);  // white RGBA16 4x4
+    const auto rgba = [](int r, int g, int b, int a) {
+        return (std::uint64_t{static_cast<std::uint16_t>(r)} << 48) |
+               (std::uint64_t{static_cast<std::uint16_t>(g)} << 32) |
+               (std::uint64_t{static_cast<std::uint16_t>(b)} << 16) | static_cast<std::uint16_t>(a);
+    };
+    std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,             // RGBA8888, stride 4
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        kPointMode | (1U << 9),             // coverage zap
+        0x3C0000240F0001C0ULL,             // cycle 1: RGB = TEXEL0 * SHADE
+        0x3D10000300000000ULL | source,
+        rdp_tile(0, 2, 0, 1, 0),
+        rdp_rectangle(0x34, 0, 0, 3, 3),
+        rdp_triangle_header(true, 0, 0, 12) | (0x06ULL << 56),  // 0x0E, y = 0..3
+        rdp_edge(4 * pixel, 0),
+        rdp_edge(0, 0),
+        rdp_edge(0, 0),
+        rgba(0, 255, 0, 255), rgba(96, 0, 0, 0), 0, 0,   // shade: color, d/dx, fractions
+        rgba(0, 0, 120, 0), 0, 0, 0,                     // shade: d/de, d/dy, fractions
+        0, 0, 0, 0, 0, 0, 0, 0,                          // S = T = 0
+        kSyncFull,
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 60; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    const auto modulate = [](unsigned shade) { return (std::min(shade, 255U) * 255 + 128) >> 8; };
+    for (unsigned y = 0; y < 3; ++y) {
+        for (unsigned x = 0; x < 4; ++x) {
+            CAPTURE(x);
+            CAPTURE(y);
+            const unsigned expected = (modulate(96 * x) << 24) | (modulate(255) << 16) | (modulate(120 * y) << 8) | 0xE0;
+            CHECK(bus.read32(0x4000 + 4 * (4 * y + x)) == expected);
+        }
+    }
+}
+
 TEST_CASE("RDP force blend mixes a translucent primitive with framebuffer memory") {
     const auto n64 = N64::create(counting_rom("RDP BLEND"));
     REQUIRE(n64);
