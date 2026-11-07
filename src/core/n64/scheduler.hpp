@@ -15,6 +15,9 @@ enum class EventType : std::uint8_t {
     PiDma,   // a PI DMA finishes
     SiDma,   // an SI DMA finishes
     AiDma,   // the playing AI buffer finishes
+    SpDma,   // an SP DMA row finishes
+    RspStep, // the RSP executes one instruction
+    RdpWord, // the RDP consumes a word from its command stream
     Count,
 };
 
@@ -51,9 +54,13 @@ public:
 
     // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
     template <class Ar>
-    void serialize(Ar& ar) {
+    void serialize(Ar& ar, std::uint32_t version) {
         ar(now_);
-        ar(slots_);
+        // Version 1 predates SP execution; versions 2 and 3 predate DP execution.
+        const std::size_t count = version == 1 ? index(EventType::SpDma)
+                                  : version < 4 ? index(EventType::RdpWord) : slots_.size();
+        for (std::size_t i = 0; i < count; ++i) ar(slots_[i]);
+        for (std::size_t i = count; i < slots_.size(); ++i) slots_[i] = {};
     }
 
 private:

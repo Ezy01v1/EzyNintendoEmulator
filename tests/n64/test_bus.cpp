@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "mips_asm.hpp"
 #include "n64/bus.hpp"
 #include "n64/cartridge.hpp"
 #include "n64/scheduler.hpp"
@@ -39,6 +40,10 @@ struct BusFixture {
 
 constexpr std::uint32_t kMiMode = 0x04300000, kMiVersion = 0x04300004, kMiIntr = 0x04300008, kMiMask = 0x0430000C;
 constexpr std::uint32_t kPiDram = 0x04600000, kPiCart = 0x04600004, kPiWrLen = 0x0460000C, kPiStatus = 0x04600010;
+constexpr std::uint32_t kDmem = 0x04000000, kImem = 0x04001000, kSpMemAddr = 0x04040000,
+                        kSpDramAddr = 0x04040004, kSpReadLen = 0x04040008, kSpWriteLen = 0x0404000C,
+                        kSpStatus = 0x04040010, kSpDmaFull = 0x04040014, kSpDmaBusy = 0x04040018,
+                        kSpPc = 0x04080000;
 
 }  // namespace
 
@@ -90,12 +95,76 @@ TEST_CASE("unmapped read returns 0") {
     CHECK(f.bus.read32(0x04900000) == 0);
 }
 
-TEST_CASE("SP DMEM is reachable and the RSP stays halted") {
+TEST_CASE("SP DMEM is reachable and the RSP starts halted") {
     BusFixture f;
-    f.bus.write32(0x04000010, 0xDEADBEEF);
-    CHECK(f.bus.read32(0x04000010) == 0xDEADBEEF);
-    f.bus.write32(0x04040010, 1);  // SP_STATUS: clear halt
-    CHECK((f.bus.read32(0x04040010) & 1) == 1);
+    f.bus.write32(kDmem + 0x10, 0xDEADBEEF);
+    CHECK(f.bus.read32(kDmem + 0x10) == 0xDEADBEEF);
+    CHECK((f.bus.read32(kSpStatus) & 1) == 1);
+    f.bus.write32(kSpStatus, 3);  // simultaneous clear and set leave HALT alone
+    CHECK((f.bus.read32(kSpStatus) & 1) == 1);
+}
+
+TEST_CASE("SP DMA aligns, strides and wraps within its bank with a queued reverse transfer") {
+    BusFixture f;
+    f.bus.write64(0x100, 0x1122334455667788ULL);
+    f.bus.write64(0x108, 0xDEADBEEFDEADBEEFULL);
+    f.bus.write64(0x110, 0x99AABBCCDDEEFF00ULL);
+    f.bus.write64(kImem, 0x1234567887654321ULL);
+    f.bus.write32(kSpMemAddr, 0xFFF);
+    f.bus.write32(kSpDramAddr, 0x107);
+    f.bus.write32(kSpReadLen, 0x00901001);  // two 8-byte rows, 8-byte skip after masking
+    CHECK(f.bus.read32(kSpDmaBusy) == 1);
+    CHECK(f.bus.read32(kSpMemAddr) == 0xFF8);
+    CHECK(f.bus.read32(kSpDramAddr) == 0x100);
+    CHECK(f.bus.read64(kDmem + 0xFF8) == 0);
+
+    f.bus.write32(kSpMemAddr, 0xFF8);
+    f.bus.write32(kSpDramAddr, 0x300);
+    f.bus.write32(kSpWriteLen, 15);
+    CHECK(f.bus.read32(kSpDmaFull) == 1);
+    CHECK((f.bus.read32(kSpStatus) & 0xC) == 0xC);
+    CHECK(f.bus.read32(kSpDramAddr) == 0x100);
+
+    f.run(5);
+    CHECK(f.bus.read64(kDmem + 0xFF8) == 0x1122334455667788ULL);
+    CHECK(f.bus.read32(kSpDramAddr) == 0x110);
+    CHECK(f.bus.read64(kDmem) == 0);
+    f.run(5);
+    CHECK(f.bus.read64(kDmem) == 0x99AABBCCDDEEFF00ULL);
+    CHECK(f.bus.read64(kImem) == 0x1234567887654321ULL);
+    CHECK(f.bus.read32(kSpDmaFull) == 0);
+    CHECK(f.bus.read32(kSpDmaBusy) == 1);
+    f.run(9);
+    CHECK(f.bus.read32(kSpDmaBusy) == 0);
+    CHECK(f.bus.read32(kSpDramAddr) == 0x310);
+    CHECK(f.bus.read32(kSpMemAddr) == 8);
+    CHECK(f.bus.read32(kSpReadLen) == 0xFF8);
+    CHECK(f.bus.read32(kSpWriteLen) == 0xFF8);
+    CHECK(f.bus.read64(0x300) == 0x1122334455667788ULL);
+    CHECK(f.bus.read64(0x308) == 0x99AABBCCDDEEFF00ULL);
+    CHECK(f.bus.read32(kMiIntr) == 0);
+}
+
+TEST_CASE("RSP COP0 can initiate an SP DMA and poll its completion") {
+    using namespace mips;
+    BusFixture f;
+    f.bus.write64(0x100, 0x1122334455667788ULL);
+    const std::uint32_t program[] = {
+        mtc0(0, 0), addiu(1, 0, 0x100), mtc0(1, 1), mtc0(0, 2),
+        mfc0(2, 6), bne(2, 0, -2), nop(),
+        lw(3, 0, 0), sw(3, 0, 8), special(0, 0, 0, 0, 0x0D),
+    };
+    std::uint32_t address = kImem;
+    for (const auto word : program) {
+        f.bus.write32(address, word);
+        address += 4;
+    }
+    f.bus.write32(kSpStatus, 1);
+    f.run(100);
+    CHECK(f.bus.read32(kSpStatus) == 3);
+    CHECK(f.bus.read32(kSpPc) == sizeof(program));
+    CHECK(f.bus.read32(kDmem + 8) == 0x11223344);
+    CHECK(f.bus.read32(kMiIntr) == 0);
 }
 
 TEST_CASE("cartridge ROM reads through domain 1") {

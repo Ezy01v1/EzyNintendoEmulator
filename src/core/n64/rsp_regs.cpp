@@ -1,78 +1,119 @@
 #include "n64/rsp_regs.hpp"
 
-#include <cstdio>
-
 namespace ezy::n64 {
 
 namespace {
 
-constexpr std::uint32_t kHalt = 1U << 0, kBroke = 1U << 1, kSingleStep = 1U << 5, kInterruptOnBreak = 1U << 6;
-
-void log_once(bool& done, const char* what) {
-    if (done) return;
-    done = true;
-    std::fprintf(stderr, "N64: %s (not emulated yet, ignored)\n", what);
-}
-
-bool g_logged_rsp_start = false;
-bool g_logged_dp = false;
+constexpr std::uint32_t kDmaBusy = 1U << 2, kDmaFull = 1U << 3;
+constexpr std::uint32_t kLengthMask = 0xFF8, kCountMask = 0xFF000, kSkipMask = 0xFF800000;
+constexpr std::uint32_t kDramMask = 0xFFFFFF;
 
 }  // namespace
 
-RspRegs::RspRegs() { dp_[3] = 0x80; }  // DPC_STATUS: command buffer ready
-
 std::uint32_t RspRegs::read_sp(std::uint32_t offset) {
-    if (offset >= 0x40000) return sp_pc_;  // SP_PC (0x04080000)
-    switch (offset & 0x1F) {
-        case 0x10: return sp_status_;
-        case 0x14: return 0;  // SP_DMA_FULL
-        case 0x18: return 0;  // SP_DMA_BUSY
+    const std::uint32_t reg = offset & 0x1F;
+    if (offset >= 0x40000) return reg == 0 ? sp_pc_ : 0;
+    const bool busy = dma_.direction != DmaDirection::Idle;
+    const bool full = pending_.direction != DmaDirection::Idle;
+    switch (reg) {
+        case 0x00: return dma_.sp_address;
+        case 0x04: return dma_.dram_address;
+        case 0x08: case 0x0C: return dma_.length;
+        case 0x10: return sp_status_ | (busy ? kDmaBusy : 0) | (full ? kDmaFull : 0);
+        case 0x14: return full;
+        case 0x18: return busy;
         case 0x1C: {          // SP_SEMAPHORE: reading takes it
             const std::uint32_t value = semaphore_;
             semaphore_ = 1;
             return value;
         }
-        default: return sp_[(offset & 0x1F) / 4];
+        default: return 0;
     }
 }
 
-void RspRegs::write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi) {
+void RspRegs::write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when) {
+    const std::uint32_t reg = offset & 0x1F;
     if (offset >= 0x40000) {
-        sp_pc_ = value & 0xFFC;
+        if (reg == 0) {
+            sp_pc_ = value & kPcMask;
+            next_pc_ = (sp_pc_ + 4) & kPcMask;
+        }
         return;
     }
-    switch (offset & 0x1F) {
-        case 0x10:  // SP_STATUS: pairs of clear/set bits (n64brew "RSP", SP_STATUS write)
-            if (value & (1U << 0)) log_once(g_logged_rsp_start, "a program started the RSP");
-            if (value & (1U << 1)) sp_status_ |= kHalt;
-            if (value & (1U << 2)) sp_status_ &= ~kBroke;
-            if (value & (1U << 3)) mi.clear(MiInterrupt::Sp);
-            if (value & (1U << 4)) mi.raise(MiInterrupt::Sp);
-            if (value & (1U << 5)) sp_status_ &= ~kSingleStep;
-            if (value & (1U << 6)) sp_status_ |= kSingleStep;
-            if (value & (1U << 7)) sp_status_ &= ~kInterruptOnBreak;
-            if (value & (1U << 8)) sp_status_ |= kInterruptOnBreak;
-            for (unsigned s = 0; s < 8; ++s) {  // signals 0-7: status bits 7-14
-                if (value & (1U << (9 + 2 * s))) sp_status_ &= ~(1U << (7 + s));
-                if (value & (1U << (10 + 2 * s))) sp_status_ |= 1U << (7 + s);
-            }
-            return;
-        case 0x1C: semaphore_ = 0; return;
-        case 0x14: case 0x18: return;  // read-only
-        default:
-            sp_[(offset & 0x1F) / 4] = value;
-            return;
+    switch (reg) {
+        case 0x00: pending_.sp_address = value & 0x1FF8; break;
+        case 0x04: pending_.dram_address = value & (kDramMask & ~7U); break;
+        case 0x08: case 0x0C:
+            pending_.length = value & (kLengthMask | kCountMask | kSkipMask);
+            pending_.direction = reg == 0x08 ? DmaDirection::ToSp : DmaDirection::ToDram;
+            start_dma(scheduler, when);
+            break;
+        case 0x10: write_status(value, mi, scheduler, when); break;
+        case 0x1C: semaphore_ = 0; break;
+        default: break;
     }
 }
 
-std::uint32_t RspRegs::read_dp(std::uint32_t offset) const { return dp_[(offset & 0x1F) / 4]; }
+void RspRegs::write_status(std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when) {
+    const bool was_halted = (sp_status_ & kHalt) != 0;
+    const auto apply_pair = [this, value](unsigned shift, std::uint32_t flag) {
+        const std::uint32_t command = (value >> shift) & 3;
+        if (command == 1) sp_status_ &= ~flag;
+        if (command == 2) sp_status_ |= flag;
+    };
+    apply_pair(0, kHalt);
+    if (value & (1U << 2)) sp_status_ &= ~kBroke;
+    const std::uint32_t interrupt = (value >> 3) & 3;
+    if (interrupt == 1) mi.clear(MiInterrupt::Sp);
+    if (interrupt == 2) mi.raise(MiInterrupt::Sp);
+    apply_pair(5, kSingleStep);
+    apply_pair(7, kInterruptOnBreak);
+    for (unsigned signal = 0; signal < 8; ++signal) apply_pair(9 + 2 * signal, 1U << (7 + signal));
 
-void RspRegs::write_dp(std::uint32_t offset, std::uint32_t value) {
-    const std::uint32_t reg = (offset & 0x1F) / 4;
-    if (reg <= 1) {  // DPC_START, DPC_END
-        log_once(g_logged_dp, "a program sent RDP commands");
-        dp_[reg] = value & 0xFFFFF8;
-        if (reg == 1) dp_[2] = dp_[1];  // nothing to run: CURRENT catches up
+    if (sp_status_ & kHalt) {
+        scheduler.cancel(EventType::RspStep);
+    } else if (was_halted) {
+        short_step_ = true;
+        scheduler.schedule(EventType::RspStep, when + 2);
+    }
+}
+
+void RspRegs::start_dma(Scheduler& scheduler, std::uint64_t when) {
+    if (dma_.direction != DmaDirection::Idle || pending_.direction == DmaDirection::Idle) return;
+    dma_ = pending_;
+    pending_.direction = DmaDirection::Idle;
+    schedule_dma_row(scheduler, when);
+}
+
+void RspRegs::schedule_dma_row(Scheduler& scheduler, std::uint64_t when) const {
+    // Approximate bus timing: three RSP cycles per 8 bytes, rounded up to CPU cycles.
+    const std::uint32_t beats = ((dma_.length & kLengthMask) >> 3) + 1;
+    scheduler.schedule(EventType::SpDma, when + (beats * 9 + 1) / 2);
+}
+
+void RspRegs::finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when) {
+    if (dma_.direction == DmaDirection::Idle) return;
+    const std::uint32_t bytes = (dma_.length & kLengthMask) + 8;
+    const std::uint32_t bank = dma_.sp_address & 0x1000;
+    for (std::uint32_t i = 0; i < bytes; ++i) {
+        std::uint8_t& sp = mem_[bank | ((dma_.sp_address + i) & 0xFFF)];
+        const std::uint32_t dram = (dma_.dram_address + i) & kDramMask;
+        if (dma_.direction == DmaDirection::ToSp) {
+            sp = dram < rdram.size() ? rdram[dram] : 0;
+        } else if (dram < rdram.size()) {
+            rdram[dram] = sp;
+        }
+    }
+    dma_.sp_address = bank | ((dma_.sp_address + bytes) & 0xFFF);
+    dma_.dram_address = (dma_.dram_address + bytes) & kDramMask;
+    if (dma_.length & kCountMask) {
+        dma_.length -= 1U << 12;
+        dma_.dram_address = (dma_.dram_address + (dma_.length >> 20)) & kDramMask;
+        schedule_dma_row(scheduler, when);
+    } else {
+        dma_.length = (dma_.length & kSkipMask) | kLengthMask;
+        dma_.direction = DmaDirection::Idle;
+        start_dma(scheduler, when);
     }
 }
 

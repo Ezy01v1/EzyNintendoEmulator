@@ -2,37 +2,79 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 
 #include "n64/mi.hpp"
+#include "n64/rdp.hpp"
+#include "n64/rsp_vector.hpp"
+#include "n64/scheduler.hpp"
 
 namespace ezy::n64 {
 
-// What the CPU sees of the RSP and RDP before they are emulated (subprojects 2 and 3):
-// SP DMEM/IMEM (8 KB at 0x04000000), the SP registers (0x04040000, SP_PC at 0x04080000)
-// and the DP command registers (0x04100000). The RSP stays halted: a write that would
-// start it, or a DP command list, is logged once and otherwise ignored.
+// RSP scalar and vector cores, their two 4 KiB memory banks and the SP DMA interface.
 class RspRegs {
 public:
-    RspRegs();
-
     [[nodiscard]] std::uint8_t* mem() { return mem_.data(); }  // DMEM then IMEM
+    [[nodiscard]] std::span<const std::uint8_t, 0x1000> dmem() const { return std::span(mem_).first<0x1000>(); }
     [[nodiscard]] std::uint32_t read_sp(std::uint32_t offset);
-    void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi);
-    [[nodiscard]] std::uint32_t read_dp(std::uint32_t offset) const;
-    void write_dp(std::uint32_t offset, std::uint32_t value);
+    void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
+    void finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when);
+    void step(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when);
 
     template <class Ar>
-    void serialize(Ar& ar) {
-        ar(mem_), ar(sp_), ar(sp_status_), ar(semaphore_), ar(sp_pc_), ar(dp_);
+    void serialize(Ar& ar, std::uint32_t version, Rdp& rdp) {
+        ar(mem_);
+        std::array<std::uint32_t, 8> legacy_regs{};
+        if (version == 1) ar(legacy_regs);
+        ar(sp_status_), ar(semaphore_), ar(sp_pc_);
+        if (version < 4) rdp.load_legacy(ar);
+        if (version == 1) {
+            dma_ = {};
+            pending_ = {};
+            dma_.sp_address = pending_.sp_address = legacy_regs[0] & 0x1FF8;
+            dma_.dram_address = pending_.dram_address = legacy_regs[1] & 0xFFFFF8;
+            gpr_ = {};
+            next_pc_ = (sp_pc_ + 4) & kPcMask;
+            short_step_ = false;
+        } else {
+            ar(dma_), ar(pending_), ar(gpr_), ar(next_pc_), ar(short_step_);
+        }
+        if (version >= 3) vector_.serialize(ar);
+        else vector_ = {};
     }
 
 private:
+    static constexpr std::uint32_t kPcMask = 0xFFC;
+    static constexpr std::uint32_t kHalt = 1U << 0, kBroke = 1U << 1, kSingleStep = 1U << 5,
+                                   kInterruptOnBreak = 1U << 6;
+    enum class DmaDirection : std::uint8_t { Idle, ToSp, ToDram };
+    struct Dma {
+        std::uint32_t sp_address = 0;
+        std::uint32_t dram_address = 0;
+        std::uint32_t length = 0;
+        DmaDirection direction = DmaDirection::Idle;
+
+        template <class Ar>
+        void serialize(Ar& ar) { ar(sp_address), ar(dram_address), ar(length), ar(direction); }
+    };
+
+    void start_dma(Scheduler& scheduler, std::uint64_t when);
+    void schedule_dma_row(Scheduler& scheduler, std::uint64_t when) const;
+    void write_status(std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
+    [[nodiscard]] std::uint32_t load_dmem(std::uint32_t address, unsigned width) const;
+    void store_dmem(std::uint32_t address, unsigned width, std::uint32_t value);
+    void execute_scalar(std::uint32_t word, std::uint32_t pc, Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when);
+    void execute_special(std::uint32_t word, std::uint32_t pc, Mi& mi);
+
     std::array<std::uint8_t, 0x2000> mem_{};
-    std::array<std::uint32_t, 8> sp_{};  // MEM_ADDR, DRAM_ADDR, RD_LEN, WR_LEN (indices 0-3)
-    std::uint32_t sp_status_ = 1;        // halted
+    std::uint32_t sp_status_ = kHalt;
     std::uint32_t semaphore_ = 0;
     std::uint32_t sp_pc_ = 0;
-    std::array<std::uint32_t, 8> dp_{};
+    Dma dma_, pending_;
+    std::array<std::uint32_t, 32> gpr_{};
+    std::uint32_t next_pc_ = 4;  // a branch sets the PC after its delay slot
+    bool short_step_ = false;   // alternate 2 and 1 CPU cycles per RSP cycle
+    RspVector vector_;
 };
 
 }  // namespace ezy::n64
