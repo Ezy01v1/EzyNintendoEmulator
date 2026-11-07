@@ -67,8 +67,10 @@ Plan en 4 subproyectos (spec y plan en `docs/superpowers/`): 1 CPU+memoria+arran
         La división usa el recíproco cuantizado del RDP antes de aplicar el muestreo.
   - [x] Triángulos con sombreado Gouraud (`0x0C`) de un ciclo: color por vértice interpolado,
         con saturación de 9 bits, cuando el combinador elige shade como color.
-  - [ ] Profundidad (`0x0D`/`0x0F`, Z-buffer), sombreado combinado con texturas (`0x0E`) y
-        mezcla con el framebuffer. También shade modulado por el color primitivo.
+  - [x] Z-buffer en triángulos (`0x09/0x0B/0x0D/0x0F`) y profundidad primitiva: modo opaco,
+        Z de 18 bits comprimido a 14. Estados guardados versión 9.
+  - [ ] Z: rangos DZ, bits ocultos y modos transparente/interpenetrante/decal; Z en rectángulos.
+  - [ ] Sombreado combinado con texturas (`0x0E`), shade × primitivo y mezcla con el framebuffer.
 
 ## Roadmap
 
@@ -122,3 +124,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Pruebas unitarias N64 142/142 y n64-systemtest 2984/3721.
 - 2026-11-07 — Trabajo de RSP/RDP pasado a la rama `n64/rsp-rdp` (estaba sin commit en `main`).
   Triángulos Gouraud de un ciclo. Pruebas unitarias N64 143/143. Siguiente: Z-buffer.
+- 2026-11-07 — N64 subproyecto 3: Z-buffer opaco en triángulos. Pruebas unitarias N64 144/144,
+  n64-systemtest 2984/3721. Siguiente: mezcla con el framebuffer o shade con texturas.

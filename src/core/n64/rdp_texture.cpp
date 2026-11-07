@@ -209,10 +209,10 @@ std::array<unsigned, 3> Rdp::sample_texture_rgb(const Tile& tile, int s, int t) 
     return result;
 }
 
-std::optional<Rdp::TextureCombiner> Rdp::opaque_texture_combiner(const Tile& tile) const {
+std::optional<Rdp::TextureCombiner> Rdp::opaque_texture_combiner(const Tile& tile, bool depth) const {
     constexpr std::uint64_t texture_lod = 1ULL << 48;
     constexpr std::uint64_t texture_filter_path = 1ULL << 43;  // TEXEL0 uses sampling instead of color conversion.
-    if (!can_write_opaque() || ((solid_.modes >> 30) & 3) != 0 ||
+    if (!can_write_opaque(depth) || ((solid_.modes >> 30) & 3) != 0 ||
         (solid_.modes & texture_lod) || !(solid_.modes & texture_filter_path) ||
         ((solid_.modes >> 44) & 3) == 1) return std::nullopt;  // Mid-texel flag without quad sampling.
     const bool indexed = (solid_.modes & (1ULL << 47)) != 0;

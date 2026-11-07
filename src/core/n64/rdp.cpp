@@ -122,6 +122,28 @@ unsigned clamp_shade(std::int64_t start, const TextureGradient& gradient, int pi
     return (value & 0x80) ? 0 : 255;
 }
 
+// Z is 15.17 fixed point; the depth unit works on 18 bits and saturates outside them.
+std::uint32_t clamp_depth(std::int64_t z) {
+    const auto value = static_cast<std::uint32_t>(z >> 10) & 0x3FFFFF;
+    if (value & 0x200000) return 0;
+    return std::min(value, 0x3FFFFU);
+}
+
+// 18-bit Z is stored as a 3-bit count of leading ones and an 11-bit mantissa.
+unsigned compress_depth(std::uint32_t z) {
+    unsigned exponent = 0;
+    while (exponent < 7 && (z & (0x20000U >> exponent))) ++exponent;
+    const unsigned shift = exponent < 7 ? 6 - exponent : 0;
+    return (exponent << 11) | ((z >> shift) & 0x7FF);
+}
+
+std::uint32_t decompress_depth(unsigned stored) {
+    const unsigned exponent = (stored >> 11) & 7, mantissa = stored & 0x7FF;
+    const std::uint32_t ones = (0x3FFFFU << (18 - exponent)) & 0x3FFFF;
+    const unsigned shift = exponent < 7 ? 6 - exponent : 0;
+    return ones | (mantissa << shift);
+}
+
 unsigned dither_channel(unsigned channel, unsigned threshold) {
     if ((channel & 7) <= threshold) return channel;
     return std::min(255U, (channel & ~7U) + 8);
@@ -131,9 +153,8 @@ unsigned dither_channel(unsigned channel, unsigned threshold) {
 
 unsigned Rdp::buffered_draw_words(unsigned op) {
     switch (op) {
-        case 0x08: return 4;
-        case 0x0A: return 12;
-        case 0x0C: return 12;
+        case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0F:
+            return command_words(op);
         case 0x24: return 2;
         default: return 0;
     }
@@ -247,6 +268,8 @@ void Rdp::execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
             mi.raise(MiInterrupt::Dp);
             break;
         case 0x2D: scissor_ = word; break;  // Set Scissor
+        case 0x2E: prim_depth_ = static_cast<std::uint32_t>(word); break;  // Set Prim Depth
+        case 0x3E: mask_address_ = static_cast<std::uint32_t>(word) & 0x3FFFFFF; break;  // Set Mask Image
         case 0x2F:  // Set Other Modes
             cycle_type_ = static_cast<std::uint32_t>(word >> 52) & 3;
             solid_.modes = word;
@@ -292,12 +315,17 @@ void Rdp::fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) cons
 
 void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     const std::uint64_t header = draw_command_[0];
-    const bool textured = opcode(header) == 0x0A, shaded = opcode(header) == 0x0C;
+    const unsigned op = opcode(header);
+    const bool textured = (op & 2) != 0, shaded = (op & 4) != 0;
+    // Primitive depth also lets triangles without Z coefficients use the depth buffer.
+    const bool depth = (op & 1) != 0 || (solid_.modes & (1U << 2));
     const auto& tile = texture_.tiles[(header >> 48) & 7];
-    const auto combiner = textured ? opaque_texture_combiner(tile) : std::nullopt;
+    const auto combiner = textured ? opaque_texture_combiner(tile, depth) : std::nullopt;
     const bool fill = !textured && can_fill();
-    const auto color = textured ? std::nullopt : opaque_color();
-    const bool shade_color = shaded && !fill && !color && uses_shade_color();
+    const auto color = textured ? std::nullopt : opaque_color(depth);
+    const bool shade_color = shaded && !textured && !fill && !color && uses_shade_color(depth);
+    // Coefficient blocks follow the edges in shade, texture, depth order.
+    const unsigned texture_at = shaded ? 12 : 4, depth_at = texture_at + (textured ? 8 : 0);
     if (!fill && !color && !combiner && !shade_color) return;
 
     const auto yh = sign_extend(static_cast<std::uint32_t>(header), 14);
@@ -318,10 +346,11 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     if (combiner) {
         // STW integer and fractional halves are stored in separate words.
         const auto gradient = [&](unsigned shift) -> TextureGradient {
-            return {texture_coefficient(draw_command_[4], draw_command_[6], shift),
-                    texture_coefficient(draw_command_[5], draw_command_[7], shift),
-                    texture_coefficient(draw_command_[8], draw_command_[10], shift),
-                    texture_coefficient(draw_command_[9], draw_command_[11], shift)};
+            const unsigned i = texture_at;
+            return {texture_coefficient(draw_command_[i], draw_command_[i + 2], shift),
+                    texture_coefficient(draw_command_[i + 1], draw_command_[i + 3], shift),
+                    texture_coefficient(draw_command_[i + 4], draw_command_[i + 6], shift),
+                    texture_coefficient(draw_command_[i + 5], draw_command_[i + 7], shift)};
         };
         s = gradient(48);
         t = gradient(32);
@@ -337,6 +366,14 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                         texture_coefficient(draw_command_[8], draw_command_[10], at),
                         texture_coefficient(draw_command_[9], draw_command_[11], at)};
         }
+    }
+    TextureGradient z;
+    const bool use_depth = !fill && (solid_.modes & ((1U << 4) | (1U << 5)));
+    if (use_depth && (op & 1)) {
+        const auto word = [this](unsigned i, unsigned shift) {
+            return static_cast<std::int32_t>(draw_command_[i] >> shift);
+        };
+        z = {word(depth_at, 32), word(depth_at, 0), word(depth_at + 1, 32), word(depth_at + 1, 0)};
     }
     const bool late = (major.step < 0) == major_left;
     for (int y = top >> 2; 4 * y < bottom; ++y) {
@@ -369,7 +406,8 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         int texture_x = 0;
         std::int64_t start_s = 0, start_t = 0, start_w = 0;
         std::array<std::int64_t, 3> start_shade{};
-        if (combiner || shade_color) {
+        std::int64_t start_z = 0;
+        if (combiner || shade_color || use_depth) {
             const int edge_x = major.fixed_x(4 * y + (late ? 3 : 0));
             const int x_fraction = (edge_x >> 8) & 255;
             const int lines = y - (yh >> 2);
@@ -378,6 +416,7 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
             start_t = t.scanline_start(lines, x_fraction, late);
             if (perspective) start_w = w.scanline_start(lines, x_fraction, late);
             for (unsigned i = 0; i < shade.size(); ++i) start_shade[i] = shade[i].scanline_start(lines, x_fraction, late);
+            start_z = z.scanline_start(lines, x_fraction, late);
         }
         for (int x = left >> 3; x <= (right >> 3); ++x) {
             if (!antialias && !samples[0].covers(x * 8)) continue;
@@ -386,6 +425,12 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                 const int sample = x * 8 + static_cast<int>(row & 1) * 2;
                 coverage += samples[row].covers(sample);
                 coverage += samples[row].covers(sample + 4);
+            }
+            if (coverage != 0 && use_depth) {
+                const std::uint32_t pixel_z = (solid_.modes & (1U << 2))
+                    ? ((prim_depth_ >> 16) & 0x7FFF) << 3
+                    : clamp_depth(start_z + std::int64_t{z.dx} * (x - texture_x));
+                if (!depth_test(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, rdram)) continue;
             }
             if (coverage != 0) {
                 std::uint32_t pixel;
@@ -428,15 +473,18 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
     }
 }
 
-bool Rdp::can_write_opaque() const {
+bool Rdp::can_write_opaque(bool depth) const {
     constexpr std::uint64_t unsupported = (1ULL << 40) |  // chroma key
-        (1U << 14) | (1U << 12) | (1U << 6) | (1U << 5) | (1U << 4) | 1U;
+        (1U << 14) | (1U << 12) | (1U << 6) | 1U;
+    // Only opaque Z mode (0) is modeled, and only for primitives that carry a depth.
+    const bool depth_modes = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
+    if (depth_modes && (!depth || ((solid_.modes >> 10) & 3) != 0)) return false;
     return cycle_type_ == 0 && color_width_ != 0 && solid_.format == 0 && (pixel_size_ == 2 || pixel_size_ == 3) &&
            !(solid_.modes & unsupported) && ((solid_.modes >> 38) & 3) != 2;
 }
 
-std::optional<std::uint32_t> Rdp::opaque_color() const {
-    if (!can_write_opaque()) return std::nullopt;
+std::optional<std::uint32_t> Rdp::opaque_color(bool depth) const {
+    if (!can_write_opaque(depth)) return std::nullopt;
 
     // With image reads off, incoming coverage always overflows memory coverage (7).
     // With force blend off, the blender therefore passes its primary RGB input through.
@@ -459,10 +507,27 @@ std::optional<std::uint32_t> Rdp::opaque_color() const {
     }
 }
 
-bool Rdp::uses_shade_color() const {
+bool Rdp::uses_shade_color(bool depth) const {
     // Same opaque path as opaque_color, with the combiner's constant D input set to shade.
-    return can_write_opaque() && ((solid_.modes >> 30) & 3) == 0 && ((solid_.combine >> 32) & 31) >= 16 &&
+    return can_write_opaque(depth) && ((solid_.modes >> 30) & 3) == 0 && ((solid_.combine >> 32) & 31) >= 16 &&
            ((solid_.combine >> 6) & 7) == 4;
+}
+
+bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const {
+    const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
+    if (address + 2 > rdram.size()) return false;
+    // Opaque mode without DZ: a pixel passes when nearer than the stored depth.
+    // TODO: DZ ranges, the hidden Z bits and the transparent/interpenetrating/decal modes.
+    if (solid_.modes & (1U << 4)) {
+        const unsigned stored = (unsigned{rdram[address]} << 8) | rdram[address + 1];
+        if (z >= decompress_depth(stored >> 2)) return false;
+    }
+    if (solid_.modes & (1U << 5)) {
+        const unsigned packed = compress_depth(z) << 2;
+        rdram[address] = static_cast<std::uint8_t>(packed >> 8);
+        rdram[address + 1] = static_cast<std::uint8_t>(packed);
+    }
+    return true;
 }
 
 void Rdp::write_opaque_pixel(unsigned x, unsigned y, std::uint32_t color, unsigned coverage,

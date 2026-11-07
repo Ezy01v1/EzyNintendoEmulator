@@ -549,6 +549,58 @@ TEST_CASE("RDP one-cycle shaded triangle interpolates and clamps per-vertex colo
     }
 }
 
+TEST_CASE("RDP depth triangles hide farther pixels and store compressed Z") {
+    const auto n64 = N64::create(counting_rom("RDP ZBUFFER"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);  // farthest depth
+    // Z-buffered triangle (0x09) covering x = left..4 on rows 0 and 1, at a constant depth.
+    // Z has 10 fractional bits below the 18 the depth unit uses.
+    const auto triangle = [](unsigned left, std::uint32_t z) {
+        return std::array{
+            rdp_triangle_header(true, 0, 0, 8) | (0x01ULL << 56),
+            rdp_edge(4 * pixel, 0),
+            rdp_edge(static_cast<std::int32_t>(left) * pixel, 0),
+            rdp_edge(0, 0),
+            std::uint64_t{z} << 32,  // Z and DzDx
+            std::uint64_t{0},        // DzDe and DzDy
+        };
+    };
+    std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,   // RGBA8888, stride 4
+        0x3E00000000006000ULL,   // depth buffer
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        0x2F0000C000000230ULL,   // one cycle, dither off, coverage zap, Z compare and update
+        0x3C00001F000000C0ULL,   // combiner cycle 1: RGB = primitive
+        0x3A000000FF0000FFULL,
+    };
+    const auto add = [&](unsigned left, std::uint32_t z, std::uint32_t color) {
+        commands.push_back(0x3A00000000000000ULL | color);
+        for (const auto word : triangle(left, z)) commands.push_back(word);
+    };
+    add(0, 0x4000U << 10, 0xFF0000FF);  // red, middle depth
+    add(2, 0x8000U << 10, 0x00FF00FF);  // green, behind red
+    add(3, 0x2000U << 10, 0x0000FFFF);  // blue, in front of red
+    commands.push_back(kSyncFull);
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 40; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    for (unsigned y = 0; y < 2; ++y) {
+        for (unsigned x = 0; x < 4; ++x) {
+            CAPTURE(x);
+            CAPTURE(y);
+            CHECK(bus.read32(0x4000 + 16 * y + 4 * x) == (x == 3 ? 0x0000FFE0U : 0xFF0000E0U));
+            // 0x4000 compresses to exponent 0, mantissa 0x100; 0x2000 to mantissa 0x080.
+            CHECK(bus.read16(0x6000 + 8 * y + 2 * x) == (x == 3 ? 0x0200 : 0x0400));
+        }
+    }
+    CHECK(bus.read32(0x6010) == 0xFFFCFFFC);  // row 2 untouched
+}
+
 TEST_CASE("RDP one-cycle primitive color writes the coverage of fractional edges into RGBA8888") {
     const auto n64 = N64::create(counting_rom("RDP SOLID COVERAGE"));
     REQUIRE(n64);

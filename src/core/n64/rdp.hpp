@@ -25,7 +25,7 @@ public:
         ar(color_address_), ar(color_width_), ar(pixel_size_), ar(fill_color_), ar(cycle_type_), ar(scissor_);
         if (version >= 5) {
             ar(draw_words_);
-            const std::size_t saved_words = version >= 8 ? draw_command_.size() : 4;
+            const std::size_t saved_words = version >= 9 ? draw_command_.size() : version >= 8 ? 12 : 4;
             if constexpr (Ar::kLoading) draw_command_ = {};
             for (std::size_t i = 0; i < saved_words; ++i) ar(draw_command_[i]);
             if constexpr (Ar::kLoading) {
@@ -43,6 +43,8 @@ public:
         else solid_ = {};
         if (version >= 7) texture_.serialize(ar);
         else texture_ = {};
+        if (version >= 9) ar(mask_address_), ar(prim_depth_);
+        else mask_address_ = prim_depth_ = 0;
     }
 
     template <class Ar>
@@ -66,9 +68,10 @@ private:
     void draw_triangle(std::span<std::uint8_t> rdram) const;
     void fill_span(unsigned y, unsigned left, unsigned right, std::span<std::uint8_t> rdram) const;
     [[nodiscard]] bool field_matches(unsigned y) const;
-    [[nodiscard]] bool can_write_opaque() const;
-    [[nodiscard]] std::optional<std::uint32_t> opaque_color() const;
-    [[nodiscard]] bool uses_shade_color() const;
+    [[nodiscard]] bool can_write_opaque(bool depth = false) const;
+    [[nodiscard]] std::optional<std::uint32_t> opaque_color(bool depth = false) const;
+    [[nodiscard]] bool uses_shade_color(bool depth) const;
+    [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const;
     void write_opaque_pixel(unsigned x, unsigned y, std::uint32_t color, unsigned coverage,
                             std::span<std::uint8_t> rdram) const;
     void load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram);
@@ -84,7 +87,7 @@ private:
     };
 
     enum class TextureCombiner { Direct, Modulate };
-    [[nodiscard]] std::optional<TextureCombiner> opaque_texture_combiner(const Tile& tile) const;
+    [[nodiscard]] std::optional<TextureCombiner> opaque_texture_combiner(const Tile& tile, bool depth = false) const;
     [[nodiscard]] std::uint32_t textured_color(const Tile& tile, int s, int t, TextureCombiner combiner) const;
     [[nodiscard]] std::uint16_t read_texel(const Tile& tile, unsigned s, unsigned t, unsigned bank) const;
     [[nodiscard]] std::array<unsigned, 3> sample_texture_rgb(const Tile& tile, int s, int t) const;
@@ -118,7 +121,8 @@ private:
     // Two 10.2 fixed-point coordinate pairs and the field selection bits.
     std::uint64_t scissor_ = 0;
     std::uint32_t draw_words_ = 0;
-    std::array<std::uint64_t, 12> draw_command_{};
+    std::array<std::uint64_t, 22> draw_command_{};  // up to edges, shade, texture and depth
+    std::uint32_t mask_address_ = 0, prim_depth_ = 0;  // Set Mask Image and Set Prim Depth
     SolidState solid_;
     TextureState texture_;
 };
