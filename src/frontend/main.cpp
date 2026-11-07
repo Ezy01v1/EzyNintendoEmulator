@@ -21,6 +21,7 @@
 #include "debugger.hpp"
 #include "gameboy_system.hpp"
 #include "gba_system.hpp"
+#include "n64_system.hpp"
 #include "system.hpp"
 
 namespace {
@@ -82,6 +83,9 @@ std::unique_ptr<System> create_system(const char* path, std::span<const std::uin
     if (ext == ".gba") {
         return ezy::frontend::GbaSystem::create(rom, {}, std::filesystem::path(path).replace_extension(".sav"));
     }
+    if (ext == ".z64" || ext == ".v64" || ext == ".n64") {
+        return ezy::frontend::N64System::create(rom, std::filesystem::path(path));
+    }
     if (ext == ".gb" || ext == ".gbc") {
         return ezy::frontend::GameBoySystem::create(rom, std::filesystem::path(path).replace_extension(".sav"),
                                                     std::move(gb_settings));
@@ -105,7 +109,7 @@ bool handle_shortcut(SDL_Scancode scancode, RunState& run) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba> [Game Boy options]\n"
+        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba | rom.z64/.v64/.n64> [Game Boy options]\n"
                      "  --model auto|dmg|cgb    hardware to emulate (auto = Game Boy Color)\n"
                      "  --boot-rom <file>       run a real CGB boot ROM dump (2304 bytes)\n"
                      "  --no-color-correction   show raw CGB colours\n";
