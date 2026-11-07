@@ -356,7 +356,7 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         t = gradient(32);
         if (perspective) w = gradient(16);
     }
-    std::array<TextureGradient, 3> shade{};
+    std::array<TextureGradient, 4> shade{};
     if (shade_color) {
         // RGBA coefficients share the STW layout: integers and fractions in separate words.
         for (unsigned i = 0; i < shade.size(); ++i) {
@@ -405,7 +405,7 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         const bool antialias = (solid_.modes & (1U << 3)) != 0;
         int texture_x = 0;
         std::int64_t start_s = 0, start_t = 0, start_w = 0;
-        std::array<std::int64_t, 3> start_shade{};
+        std::array<std::int64_t, 4> start_shade{};
         std::int64_t start_z = 0;
         if (combiner || shade_color || use_depth) {
             const int edge_x = major.fixed_x(4 * y + (late ? 3 : 0));
@@ -434,6 +434,7 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
             }
             if (coverage != 0) {
                 std::uint32_t pixel;
+                unsigned shade_alpha = 255;
                 if (combiner) {
                     const int dx = x - texture_x;
                     const int sample_s = s.sample(start_s, dx), sample_t = t.sample(start_t, dx);
@@ -445,10 +446,12 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                     pixel = (clamp_shade(start_shade[0], shade[0], dx) << 24) |
                             (clamp_shade(start_shade[1], shade[1], dx) << 16) |
                             (clamp_shade(start_shade[2], shade[2], dx) << 8);
+                    shade_alpha = clamp_shade(start_shade[3], shade[3], dx);
                 } else {
                     pixel = *color;
                 }
-                write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel, coverage, rdram);
+                write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel, coverage, rdram,
+                                   shade_alpha);
             }
         }
     }
@@ -475,7 +478,7 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
 
 bool Rdp::can_write_opaque(bool depth) const {
     constexpr std::uint64_t unsupported = (1ULL << 40) |  // chroma key
-        (1U << 14) | (1U << 12) | (1U << 6) | 1U;
+        (1U << 12) | 1U;  // coverage times alpha and alpha compare
     // Only opaque Z mode (0) is modeled, and only for primitives that carry a depth.
     const bool depth_modes = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
     if (depth_modes && (!depth || ((solid_.modes >> 10) & 3) != 0)) return false;
@@ -530,14 +533,86 @@ bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uin
     return true;
 }
 
+unsigned Rdp::combined_alpha(unsigned shade_alpha) const {
+    // Cycle 1's alpha combiner with a zero multiplier reduces to its constant D input.
+    // TODO: (A - B) * C alpha terms and texel alpha.
+    if (((solid_.combine >> 18) & 7) != 7) return 255;
+    switch (solid_.combine & 7) {
+        case 3: return solid_.primitive & 255;
+        case 4: return shade_alpha;
+        case 5: return solid_.environment & 255;
+        case 7: return 0;
+        default: return 255;
+    }
+}
+
 void Rdp::write_opaque_pixel(unsigned x, unsigned y, std::uint32_t color, unsigned coverage,
-                             std::span<std::uint8_t> rdram) const {
+                             std::span<std::uint8_t> rdram, unsigned shade_alpha) const {
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t address = (color_address_ & ~(bytes - 1)) +
         (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
     if (address + bytes > rdram.size()) return;
 
     unsigned r = color >> 24, g = (color >> 16) & 255, b = (color >> 8) & 255;
+
+    // Memory color and coverage. Without image reads, memory coverage reads as full (7).
+    // RGBA5551 keeps only the top coverage bit; the two hidden low bits are taken as set.
+    std::array<unsigned, 3> memory{};
+    unsigned memory_coverage = 7;
+    if (solid_.modes & (1U << 6)) {
+        if (bytes == 2) {
+            const unsigned value = (unsigned{rdram[address]} << 8) | rdram[address + 1];
+            memory = {((value >> 11) & 31) << 3, ((value >> 6) & 31) << 3, ((value >> 1) & 31) << 3};
+            memory_coverage = ((value & 1) << 2) | 3;
+        } else {
+            memory = {rdram[address], rdram[address + 1], rdram[address + 2]};
+            memory_coverage = rdram[address + 3] >> 5;
+        }
+    }
+
+    // One cycle uses cycle 0's blender: (P * A + M * B) / (A + B). Without force blend,
+    // only pixels whose coverage does not overflow memory coverage (edges) are blended.
+    const bool overflow = coverage + memory_coverage >= 8;
+    const bool force_blend = (solid_.modes & (1U << 14)) != 0;
+    if (force_blend || !overflow) {
+        const unsigned alpha = [&] {
+            switch ((solid_.modes >> 26) & 3) {
+                case 0: return combined_alpha(shade_alpha);
+                case 1: return solid_.fog & 255;
+                case 2: return shade_alpha;
+                default: return 0U;
+            }
+        }();
+        const auto constant = [](std::uint32_t rgba) {
+            return std::array<unsigned, 3>{rgba >> 24, (rgba >> 16) & 255, (rgba >> 8) & 255};
+        };
+        const std::array<unsigned, 3> pixel{r, g, b};
+        const std::array<unsigned, 3> second = [&] {
+            switch ((solid_.modes >> 22) & 3) {
+                case 1: return memory;
+                case 2: return constant(solid_.blend);
+                case 3: return constant(solid_.fog);
+                default: return pixel;
+            }
+        }();
+        // Both factors keep five bits; 1 - A is the complement, so the weights sum to 32.
+        const unsigned a = alpha >> 3;
+        const unsigned m = [&] {
+            switch ((solid_.modes >> 18) & 3) {
+                case 0: return 32 - a;
+                case 1: return memory_coverage << 2;
+                case 2: return 31U;
+                default: return 0U;
+            }
+        }();
+        std::array<unsigned, 3> out{};
+        for (unsigned i = 0; i < 3; ++i) {
+            const unsigned sum = pixel[i] * a + second[i] * m;
+            if (force_blend) out[i] = std::min(255U, sum >> 5);
+            else out[i] = (a + m) != 0 ? std::min(255U, sum / (a + m)) : pixel[i];
+        }
+        r = out[0], g = out[1], b = out[2];
+    }
     const unsigned dither = static_cast<unsigned>(solid_.modes >> 38) & 3;
     if (dither < 2) {
         static constexpr std::array magic{0U, 6U, 1U, 7U, 4U, 2U, 5U, 3U, 3U, 5U, 2U, 4U, 7U, 1U, 6U, 0U};
@@ -550,9 +625,17 @@ void Rdp::write_opaque_pixel(unsigned x, unsigned y, std::uint32_t color, unsign
         b = dither_channel(b, threshold);
     }
 
-    // With memory coverage fixed at 7, clamp and wrap both store coverage - 1;
-    // zap and save both store 7. The low hidden bits of 16-bit coverage aren't read here.
-    const unsigned stored = (solid_.modes & (1U << 9)) ? 7 : coverage - 1;
+    // Coverage destination: clamp, wrap, zap or save. An overflowing pixel that replaces
+    // memory keeps its own coverage, stored as count - 1.
+    const unsigned sum = coverage + memory_coverage;
+    const unsigned stored = [&] {
+        switch ((solid_.modes >> 8) & 3) {
+            case 0: return overflow ? (force_blend ? 7U : coverage - 1) : sum;
+            case 1: return sum & 7;
+            case 2: return 7U;
+            default: return memory_coverage;
+        }
+    }();
     if (bytes == 2) {
         const unsigned packed = ((r & 0xF8) << 8) | ((g & 0xF8) << 3) | ((b & 0xF8) >> 2) | (stored >> 2);
         rdram[address] = static_cast<std::uint8_t>(packed >> 8);

@@ -70,7 +70,11 @@ Plan en 4 subproyectos (spec y plan en `docs/superpowers/`): 1 CPU+memoria+arran
   - [x] Z-buffer en triángulos (`0x09/0x0B/0x0D/0x0F`) y profundidad primitiva: modo opaco,
         Z de 18 bits comprimido a 14. Estados guardados versión 9.
   - [ ] Z: rangos DZ, bits ocultos y modos transparente/interpenetrante/decal; Z en rectángulos.
-  - [ ] Sombreado combinado con texturas (`0x0E`), shade × primitivo y mezcla con el framebuffer.
+  - [x] Blender de un ciclo: lectura de memoria (`image_read`), `force_blend`, mezcla en bordes
+        sin desbordar cobertura, P/A/M/B completos y destinos de cobertura clamp/wrap/zap/save.
+  - [ ] Blender: alfa del combinador con términos (A−B)·C y alfa de texel, `cvg_x_alpha`,
+        `alpha_compare`, modo de dos ciclos. Los bits ocultos de cobertura en RGBA5551 se asumen en 1.
+  - [ ] Sombreado combinado con texturas (`0x0E`) y shade × primitivo.
 
 ## Roadmap
 
@@ -126,3 +130,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Triángulos Gouraud de un ciclo. Pruebas unitarias N64 143/143. Siguiente: Z-buffer.
 - 2026-11-07 — N64 subproyecto 3: Z-buffer opaco en triángulos. Pruebas unitarias N64 144/144,
   n64-systemtest 2984/3721. Siguiente: mezcla con el framebuffer o shade con texturas.
+- 2026-11-07 — N64 subproyecto 3: blender de un ciclo con lectura del framebuffer. Pruebas
+  unitarias N64 145/145, n64-systemtest 2984/3721. Siguiente: shade con texturas.

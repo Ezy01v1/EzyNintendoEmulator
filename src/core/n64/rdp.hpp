@@ -72,8 +72,9 @@ private:
     [[nodiscard]] std::optional<std::uint32_t> opaque_color(bool depth = false) const;
     [[nodiscard]] bool uses_shade_color(bool depth) const;
     [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const;
+    [[nodiscard]] unsigned combined_alpha(unsigned shade_alpha) const;
     void write_opaque_pixel(unsigned x, unsigned y, std::uint32_t color, unsigned coverage,
-                            std::span<std::uint8_t> rdram) const;
+                            std::span<std::uint8_t> rdram, unsigned shade_alpha = 255) const;
     void load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram);
     void load_palette(std::uint64_t word, std::span<const std::uint8_t> rdram);
     void draw_textured_rectangle(std::span<std::uint8_t> rdram) const;

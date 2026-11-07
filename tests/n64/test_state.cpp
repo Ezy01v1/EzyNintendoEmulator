@@ -549,6 +549,44 @@ TEST_CASE("RDP one-cycle shaded triangle interpolates and clamps per-vertex colo
     }
 }
 
+TEST_CASE("RDP force blend mixes a translucent primitive with framebuffer memory") {
+    const auto n64 = N64::create(counting_rom("RDP BLEND"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    for (std::uint32_t at = 0x4000; at < 0x4010; at += 4) bus.write32(at, 0x0000FFE0);  // blue, full coverage
+    bus.write16(0x5000, 0x003F);  // RGBA5551 blue, alpha bit set
+    const auto run = [&](std::uint64_t color_image) {
+        constexpr std::uint64_t modes = 0x2F0000C000404240ULL;  // P*A + memory*(1-A), image read, force blend
+        const std::array commands{
+            color_image,
+            rdp_rectangle(0x2D, 0, 0, 4, 4),
+            modes,
+            std::uint64_t{0x3C00001F001C00C3ULL},  // cycle 1: RGB = primitive, alpha = primitive
+            std::uint64_t{0x3A000000FF000080ULL},  // half-transparent red
+            rdp_triangle_header(true, 0, 0, 4),   // row 0
+            rdp_edge(4 * pixel, 0),
+            rdp_edge(0, 0),
+            rdp_edge(0, 0),
+            kSyncFull,
+        };
+        std::uint32_t end = 0x1000;
+        for (const auto command : commands) bus.write64(end, command), end += 8;
+        bus.write32(kDpcStart, 0x1000);
+        bus.write32(kDpcEnd, end);
+        for (unsigned i = 0; i < 20; ++i) n64->step();
+        CHECK(bus.read32(kDpcCurrent) == end);
+    };
+    run(0x3F18000300004000ULL);  // RGBA8888, stride 4
+    // A = 0x80 >> 3 = 16 and 1 - A = (0x7F >> 3) + 1 = 16, so each input gets half weight.
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read32(0x4000 + 4 * x) == 0x7F007FE0U);
+    }
+    run(0x3F10000000005000ULL);  // RGBA5551, stride 1
+    CHECK(bus.read16(0x5000) == ((0x0FU << 11) | (0x0FU << 1) | 1U));
+}
+
 TEST_CASE("RDP depth triangles hide farther pixels and store compressed Z") {
     const auto n64 = N64::create(counting_rom("RDP ZBUFFER"));
     REQUIRE(n64);
