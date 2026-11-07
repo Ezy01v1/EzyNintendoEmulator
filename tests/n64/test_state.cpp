@@ -501,6 +501,54 @@ TEST_CASE("RDP one-cycle triangle uses the blender color and the half-open edge 
     }
 }
 
+TEST_CASE("RDP one-cycle shaded triangle interpolates and clamps per-vertex color") {
+    const auto n64 = N64::create(counting_rom("RDP SHADE"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    const auto rgba = [](int r, int g, int b, int a) {
+        return (std::uint64_t{static_cast<std::uint16_t>(r)} << 48) |
+               (std::uint64_t{static_cast<std::uint16_t>(g)} << 32) |
+               (std::uint64_t{static_cast<std::uint16_t>(b)} << 16) | static_cast<std::uint16_t>(a);
+    };
+    constexpr std::array commands{
+        std::uint64_t{0x3F18000300004000ULL},   // RGBA8888, stride 4
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        std::uint64_t{0x2F0000C000000200ULL},   // one cycle, RGB dither off, coverage zap
+        std::uint64_t{0x3C00001F00000100ULL},   // combiner cycle 1: RGB = shade
+        rdp_triangle_header(true, 0, 0, 12) | (0x0CULL << 56) ^ (0x08ULL << 56),  // y = 0..3
+        rdp_edge(4 * pixel, 0),
+        rdp_edge(0, 0),
+        rdp_edge(0, 0),
+    };
+    const std::array shade{
+        rgba(0, 255, 0, 255),    // start color
+        rgba(96, 0, 0, 0),       // per pixel: R += 96
+        rgba(0, 0, 0, 0),
+        rgba(0, 0, 0, 0),
+        rgba(0, 0, 120, 0),      // per scanline: B += 120
+        rgba(0, 0, 0, 0),
+        rgba(0, 0, 0, 0),
+        rgba(0, 0, 0, 0),
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    for (const auto word : shade) bus.write64(end, word), end += 8;
+    bus.write64(end, kSyncFull), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 30; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    for (unsigned y = 0; y < 3; ++y) {
+        for (unsigned x = 0; x < 4; ++x) {
+            CAPTURE(x);
+            CAPTURE(y);
+            const unsigned r = std::min(96U * x, 255U), b = std::min(120U * y, 255U);
+            CHECK(bus.read32(0x4000 + 4 * (4 * y + x)) == ((r << 24) | (0xFFU << 16) | (b << 8) | 0xE0U));
+        }
+    }
+}
+
 TEST_CASE("RDP one-cycle primitive color writes the coverage of fractional edges into RGBA8888") {
     const auto n64 = N64::create(counting_rom("RDP SOLID COVERAGE"));
     REQUIRE(n64);

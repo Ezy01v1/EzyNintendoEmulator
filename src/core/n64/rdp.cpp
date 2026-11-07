@@ -115,6 +115,13 @@ struct SampleSpan {
     [[nodiscard]] bool covers(int x) const { return left <= x && x < right; }
 };
 
+// Shade accumulators are 9 bits after the integer part; overflow saturates and underflow is zero.
+unsigned clamp_shade(std::int64_t start, const TextureGradient& gradient, int pixels) {
+    const auto value = static_cast<unsigned>(gradient.sample(start, pixels)) & 0x1FF;
+    if (!(value & 0x100)) return value;
+    return (value & 0x80) ? 0 : 255;
+}
+
 unsigned dither_channel(unsigned channel, unsigned threshold) {
     if ((channel & 7) <= threshold) return channel;
     return std::min(255U, (channel & ~7U) + 8);
@@ -126,6 +133,7 @@ unsigned Rdp::buffered_draw_words(unsigned op) {
     switch (op) {
         case 0x08: return 4;
         case 0x0A: return 12;
+        case 0x0C: return 12;
         case 0x24: return 2;
         default: return 0;
     }
@@ -284,12 +292,13 @@ void Rdp::fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) cons
 
 void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     const std::uint64_t header = draw_command_[0];
-    const bool textured = opcode(header) == 0x0A;
+    const bool textured = opcode(header) == 0x0A, shaded = opcode(header) == 0x0C;
     const auto& tile = texture_.tiles[(header >> 48) & 7];
     const auto combiner = textured ? opaque_texture_combiner(tile) : std::nullopt;
     const bool fill = !textured && can_fill();
     const auto color = textured ? std::nullopt : opaque_color();
-    if (!fill && !color && !combiner) return;
+    const bool shade_color = shaded && !fill && !color && uses_shade_color();
+    if (!fill && !color && !combiner && !shade_color) return;
 
     const auto yh = sign_extend(static_cast<std::uint32_t>(header), 14);
     const auto ym = sign_extend(static_cast<std::uint32_t>(header >> 16), 14);
@@ -317,6 +326,17 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         s = gradient(48);
         t = gradient(32);
         if (perspective) w = gradient(16);
+    }
+    std::array<TextureGradient, 3> shade{};
+    if (shade_color) {
+        // RGBA coefficients share the STW layout: integers and fractions in separate words.
+        for (unsigned i = 0; i < shade.size(); ++i) {
+            const unsigned at = 48 - 16 * i;
+            shade[i] = {texture_coefficient(draw_command_[4], draw_command_[6], at),
+                        texture_coefficient(draw_command_[5], draw_command_[7], at),
+                        texture_coefficient(draw_command_[8], draw_command_[10], at),
+                        texture_coefficient(draw_command_[9], draw_command_[11], at)};
+        }
     }
     const bool late = (major.step < 0) == major_left;
     for (int y = top >> 2; 4 * y < bottom; ++y) {
@@ -348,7 +368,8 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         const bool antialias = (solid_.modes & (1U << 3)) != 0;
         int texture_x = 0;
         std::int64_t start_s = 0, start_t = 0, start_w = 0;
-        if (combiner) {
+        std::array<std::int64_t, 3> start_shade{};
+        if (combiner || shade_color) {
             const int edge_x = major.fixed_x(4 * y + (late ? 3 : 0));
             const int x_fraction = (edge_x >> 8) & 255;
             const int lines = y - (yh >> 2);
@@ -356,6 +377,7 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
             start_s = s.scanline_start(lines, x_fraction, late);
             start_t = t.scanline_start(lines, x_fraction, late);
             if (perspective) start_w = w.scanline_start(lines, x_fraction, late);
+            for (unsigned i = 0; i < shade.size(); ++i) start_shade[i] = shade[i].scanline_start(lines, x_fraction, late);
         }
         for (int x = left >> 3; x <= (right >> 3); ++x) {
             if (!antialias && !samples[0].covers(x * 8)) continue;
@@ -373,6 +395,11 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                     const auto [u, v] = perspective ? project_texture_coordinates(sample_s, sample_t, w.sample(start_w, dx))
                                                     : std::array{sample_s, sample_t};
                     pixel = textured_color(tile, u, v, *combiner);
+                } else if (shade_color) {
+                    const int dx = x - texture_x;
+                    pixel = (clamp_shade(start_shade[0], shade[0], dx) << 24) |
+                            (clamp_shade(start_shade[1], shade[1], dx) << 16) |
+                            (clamp_shade(start_shade[2], shade[2], dx) << 8);
                 } else {
                     pixel = *color;
                 }
@@ -430,6 +457,12 @@ std::optional<std::uint32_t> Rdp::opaque_color() const {
         case 7: return 0;
         default: return std::nullopt;
     }
+}
+
+bool Rdp::uses_shade_color() const {
+    // Same opaque path as opaque_color, with the combiner's constant D input set to shade.
+    return can_write_opaque() && ((solid_.modes >> 30) & 3) == 0 && ((solid_.combine >> 32) & 31) >= 16 &&
+           ((solid_.combine >> 6) & 7) == 4;
 }
 
 void Rdp::write_opaque_pixel(unsigned x, unsigned y, std::uint32_t color, unsigned coverage,

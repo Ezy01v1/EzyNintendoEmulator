@@ -65,8 +65,10 @@ Plan en 4 subproyectos (spec y plan en `docs/superpowers/`): 1 CPU+memoria+arran
         puntual y filtrado de tres muestras. Los estados guardados conservan el comando parcial.
   - [x] Corrección de perspectiva en triángulos opacos de un ciclo mediante S, T y W.
         La división usa el recíproco cuantizado del RDP antes de aplicar el muestreo.
-  - [ ] Sombreado, profundidad y mezcla con el framebuffer. El siguiente paso es interpolar
-        el color por vértice para los triángulos con sombreado Gouraud.
+  - [x] Triángulos con sombreado Gouraud (`0x0C`) de un ciclo: color por vértice interpolado,
+        con saturación de 9 bits, cuando el combinador elige shade como color.
+  - [ ] Profundidad (`0x0D`/`0x0F`, Z-buffer), sombreado combinado con texturas (`0x0E`) y
+        mezcla con el framebuffer. También shade modulado por el color primitivo.
 
 ## Roadmap
 
@@ -118,3 +120,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Pruebas unitarias N64 140/140 y n64-systemtest 2984/3721.
 - 2026-11-07 — Corrección de perspectiva con S, T y W en triángulos opacos del RDP.
   Pruebas unitarias N64 142/142 y n64-systemtest 2984/3721.
+- 2026-11-07 — Trabajo de RSP/RDP pasado a la rama `n64/rsp-rdp` (estaba sin commit en `main`).
+  Triángulos Gouraud de un ciclo. Pruebas unitarias N64 143/143. Siguiente: Z-buffer.

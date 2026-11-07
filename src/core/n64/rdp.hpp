@@ -68,6 +68,7 @@ private:
     [[nodiscard]] bool field_matches(unsigned y) const;
     [[nodiscard]] bool can_write_opaque() const;
     [[nodiscard]] std::optional<std::uint32_t> opaque_color() const;
+    [[nodiscard]] bool uses_shade_color() const;
     void write_opaque_pixel(unsigned x, unsigned y, std::uint32_t color, unsigned coverage,
                             std::span<std::uint8_t> rdram) const;
     void load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram);
