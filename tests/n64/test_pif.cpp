@@ -91,6 +91,7 @@ TEST_CASE("HLE boot copies IPL3 to DMEM and starts at 0xA4000040") {
     CHECK(bus.read8(0x04000FFF) == 0xFF);
     CHECK(cpu.gpr(29) == 0xFFFFFFFFA4001FF0ULL);
     CHECK(cpu.cop0().read(Cop0::kStatus) == 0x34000000);
+    CHECK(cpu.cop0().read(Cop0::kCause) == 0xB000007C);  // PeterLemon COP0Cause "Initial CAUSE"
 }
 
 TEST_CASE("HLE boot sets s4 from the region and s6 from the CIC") {
