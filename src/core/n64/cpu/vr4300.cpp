@@ -13,33 +13,145 @@ constexpr std::uint64_t sext32(std::uint32_t v) { return static_cast<std::uint64
 
 int Vr4300::step() {
     cycles_ = 1;
+    exception_ = false;
     current_pc_ = pc_;
     in_delay_slot_ = branch_taken_;
     branch_taken_ = false;
 
-    std::uint32_t instr = 0;
-    if (!load(pc_, instr)) return cycles_;
-    pc_ = next_pc_;
-    next_pc_ += 4;
-    execute(instr);
+    cop0_.set_ip2(bus_.interrupt_line());
+    const std::uint32_t status = cop0_.status();
+    if ((status & Cop0::kIE) && !(status & (Cop0::kEXL | Cop0::kERL)) && (cop0_.cause() & status & 0xFF00)) {
+        raise(ExceptionCode::Int);
+    } else {
+        std::uint32_t instr = 0;
+        if (load(pc_, instr)) {
+            pc_ = next_pc_;
+            next_pc_ += 4;
+            execute(instr);
+        }
+    }
     gpr_[0] = 0;
+    cop0_.advance(cycles_);
+    cop0_.tick_random();
     return cycles_;
+}
+
+Vr4300::Mode Vr4300::mode() const {
+    const std::uint32_t status = cop0_.status();
+    if (status & (Cop0::kEXL | Cop0::kERL)) return Mode::Kernel;
+    switch ((status >> 3) & 3) {
+        case 1: return Mode::Supervisor;
+        case 2: return Mode::User;
+        default: return Mode::Kernel;
+    }
+}
+
+bool Vr4300::allow_64bit_ops() const {
+    switch (mode()) {
+        case Mode::Supervisor: return (cop0_.status() & Cop0::kSX) != 0;
+        case Mode::User: return (cop0_.status() & Cop0::kUX) != 0;
+        default: return true;
+    }
+}
+
+void Vr4300::enter_exception(ExceptionCode code, int coprocessor, std::uint32_t offset) {
+    std::uint64_t& status = cop0_.raw(Cop0::kStatus);
+    std::uint64_t& cause = cop0_.raw(Cop0::kCause);
+    if (!(status & Cop0::kEXL)) {
+        // EPC points at the branch when the faulting instruction is in its delay slot.
+        cop0_.raw(Cop0::kEpc) = in_delay_slot_ ? current_pc_ - 4 : current_pc_;
+        cause = in_delay_slot_ ? (cause | Cop0::kBD) : (cause & ~std::uint64_t{Cop0::kBD});
+    } else {
+        offset = 0x180;  // nested: TLB refills go to the general vector too
+    }
+    cause = (cause & ~std::uint64_t{0x3000007C}) | (static_cast<std::uint64_t>(code) << 2) |
+            (static_cast<std::uint64_t>(coprocessor & 3) << 28);
+    status |= Cop0::kEXL;
+    const std::uint64_t base = (status & Cop0::kBEV) ? 0xFFFFFFFFBFC00200ULL : 0xFFFFFFFF80000000ULL;
+    set_pc(base + offset);
+    exception_ = true;
+}
+
+void Vr4300::raise(ExceptionCode code, int coprocessor) { enter_exception(code, coprocessor, 0x180); }
+
+void Vr4300::raise_address_error(std::uint64_t vaddr, bool write) {
+    cop0_.raw(Cop0::kBadVAddr) = vaddr;
+    raise(write ? ExceptionCode::AdES : ExceptionCode::AdEL);
+}
+
+void Vr4300::eret() {
+    std::uint64_t& status = cop0_.raw(Cop0::kStatus);
+    if (status & Cop0::kERL) {
+        status &= ~std::uint64_t{Cop0::kERL};
+        set_pc(cop0_.raw(Cop0::kErrorEpc));
+    } else {
+        status &= ~std::uint64_t{Cop0::kEXL};
+        set_pc(cop0_.raw(Cop0::kEpc));
+    }
+    llbit_ = false;
+}
+
+// COP0 (op 0x10). Usable in kernel mode, or with Status.CU0.
+void Vr4300::execute_cop0(std::uint32_t instr) {
+    if (mode() != Mode::Kernel && !(cop0_.status() & Cop0::kCU0)) {
+        raise(ExceptionCode::CpU, 0);
+        return;
+    }
+    const int rt = static_cast<int>((instr >> 16) & 31);
+    const int rd = static_cast<int>((instr >> 11) & 31);
+    switch ((instr >> 21) & 31) {
+        case 0x00: set_gpr(rt, sext32(static_cast<std::uint32_t>(cop0_.read(rd)))); break;  // MFC0
+        case 0x01: set_gpr(rt, cop0_.read(rd)); break;                                      // DMFC0
+        case 0x04: cop0_.write(rd, sext32(static_cast<std::uint32_t>(gpr(rt)))); break;      // MTC0
+        case 0x05: cop0_.write(rd, gpr(rt)); break;                                          // DMTC0
+        default:
+            if (instr & (1U << 25)) {  // CO
+                switch (instr & 0x3F) {
+                    case 0x18: eret(); return;
+                    default: break;  // TLB instructions: see tlb.cpp
+                }
+                execute_tlb(instr);
+                return;
+            }
+            raise(ExceptionCode::RI);
+            break;
+    }
 }
 
 // Fixed segments of the 32-bit address space (the CPU sign-extends 32-bit addresses):
 //   kseg0 0xFFFFFFFF80000000-9FFFFFFF  physical = vaddr & 0x1FFFFFFF, cached
 //   kseg1 0xFFFFFFFFA0000000-BFFFFFFF  physical = vaddr & 0x1FFFFFFF, uncached
-bool Vr4300::translate(std::uint64_t vaddr, bool /*write*/, Translation& out) {
-    if (vaddr >= 0xFFFFFFFF80000000ULL && vaddr < 0xFFFFFFFFC0000000ULL) {
+// Only kernel mode may use them. Everything else goes through the TLB.
+bool Vr4300::translate(std::uint64_t vaddr, bool write, Translation& out) {
+    if (vaddr >= 0xFFFFFFFF80000000ULL && vaddr < 0xFFFFFFFFC0000000ULL && mode() == Mode::Kernel) {
         out.paddr = static_cast<std::uint32_t>(vaddr & 0x1FFFFFFF);
         out.cached = vaddr < 0xFFFFFFFFA0000000ULL;
         return true;
     }
+    return translate_mapped(vaddr, write, out);
+}
+
+bool Vr4300::translate_mapped(std::uint64_t vaddr, bool write, Translation&) {
+    raise_address_error(vaddr, write);  // the TLB comes in tlb.cpp
+    return false;
+}
+
+void Vr4300::execute_tlb(std::uint32_t) {}
+
+void Vr4300::execute_cop1(std::uint32_t) {}
+
+bool Vr4300::require_64bit() {
+    if (allow_64bit_ops()) return true;
+    raise(ExceptionCode::RI);
     return false;
 }
 
 template <typename T>
 bool Vr4300::load(std::uint64_t vaddr, T& value) {
+    if (vaddr & (sizeof(T) - 1)) {
+        raise_address_error(vaddr, false);
+        return false;
+    }
     Translation t{};
     if (!translate(vaddr, false, t)) return false;
     if (!t.cached) cycles_ += static_cast<int>(bus_.uncached_cycles(t.paddr));
@@ -52,6 +164,10 @@ bool Vr4300::load(std::uint64_t vaddr, T& value) {
 
 template <typename T>
 bool Vr4300::store(std::uint64_t vaddr, T value) {
+    if (vaddr & (sizeof(T) - 1)) {
+        raise_address_error(vaddr, true);
+        return false;
+    }
     Translation t{};
     if (!translate(vaddr, true, t)) return false;
     if (!t.cached) cycles_ += static_cast<int>(bus_.uncached_cycles(t.paddr));
@@ -76,6 +192,9 @@ void Vr4300::execute_load_store(std::uint32_t instr) {
     const int rt = static_cast<int>((instr >> 16) & 31);
     const std::uint64_t vaddr = gpr_[static_cast<std::size_t>(base)] + static_cast<std::uint64_t>(static_cast<std::int16_t>(instr & 0xFFFF));
     std::uint64_t& reg = gpr_[static_cast<std::size_t>(rt)];
+    const bool is_64bit = op == 0x27 || op == 0x37 || op == 0x34 || op == 0x1A || op == 0x1B || op == 0x3F ||
+                          op == 0x3C || op == 0x2C || op == 0x2D;  // LWU LD LLD LDL LDR SD SCD SDL SDR
+    if (is_64bit && !require_64bit()) return;
 
     switch (op) {
         case 0x20: { std::uint8_t v; if (load(vaddr, v)) set_gpr(rt, static_cast<std::uint64_t>(static_cast<std::int8_t>(v))); break; }   // LB
