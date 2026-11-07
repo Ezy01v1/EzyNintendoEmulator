@@ -61,25 +61,20 @@ void Pi::write(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& sch
         case 0x08:    // PI_RD_LEN: RDRAM -> cartridge (only SRAM/Flash would take it)
         case 0x0C: {  // PI_WR_LEN: cartridge -> RDRAM
             const bool to_rdram = (offset & 0x3F) == 0x0C;
-            if (to_rdram) wr_len_ = value & 0x00FFFFFF;
-            else rd_len_ = value & 0x00FFFFFF;
             const std::uint32_t length = (value & 0x00FFFFFF) + 1;
-            // RDRAM side: the transfer starts at the 8-byte boundary below PI_DRAM_ADDR.
-            const std::uint32_t dram = dram_addr_ & ~7U;
+            const std::uint32_t cart_start = cart_addr_;
             if (to_rdram) {
-                for (std::uint32_t i = 0; i < length; ++i) {
-                    const std::uint32_t c = cart_addr_ + i;
-                    std::uint8_t byte = 0;
-                    if (c >= kRomBase && c - kRomBase < cart.rom().size()) byte = cart.rom()[c - kRomBase];
-                    const std::uint32_t d = dram + i;
-                    if (d < rdram.size()) rdram[d] = byte;
-                }
+                copy_to_rdram(length, rdram, cart);
+            } else {
+                // Only SRAM/FlashRAM would take the data; the addresses still move on.
+                dram_addr_ = (dram_addr_ + length + 7) & 0x00FFFFF8;
+                cart_addr_ = (cart_addr_ + length + 1) & 0xFFFFFFFE;
             }
+            // Both length registers read 0x7F once a DMA has run.
+            rd_len_ = 0x7F;
+            wr_len_ = 0x7F;
             busy_ = true;
-            scheduler.schedule_in(EventType::PiDma, dma_cycles(cart_addr_, length));
-            // Afterwards the address registers point past the transfer, 8- and 2-aligned.
-            dram_addr_ = (dram + length + 7) & 0x00FFFFF8;
-            cart_addr_ = (cart_addr_ + length + 1) & 0xFFFFFFFE;
+            scheduler.schedule_in(EventType::PiDma, dma_cycles(cart_start, length));
             return;
         }
         default: {
@@ -87,6 +82,40 @@ void Pi::write(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& sch
             if (i < domain_.size()) domain_[i] = value & 0xFF;
             return;
         }
+    }
+}
+
+// Cartridge -> RDRAM, the way the PI really moves data (PeterLemon DMAAlignment-PI-cart,
+// n64brew "Peripheral Interface", DMA): through a 128-byte buffer, one block at a time.
+// The cartridge side is read in 16-bit units. Each block ends RDRAM-side on an 8-byte
+// boundary; the first block, when PI_DRAM_ADDR isn't 8-aligned, loses as many bytes as
+// the misalignment (from its even-rounded length).
+void Pi::copy_to_rdram(std::uint32_t length, std::span<std::uint8_t> rdram, const Cartridge& cart) {
+    std::array<std::uint8_t, 128> block{};
+    bool first = true;
+    std::int64_t remaining = length;
+    while (remaining > 0) {
+        const std::uint32_t misalign = dram_addr_ & 7;
+        const auto block_len = static_cast<std::int64_t>(128 - misalign);
+        std::int64_t cur = remaining < block_len ? remaining : block_len;
+        remaining -= cur;
+        if (remaining & 1) remaining += 1;
+        const std::int64_t cart_len = (cur + 1) & ~std::int64_t{1};
+        for (std::int64_t i = 0; i < cart_len; ++i) {
+            const std::uint32_t c = cart_addr_ + static_cast<std::uint32_t>(i);
+            block[static_cast<std::size_t>(i)] = c >= kRomBase && c - kRomBase < cart.rom().size() ? cart.rom()[c - kRomBase] : 0;
+        }
+        cart_addr_ += static_cast<std::uint32_t>(cart_len);
+        if (first) {
+            if (cur == block_len - 1) ++cur;
+            cur = cur - misalign > 0 ? cur - misalign : 0;
+        }
+        for (std::int64_t i = 0; i < cur; ++i) {
+            if (dram_addr_ < rdram.size()) rdram[dram_addr_] = block[static_cast<std::size_t>(i)];
+            ++dram_addr_;
+        }
+        dram_addr_ = (dram_addr_ + 7) & 0x00FFFFF8;
+        first = false;
     }
 }
 

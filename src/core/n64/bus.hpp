@@ -79,6 +79,8 @@ private:
     // 32-bit register/ROM read and write for everything that isn't RDRAM or SP memory.
     [[nodiscard]] std::uint32_t read_io(std::uint32_t paddr);
     void write_io(std::uint32_t paddr, std::uint32_t value);
+    [[nodiscard]] std::uint16_t cart_read16(std::uint32_t paddr);
+    [[nodiscard]] static bool is_cart(std::uint32_t paddr);
     // Byte-addressable memory (RDRAM, SP DMEM/IMEM, ISViewer buffer), or nullptr.
     [[nodiscard]] std::uint8_t* memory(std::uint32_t paddr);
 

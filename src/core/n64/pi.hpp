@@ -27,6 +27,7 @@ public:
     }
 
 private:
+    void copy_to_rdram(std::uint32_t length, std::span<std::uint8_t> rdram, const Cartridge& cart);
     // Duration in CPU cycles of a DMA of `length` bytes on the domain of `cart_addr`.
     [[nodiscard]] std::uint64_t dma_cycles(std::uint32_t cart_addr, std::uint32_t length) const;
 

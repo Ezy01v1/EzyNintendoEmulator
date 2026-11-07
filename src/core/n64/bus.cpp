@@ -94,13 +94,24 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     }
 }
 
+// 8- and 16-bit CPU reads of the cartridge bus see the upper half of the 32-bit word at
+// (address + 2) & ~3 (PeterLemon DMAAlignment-PI-ROM-FROM).
+std::uint16_t Bus::cart_read16(std::uint32_t paddr) { return static_cast<std::uint16_t>(read_io((paddr + 2) & ~3U) >> 16); }
+
+bool Bus::is_cart(std::uint32_t paddr) { return paddr >= 0x05000000 && paddr < kPifRom; }
+
 std::uint8_t Bus::read8(std::uint32_t paddr) {
     if (std::uint8_t* m = memory(paddr)) return *m;
+    if (is_cart(paddr)) {
+        const std::uint16_t half = cart_read16(paddr);
+        return static_cast<std::uint8_t>((paddr & 1) ? half : half >> 8);
+    }
     return static_cast<std::uint8_t>(read_io(paddr) >> ((3 - (paddr & 3)) * 8));
 }
 
 std::uint16_t Bus::read16(std::uint32_t paddr) {
     if (memory(paddr)) return static_cast<std::uint16_t>((read8(paddr) << 8) | read8(paddr + 1));
+    if (is_cart(paddr)) return cart_read16(paddr);
     return static_cast<std::uint16_t>(read_io(paddr) >> ((2 - (paddr & 2)) * 8));
 }
 

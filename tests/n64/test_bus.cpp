@@ -139,12 +139,46 @@ TEST_CASE("PI stays busy until the scheduled end") {
     CHECK((f.bus.read32(kPiStatus) & 1) == 0);
 }
 
-TEST_CASE("PI DMA aligns the RDRAM address down to 8 bytes") {
+// PeterLemon DMAAlignment-PI-ROM-FROM: a DMA to an RDRAM address 6, 4 or 2 bytes past an
+// 8-byte boundary loses that many bytes of its first block.
+TEST_CASE("PI DMA to a misaligned RDRAM address shortens the first block") {
+    for (const std::uint32_t misalign : {2U, 4U, 6U}) {
+        BusFixture f;
+        for (std::uint32_t i = 0; i < 0x40; ++i) f.bus.write8(0x3000 + i, 0);
+        f.bus.write32(kPiDram, 0x3000 + misalign);
+        f.bus.write32(kPiCart, 0x10002000);
+        f.bus.write32(kPiWrLen, 14);  // 15 bytes
+        const std::uint32_t written = 15 - misalign;
+        for (std::uint32_t i = 0; i < written; ++i) {
+            CHECK(f.bus.read8(0x3000 + misalign + i) == static_cast<std::uint8_t>((0x2000 + i) * 3));
+        }
+        CHECK(f.bus.read8(0x3000 + misalign + written) == 0);
+        CHECK(f.bus.read8(0x3000 + misalign - 1) == 0);
+    }
+}
+
+TEST_CASE("PI length registers read back 0x7F after a DMA") {
     BusFixture f;
-    f.bus.write32(kPiDram, 0x1005);
+    f.bus.write32(kPiDram, 0x1000);
     f.bus.write32(kPiCart, 0x10002000);
-    f.bus.write32(kPiWrLen, 0x7);
-    CHECK(f.bus.read8(0x1000) == static_cast<std::uint8_t>(0x2000 * 3));
+    f.bus.write32(kPiWrLen, 0xFFF);
+    CHECK(f.bus.read32(kPiWrLen) == 0x7F);
+    CHECK(f.bus.read32(0x04600008) == 0x7F);
+}
+
+// PeterLemon DMAAlignment-PI-ROM-FROM: 8- and 16-bit CPU reads of the cartridge return the
+// upper half of the word at (address + 2) & ~3.
+TEST_CASE("8- and 16-bit cartridge reads see the upper half of the next word") {
+    BusFixture f;
+    // Words at 0x1000/0x1004/0x1008: (i * 3) bytes, so compute the expectations from them.
+    const auto upper = [&](std::uint32_t a) { return static_cast<std::uint16_t>(f.bus.read32(0x10000000 + ((a + 2) & ~3U)) >> 16); };
+    for (std::uint32_t a = 0x1000; a < 0x100C; a += 2) CHECK(f.bus.read16(0x10000000 + a) == upper(a));
+    for (std::uint32_t a = 0x1000; a < 0x1006; ++a) {
+        const std::uint16_t half = upper(a);
+        CHECK(f.bus.read8(0x10000000 + a) == static_cast<std::uint8_t>((a & 1) ? half : half >> 8));
+    }
+    CHECK(f.bus.read16(0x10000000) == 0x8037);
+    CHECK(f.bus.read16(0x10000002) == 0x0000);  // the upper half of the word at 4
 }
 
 TEST_CASE("ISViewer write of the length emits the buffer") {
