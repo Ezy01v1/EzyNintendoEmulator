@@ -39,6 +39,11 @@ void hle_boot(Vr4300& cpu, Bus& bus, const Cartridge& cart) {
     bus.write32(0x04700004, 0x40);        // RI_CONFIG
     bus.write32(0x0470000C, 0x14);        // RI_SELECT
     bus.write32(0x04700010, 0x00063634);  // RI_REFRESH
+    // The IPL3 stores the RDRAM size (osMemSize) only when it initialises RDRAM itself,
+    // which RI_SELECT just told it to skip: store it here (n64-systemtest's heap reads
+    // it; 0 there ends in a null pointer). CIC 6105 games look for it at 0x3F0.
+    bus.write32(0x318, Bus::kRdramSize);
+    bus.write32(0x3F0, Bus::kRdramSize);
 
     cpu.set_pc(0xFFFFFFFFA4000040ULL);
 }

@@ -93,6 +93,7 @@ TEST_CASE("HLE boot copies IPL3 to DMEM and starts at 0xA4000040") {
     CHECK(cpu.cop0().read(Cop0::kStatus) == 0x34000000);
     CHECK(cpu.cop0().read(Cop0::kCause) == 0xB000007C);  // PeterLemon COP0Cause "Initial CAUSE"
     CHECK(cpu.cop0().read(Cop0::kLLAddr) == 0xFFFFFFFF);  // PeterLemon LL_LLD_SC_SCD
+    CHECK(bus.read32(0x318) == 0x00800000);  // RDRAM size, as the IPL3 leaves it (osMemSize)
 }
 
 TEST_CASE("HLE boot sets s4 from the region and s6 from the CIC") {
