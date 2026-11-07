@@ -23,7 +23,8 @@ _Última actualización: 2026-11-06_
 3. [ ] **Probar Pokémon Silver a fondo**: guardado en el juego, RTC día/noche, glitches gráficos.
 4. [ ] **GBA: probar juegos comerciales**. Hay que copiar dumps `.gba` propios a `roms/` (ignorado por git).
        Pokémon Emerald sirve para probar el RTC. Usar `ezy_gba_runner --screenshot`.
-5. [ ] (Opcional) La ventana VRAM del debugger se encima con la ventana Screen (posición fija).
+5. [x] (Opcional) La ventana VRAM del debugger se encima con la ventana Screen (posición fija).
+       Ya resuelto en `f82824b`: VRAM va en y=410, debajo de Screen (y=10..400).
 
 ## Roadmap
 
@@ -43,3 +44,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 
 - 2026-11-05 — GBA terminado, PR #1. Se agregaron CMake presets.
 - 2026-11-06 — GBC mergeado (PR #2). Pase de precisión GB mergeado (PR #3). Se crea esta carpeta.
+- 2026-11-06 — Revisión de pendientes: el 5 (ventana VRAM) ya estaba resuelto en `f82824b`; se marca. 1–4 siguen abiertos.
