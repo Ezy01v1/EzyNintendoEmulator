@@ -101,3 +101,10 @@ Results:
 Remaining failures are all outside the DMG/CGB timing work: boot-state ROMs for other
 models (`boot_div-*`, `boot_hwio-*`, `boot_regs-*` for S/MGB/dmg0/SGB), `unused_hwio`,
 MBC2 and the MBC1 multicart.
+
+## Nintendo 64 test ROMs
+
+| Path | Source |
+|------|--------|
+| `n64/peterlemon/<Group>/<Test>/*.N64` + `.bmp` | github.com/PeterLemon/N64, folder `CPUTest` (prebuilt `.N64` files). Each `.png` reference is converted with `ffmpeg -i x.png -pix_fmt bgr24 x.bmp` (640×480). `CP0/COP0Register` and the two `TIMINGNTSC` tests have no reference image. `CPUTest/Exceptions` ships only sources (no prebuilt ROMs). |
+| `n64/n64-systemtest.z64` | Built from github.com/lemmy-64/n64-systemtest (see the N64 results section for the commit). |
