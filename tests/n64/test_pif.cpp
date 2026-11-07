@@ -111,3 +111,17 @@ TEST_CASE("HLE boot sets s4 from the region and s6 from the CIC") {
     hle_boot(cpu2, bus2, pal);
     CHECK(cpu2.gpr(20) == 0);
 }
+
+// The PIF sets PI domain 1 timing from the first ROM word (here 80 37 12 40) before the
+// IPL3 runs: LAT = byte 3, PWD = byte 2, PGS = byte 1 & 0xF, RLS = byte 1 >> 4.
+TEST_CASE("HLE boot loads the PI domain 1 timing from the ROM header") {
+    Scheduler scheduler;
+    const Cartridge cart = boot_cart('E');
+    Bus bus(scheduler, cart);
+    Vr4300 cpu(bus);
+    hle_boot(cpu, bus, cart);
+    CHECK(bus.read32(0x04600014) == 0x40);
+    CHECK(bus.read32(0x04600018) == 0x12);
+    CHECK(bus.read32(0x0460001C) == 0x07);
+    CHECK(bus.read32(0x04600020) == 0x03);
+}

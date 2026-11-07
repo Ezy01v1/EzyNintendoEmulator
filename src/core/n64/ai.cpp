@@ -1,5 +1,7 @@
 #include "n64/ai.hpp"
 
+#include <cmath>
+
 namespace ezy::n64 {
 
 namespace {
@@ -16,9 +18,14 @@ int Ai::sample_rate() const {
     return static_cast<int>(clock / (static_cast<double>(dacrate_ & 0x3FFF) + 1.0));
 }
 
-std::uint32_t Ai::read(std::uint32_t offset) const {
+std::uint32_t Ai::read(std::uint32_t offset, std::uint64_t now) const {
     switch (offset & 0x1F) {
-        case 0x04: return count_ > 0 ? fifo_[0].length : 0;  // AI_LEN (whole buffer, not the remainder)
+        case 0x04: {  // AI_LEN: the bytes of the playing buffer not played yet, in 8-byte steps
+            if (count_ == 0 || now >= end_cycle_) return 0;
+            const double cycles_per_byte = kCpuHz / static_cast<double>(sample_rate()) / 4.0;
+            const auto left = static_cast<std::uint32_t>(std::ceil(static_cast<double>(end_cycle_ - now) / cycles_per_byte));
+            return (left < fifo_[0].length ? left : fifo_[0].length) & ~7U;
+        }
         case 0x0C: return (count_ >= 2 ? kStatusFull | 1U : 0U) | (count_ >= 1 ? kStatusBusy : 0U);
         default: return 0;
     }
@@ -58,7 +65,8 @@ void Ai::start(const Buffer& buffer, Mi& mi, Scheduler& scheduler, std::span<con
         samples_.push_back(static_cast<float>(sample) / 32768.0f);
     }
     const double cycles = static_cast<double>(frames) * kCpuHz / (static_cast<double>(sample_rate()));
-    scheduler.schedule_in(EventType::AiDma, static_cast<std::uint64_t>(cycles));
+    end_cycle_ = scheduler.now() + static_cast<std::uint64_t>(cycles);
+    scheduler.schedule(EventType::AiDma, end_cycle_);
 }
 
 void Ai::on_dma_end(Mi& mi, Scheduler& scheduler, std::span<const std::uint8_t> rdram) {

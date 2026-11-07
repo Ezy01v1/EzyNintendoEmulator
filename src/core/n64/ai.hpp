@@ -19,7 +19,8 @@ class Ai {
 public:
     void set_region(Region region) { region_ = region; }
 
-    [[nodiscard]] std::uint32_t read(std::uint32_t offset) const;
+    // `now` (CPU cycles) lets AI_LEN report what is left of the playing buffer.
+    [[nodiscard]] std::uint32_t read(std::uint32_t offset, std::uint64_t now = 0) const;
     void write(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler,
                std::span<const std::uint8_t> rdram);
     void on_dma_end(Mi& mi, Scheduler& scheduler, std::span<const std::uint8_t> rdram);
@@ -30,7 +31,7 @@ public:
 
     template <class Ar>
     void serialize(Ar& ar) {
-        ar(dram_addr_), ar(control_), ar(dacrate_), ar(bitrate_), ar(fifo_), ar(count_), ar(region_);
+        ar(dram_addr_), ar(control_), ar(dacrate_), ar(bitrate_), ar(fifo_), ar(count_), ar(region_), ar(end_cycle_);
     }
 
 private:
@@ -43,6 +44,7 @@ private:
     std::uint32_t dram_addr_ = 0, control_ = 0, dacrate_ = 0, bitrate_ = 0;
     std::array<Buffer, 2> fifo_{};  // [0] playing, [1] queued
     std::uint32_t count_ = 0;       // buffers in the FIFO
+    std::uint64_t end_cycle_ = 0;   // when the playing buffer ends
     Region region_ = Region::Ntsc;
     std::uint8_t pad_[3] = {};
     std::vector<float> samples_;  // produced since the frontend last took them

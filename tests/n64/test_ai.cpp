@@ -91,3 +91,17 @@ TEST_CASE("AI_LEN with DMA disabled does nothing") {
     CHECK_FALSE(f.mi.line());
     CHECK_FALSE(f.scheduler.pending(EventType::AiDma));
 }
+
+// osAiGetLength() reads AI_LEN to see how much of the playing buffer is left.
+TEST_CASE("AI_LEN counts down while the buffer plays") {
+    AiFixture f;
+    f.ai.write(kDram, 0x1000, f.mi, f.scheduler, f.rdram);
+    f.ai.write(kLen, 0x400, f.mi, f.scheduler, f.rdram);
+    CHECK(f.ai.read(kLen, f.scheduler.now()) == 0x400);
+    const std::uint64_t end = *f.scheduler.next_event_time();
+    const std::uint32_t half = f.ai.read(kLen, end / 2);
+    CHECK(half >= 0x1F0);
+    CHECK(half <= 0x210);
+    CHECK(half % 8 == 0);
+    CHECK(f.ai.read(kLen, end) == 0);
+}

@@ -33,6 +33,13 @@ void hle_boot(Vr4300& cpu, Bus& bus, const Cartridge& cart) {
     cop0.raw(Cop0::kCause) = 0xB000007C;
     cop0.raw(Cop0::kLLAddr) = 0xFFFFFFFF;  // PeterLemon LL_LLD_SC_SCD
 
+    // PI domain 1 timing, which the PIF takes from the first ROM word (80 37 12 40 on a
+    // normal cartridge): LAT = byte 3, PWD = byte 2, PGS = byte 1 & 0xF, RLS = byte 1 >> 4.
+    bus.write32(0x04600014, rom[3]);
+    bus.write32(0x04600018, rom[2]);
+    bus.write32(0x0460001C, rom[1] & 0x0F);
+    bus.write32(0x04600020, rom[1] >> 4);
+
     // RDRAM interface as the IPL leaves it after RDRAM is set up. RI_SELECT != 0 tells
     // the IPL3 that RDRAM is already initialised (n64brew "RDRAM Interface").
     bus.write32(0x04700000, 0x0E);        // RI_MODE

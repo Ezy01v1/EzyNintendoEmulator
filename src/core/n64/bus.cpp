@@ -40,7 +40,7 @@ std::uint32_t Bus::read_io(std::uint32_t paddr) {
     if (paddr >= kDp && paddr < kDp + 0x100000) return rsp_.read_dp(paddr - kDp);
     if (paddr >= kMi && paddr < kVi) return mi_.read(paddr - kMi);
     if (paddr >= kVi && paddr < kAi) return vi_.read(paddr - kVi);
-    if (paddr >= kAi && paddr < kPi) return ai_.read(paddr - kAi);
+    if (paddr >= kAi && paddr < kPi) return ai_.read(paddr - kAi, scheduler_.now());
     if (paddr >= kPi && paddr < kRi) return pi_.read(paddr - kPi);
     if (paddr >= kRi && paddr < kSi) return ri_[(paddr >> 2) & 7];
     if (paddr == kIsViewer) return kIsViewerMagic;
