@@ -22,6 +22,7 @@ constexpr std::uint32_t kIsViewerMagic = 0x49533634;  // "IS64"
 
 Bus::Bus(Scheduler& scheduler, const Cartridge& cart) : scheduler_(scheduler), cart_(cart) {
     vi_.set_region(cart.region());
+    ai_.set_region(cart.region());
     vi_.start(scheduler_);
 }
 
@@ -39,6 +40,7 @@ std::uint32_t Bus::read_io(std::uint32_t paddr) {
     if (paddr >= kDp && paddr < kDp + 0x100000) return rsp_.read_dp(paddr - kDp);
     if (paddr >= kMi && paddr < kVi) return mi_.read(paddr - kMi);
     if (paddr >= kVi && paddr < kAi) return vi_.read(paddr - kVi);
+    if (paddr >= kAi && paddr < kPi) return ai_.read(paddr - kAi);
     if (paddr >= kPi && paddr < kRi) return pi_.read(paddr - kPi);
     if (paddr >= kRi && paddr < kSi) return ri_[(paddr >> 2) & 7];
     if (paddr == kIsViewer) return kIsViewerMagic;
@@ -70,6 +72,8 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
         mi_.write(paddr - kMi, value);
     } else if (paddr >= kVi && paddr < kAi) {
         vi_.write(paddr - kVi, value, mi_);
+    } else if (paddr >= kAi && paddr < kPi) {
+        ai_.write(paddr - kAi, value, mi_, scheduler_, rdram_);
     } else if (paddr >= kPi && paddr < kRi) {
         pi_.write(paddr - kPi, value, mi_, scheduler_, rdram_, cart_);
     } else if (paddr >= kRi && paddr < kSi) {
@@ -156,6 +160,7 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         case EventType::PiDma: pi_.finish_dma(mi_); break;
         case EventType::ViLine: vi_.on_line(mi_, scheduler_, when); break;
         case EventType::SiDma: si_.finish_dma(mi_); break;
+        case EventType::AiDma: ai_.on_dma_end(mi_, scheduler_, rdram_); break;
         default: break;
     }
 }

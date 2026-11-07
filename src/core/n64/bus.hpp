@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "n64/ai.hpp"
 #include "n64/cartridge.hpp"
 #include "n64/cpu/cpu_bus.hpp"
 #include "n64/mi.hpp"
@@ -52,6 +53,7 @@ public:
     [[nodiscard]] RspRegs& rsp() { return rsp_; }
     [[nodiscard]] Vi& vi() { return vi_; }
     [[nodiscard]] Si& si() { return si_; }
+    [[nodiscard]] Ai& ai() { return ai_; }
     [[nodiscard]] Pif& pif() { return pif_; }
     // An optional real PIF ROM (1984 bytes) mapped at 0x1FC00000.
     void set_pif_rom(std::span<const std::uint8_t> rom);
@@ -70,6 +72,7 @@ public:
         vi_.serialize(ar);
         si_.serialize(ar);
         pif_.serialize(ar);
+        ai_.serialize(ar);
     }
 
 private:
@@ -92,6 +95,7 @@ private:
     Vi vi_;
     Si si_;
     Pif pif_;
+    Ai ai_;
     std::vector<std::uint8_t> pif_rom_;
 };
 
