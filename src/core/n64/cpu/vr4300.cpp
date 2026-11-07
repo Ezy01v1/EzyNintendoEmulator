@@ -238,13 +238,13 @@ bool Vr4300::require_64bit() {
 }
 
 template <typename T>
-bool Vr4300::load(std::uint64_t vaddr, T& value) {
+bool Vr4300::load(std::uint64_t vaddr, T& value, bool for_store) {
     if (vaddr & (sizeof(T) - 1)) {
-        raise_address_error(vaddr, false);
+        raise_address_error(vaddr, for_store);
         return false;
     }
     Translation t{};
-    if (!translate(vaddr, false, t)) return false;
+    if (!translate(vaddr, for_store, t)) return false;
     last_paddr_ = t.paddr;
     if (!t.cached) cycles_ += static_cast<int>(bus_.uncached_cycles(t.paddr));
     if constexpr (sizeof(T) == 1) value = bus_.read8(t.paddr);
@@ -364,7 +364,7 @@ void Vr4300::execute_load_store(std::uint32_t instr) {
         case 0x2A: {  // SWL
             std::uint32_t word;
             const std::uint64_t aligned = vaddr & ~std::uint64_t{3};
-            if (!load(aligned, word)) break;
+            if (!load(aligned, word, true)) break;
             const unsigned shift = static_cast<unsigned>(vaddr & 3) * 8;
             const std::uint32_t mask = 0xFFFFFFFFU >> shift;
             store(aligned, (word & ~mask) | (static_cast<std::uint32_t>(reg) >> shift));
@@ -373,7 +373,7 @@ void Vr4300::execute_load_store(std::uint32_t instr) {
         case 0x2E: {  // SWR
             std::uint32_t word;
             const std::uint64_t aligned = vaddr & ~std::uint64_t{3};
-            if (!load(aligned, word)) break;
+            if (!load(aligned, word, true)) break;
             const unsigned shift = (3 - static_cast<unsigned>(vaddr & 3)) * 8;
             const std::uint32_t keep = static_cast<std::uint32_t>((std::uint64_t{1} << shift) - 1);
             store(aligned, (word & keep) | (static_cast<std::uint32_t>(reg) << shift));
@@ -382,7 +382,7 @@ void Vr4300::execute_load_store(std::uint32_t instr) {
         case 0x2C: {  // SDL
             std::uint64_t dword;
             const std::uint64_t aligned = vaddr & ~std::uint64_t{7};
-            if (!load(aligned, dword)) break;
+            if (!load(aligned, dword, true)) break;
             const unsigned shift = static_cast<unsigned>(vaddr & 7) * 8;
             const std::uint64_t mask = ~std::uint64_t{0} >> shift;
             store(aligned, (dword & ~mask) | (reg >> shift));
@@ -391,7 +391,7 @@ void Vr4300::execute_load_store(std::uint32_t instr) {
         case 0x2D: {  // SDR
             std::uint64_t dword;
             const std::uint64_t aligned = vaddr & ~std::uint64_t{7};
-            if (!load(aligned, dword)) break;
+            if (!load(aligned, dword, true)) break;
             const unsigned shift = (7 - static_cast<unsigned>(vaddr & 7)) * 8;
             const std::uint64_t keep = shift == 0 ? 0 : (std::uint64_t{1} << shift) - 1;
             store(aligned, (dword & keep) | (reg << shift));

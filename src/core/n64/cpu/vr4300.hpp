@@ -68,7 +68,7 @@ private:
     [[nodiscard]] bool translate(std::uint64_t vaddr, bool write, Translation& out);
 
     template <typename T>
-    bool load(std::uint64_t vaddr, T& value);
+    bool load(std::uint64_t vaddr, T& value, bool for_store = false);  // for_store: SWL & co.
     template <typename T>
     bool store(std::uint64_t vaddr, T value);
 

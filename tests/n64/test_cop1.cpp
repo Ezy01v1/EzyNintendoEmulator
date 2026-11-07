@@ -189,15 +189,28 @@ TEST_CASE("FPU arithmetic writes the exact destination; a single result clears t
     CHECK(f.cpu.cop1().fpr_bits(3) == std::bit_cast<std::uint32_t>(6.0f));
 }
 
-TEST_CASE("half mode: a double result goes to the odd register itself, sources come from the even one") {
+TEST_CASE("half mode: arithmetic uses the exact registers, odd ones included") {
     CpuFixture f;
-    fpu_ready(f, false);
+    fpu_ready(f, true);
     f.cpu.set_gpr(t0, std::bit_cast<std::uint64_t>(10.0));
     f.cpu.set_gpr(t1, std::bit_cast<std::uint64_t>(16.0));
-    // f28 = 10.0, f30 = 16.0 (64-bit slots); ADD.D f1, f29, f30 reads f28 for f29.
-    f.load({dmtc1(t0, 28), dmtc1(t1, 30), fop(kD, 30, 29, 1, 0x00)});
-    f.run(3);
+    // Written in FR=1 mode: f29 = 10.0, f31 = 16.0 (64-bit). Then in FR=0 mode,
+    // ADD.D f1, f29, f31 reads f29 and f31 themselves and writes f1 itself.
+    f.load({dmtc1(t0, 29), dmtc1(t1, 31), mtc0(0, 12) /* placeholder, Status set below */});
+    f.run(2);
+    fpu_ready(f, false);
+    f.load({fop(kD, 31, 29, 1, 0x00)});
+    f.run(1);
     CHECK(f.cpu.cop1().fpr_bits(1) == std::bit_cast<std::uint64_t>(26.0));
+}
+
+TEST_CASE("MOV.S copies the whole 64-bit register") {
+    CpuFixture f;
+    fpu_ready(f, true);
+    f.cpu.set_gpr(t0, 0x01234567'C1800000ULL);
+    f.load({dmtc1(t0, 30), fop(kS, 0, 30, 18, 0x06)});
+    f.run(2);
+    CHECK(f.cpu.cop1().fpr_bits(18) == 0x01234567'C1800000ULL);
 }
 
 TEST_CASE("DCFC1 and DCTC1 raise unimplemented operation") {

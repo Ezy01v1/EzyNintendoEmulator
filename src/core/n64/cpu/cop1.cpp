@@ -160,12 +160,12 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
         default: break;
     }
 
-    // Arithmetic, compares and conversions address the registers differently from the
-    // moves (n64-systemtest "full_vs_half_mode"): in FR=0 mode a source is read from the even
-    // register of its pair, but the result goes to the exact destination register, and a
-    // 32-bit result clears its upper half.
-    const auto src32 = [&](int reg, bool full) { return static_cast<std::uint32_t>(cop1_.fpr_bits(full ? reg : reg & ~1)); };
-    const auto src64 = [&](int reg, bool full) { return cop1_.fpr_bits(full ? reg : reg & ~1); };
+    // Arithmetic, compares and conversions don't pair registers the way the moves do
+    // (n64-systemtest "full_vs_half_mode"): whatever FR says, they read and write the exact
+    // 64-bit registers named, a 32-bit operand being the low half; a 32-bit result clears
+    // the upper half.
+    const auto src32 = [&](int reg, bool) { return static_cast<std::uint32_t>(cop1_.fpr_bits(reg)); };
+    const auto src64 = [&](int reg, bool) { return cop1_.fpr_bits(reg); };
     const auto dst32 = [&](int reg, std::uint32_t value, bool) { cop1_.set_fpr_bits(reg, value); };
     const auto dst64 = [&](int reg, std::uint64_t value, bool) { cop1_.set_fpr_bits(reg, value); };
 
@@ -221,10 +221,10 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
         return;
     }
 
-    // MOV: a plain copy, no checks.
+    // MOV: a plain copy of the whole register, no checks (n64-systemtest: MOV.S keeps the
+    // upper half).
     if (funct == 0x06) {
-        if (is_s) dst32(fd, src32(fs, fr), fr);
-        else if (is_d) dst64(fd, src64(fs, fr), fr);
+        if (is_s || is_d) dst64(fd, src64(fs, fr), fr);
         else unimplemented();
         return;
     }

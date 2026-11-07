@@ -67,6 +67,10 @@ void Vr4300::branch(bool taken, std::uint64_t target, bool likely) {
         // A branch-likely that isn't taken skips (nullifies) its delay slot.
         pc_ = next_pc_;
         next_pc_ += 4;
+    } else {
+        // The next instruction is still a delay slot: an exception there points EPC at the
+        // branch and sets Cause.BD (n64-systemtest "Syscall (delay slot)").
+        branch_taken_ = true;
     }
 }
 

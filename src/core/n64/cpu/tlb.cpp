@@ -34,13 +34,21 @@ Tlb::Result Tlb::translate(std::uint64_t vaddr, std::uint8_t asid) const {
 
 void Tlb::write(int index, const Cop0& cop0) {
     Entry& e = entries_[static_cast<std::size_t>(index & 31)];
-    e.mask = (cop0.read(Cop0::kPageMask) & 0x01FFE000) | 0x1FFF;
+    // PageMask bits come in pairs (4 KB, 16 KB, ... 16 MB); the TLB keeps a pair only when
+    // its upper bit is set (n64-systemtest: 0x2000 reads back as 0).
+    std::uint64_t mask = 0;
+    const std::uint64_t written = cop0.read(Cop0::kPageMask);
+    for (unsigned pair = 0; pair < 6; ++pair) {
+        if (written & (std::uint64_t{1} << (14 + 2 * pair))) mask |= std::uint64_t{3} << (13 + 2 * pair);
+    }
+    e.mask = mask | 0x1FFF;
     e.entry_hi = cop0.read(Cop0::kEntryHi) & (0xC00000FFFFFFE0FFULL & ~(e.mask & ~std::uint64_t{0x1FFF}));
     const std::uint64_t lo0 = cop0.read(Cop0::kEntryLo0);
     const std::uint64_t lo1 = cop0.read(Cop0::kEntryLo1);
     e.global = static_cast<std::uint8_t>(lo0 & lo1 & 1);
-    e.lo[0] = lo0 & ~std::uint64_t{1};
-    e.lo[1] = lo1 & ~std::uint64_t{1};
+    // An entry keeps 26 bits of EntryLo: PFN (20), C, D, V (n64-systemtest).
+    e.lo[0] = lo0 & 0x03FFFFFE;
+    e.lo[1] = lo1 & 0x03FFFFFE;
 }
 
 void Tlb::read(int index, Cop0& cop0) const {

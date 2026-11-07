@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <vector>
 
 #include "mips_asm.hpp"
 #include "n64/cpu/cop0.hpp"
@@ -206,4 +208,36 @@ TEST_CASE("COP2 moves with CU2 set use a latch") {
     f.run(3);
     CHECK(f.cpu.gpr(t1) == 0xFFFFFFFF9ABCDEF0ULL);
     CHECK(f.cpu.gpr(t2) == 0x123456789ABCDEF0ULL);
+}
+
+// n64-systemtest "Syscall (delay slot)", "ADD (overflow in delay, not taken)": the slot of a
+// branch that is not taken is still a delay slot.
+TEST_CASE("exception in the delay slot of a branch that is not taken also sets BD") {
+    CpuFixture f;
+    kernel_ready(f);
+    f.cpu.set_gpr(t0, 1);
+    f.load({beq(0, t0, 4), syscall()});
+    f.run(2);
+    CHECK(exc_code(f) == static_cast<std::uint32_t>(ExceptionCode::Sys));
+    CHECK((f.cpu.cop0().read(Cop0::kCause) & 0x80000000) != 0);
+    CHECK(f.cpu.cop0().read(Cop0::kEpc) == CpuFixture::kEntry);
+}
+
+// n64-systemtest "Wired OOB/Random": with Wired > 31, Random runs through 0..63.
+TEST_CASE("Random with Wired above 31 covers 0..63") {
+    CpuFixture f;
+    kernel_ready(f);
+    f.cpu.cop0().write(Cop0::kWired, 40);
+    std::vector<std::uint32_t> program(200, nop());
+    for (std::size_t k = 0; k < program.size(); ++k) f.bus.write32(CpuFixture::kProgram + static_cast<std::uint32_t>(k * 4), 0);
+    f.cpu.set_pc(CpuFixture::kEntry);
+    std::uint64_t lowest = 63, highest = 0;
+    for (int n = 0; n < 100; ++n) {
+        f.cpu.step();
+        const std::uint64_t r = f.cpu.cop0().read(Cop0::kRandom);
+        lowest = std::min(lowest, r);
+        highest = std::max(highest, r);
+    }
+    CHECK(lowest == 0);
+    CHECK(highest > 50);
 }

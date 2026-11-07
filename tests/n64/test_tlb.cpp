@@ -187,3 +187,26 @@ TEST_CASE("user mode may not touch kseg0") {
     CHECK(exc_code(f) == static_cast<std::uint32_t>(ExceptionCode::AdEL));
     CHECK(f.cpu.cop0().read(Cop0::kBadVAddr) == 0xFFFFFFFF80001000ULL);  // the load, not the fetch
 }
+
+// n64-systemtest "PageMask after TLBWI/TLBR", "EntryLo0/1/Hi after TLBWI/TLBR".
+TEST_CASE("TLBR reads back only the bits a TLB entry keeps") {
+    CpuFixture f;
+    f.cpu.cop0().write(Cop0::kStatus, 0);
+    map(f, 6, 0x10000, 0x3FFFFFFF, 0x3FFFFFFF, 0x2000);  // 0x2000: half of a mask pair
+    Cop0& c = f.cpu.cop0();
+    c.write(Cop0::kIndex, 6);
+    f.load({kTlbr});
+    f.run(1);
+    CHECK(c.read(Cop0::kPageMask) == 0);
+    CHECK(c.read(Cop0::kEntryLo0) == 0x03FFFFFF);  // 26 bits, G = 1 (both entries global)
+}
+
+// n64-systemtest "TLB: Store misaligned after 4k page, expect TLBS".
+TEST_CASE("SWL to an unmapped page raises TLBS") {
+    CpuFixture f;
+    f.cpu.cop0().write(Cop0::kStatus, 0);
+    f.cpu.set_gpr(t0, 0x5001);
+    f.load({i(0x2A, t0, t1, 0)});  // SWL t1, 0(t0)
+    f.run(1);
+    CHECK(exc_code(f) == static_cast<std::uint32_t>(ExceptionCode::TlbS));
+}

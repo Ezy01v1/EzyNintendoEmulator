@@ -85,10 +85,12 @@ void Cop0::advance(int cycles) {
     }
 }
 
+// Random counts down and goes back to 31 when it reaches Wired. It is a 6-bit counter, so
+// with Wired above 31 it runs through 0..63 (n64-systemtest "Wired OOB/Random").
 void Cop0::tick_random() {
-    const std::uint64_t wired = regs_[kWired] & 31;
+    const std::uint64_t wired = regs_[kWired] & 63;
     std::uint64_t& random = regs_[kRandom];
-    random = (random <= wired || random == 0) ? 31 : random - 1;
+    random = random == wired ? 31 : (random - 1) & 63;
 }
 
 void Cop0::set_ip2(bool level) {
