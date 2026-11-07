@@ -10,8 +10,10 @@
 #include "n64/cpu/cpu_bus.hpp"
 #include "n64/mi.hpp"
 #include "n64/pi.hpp"
+#include "n64/pif.hpp"
 #include "n64/rsp_regs.hpp"
 #include "n64/scheduler.hpp"
+#include "n64/si.hpp"
 #include "n64/vi.hpp"
 
 namespace ezy::n64 {
@@ -49,6 +51,10 @@ public:
     [[nodiscard]] Pi& pi() { return pi_; }
     [[nodiscard]] RspRegs& rsp() { return rsp_; }
     [[nodiscard]] Vi& vi() { return vi_; }
+    [[nodiscard]] Si& si() { return si_; }
+    [[nodiscard]] Pif& pif() { return pif_; }
+    // An optional real PIF ROM (1984 bytes) mapped at 0x1FC00000.
+    void set_pif_rom(std::span<const std::uint8_t> rom);
     [[nodiscard]] const Vi& vi() const { return vi_; }
     [[nodiscard]] std::span<std::uint8_t> rdram() { return rdram_; }
     [[nodiscard]] std::span<const std::uint8_t> rdram() const { return rdram_; }
@@ -62,6 +68,8 @@ public:
         pi_.serialize(ar);
         rsp_.serialize(ar);
         vi_.serialize(ar);
+        si_.serialize(ar);
+        pif_.serialize(ar);
     }
 
 private:
@@ -82,6 +90,9 @@ private:
     Pi pi_;
     RspRegs rsp_;
     Vi vi_;
+    Si si_;
+    Pif pif_;
+    std::vector<std::uint8_t> pif_rom_;
 };
 
 }  // namespace ezy::n64

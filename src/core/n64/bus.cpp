@@ -6,7 +6,8 @@ namespace {
 
 constexpr std::uint32_t kSpMem = 0x04000000, kSpRegs = 0x04040000, kDp = 0x04100000, kMi = 0x04300000,
                         kVi = 0x04400000, kAi = 0x04500000, kPi = 0x04600000, kRi = 0x04700000, kSi = 0x04800000,
-                        kCartDom1 = 0x10000000, kIsViewer = 0x13FF0000, kPifRom = 0x1FC00000;
+                        kCartDom1 = 0x10000000, kIsViewer = 0x13FF0000, kPifRom = 0x1FC00000,
+                        kPifRam = 0x1FC007C0;
 
 // Extra CPU cycles for one uncached access (approximations: the test ROMs in this
 // subproject don't measure them; the TIMINGNTSC ROMs may refine them later).
@@ -41,7 +42,19 @@ std::uint32_t Bus::read_io(std::uint32_t paddr) {
     if (paddr >= kPi && paddr < kRi) return pi_.read(paddr - kPi);
     if (paddr >= kRi && paddr < kSi) return ri_[(paddr >> 2) & 7];
     if (paddr == kIsViewer) return kIsViewerMagic;
+    if (paddr >= kSi && paddr < kSi + 0x100000) return si_.read(paddr - kSi);
     if (paddr >= kCartDom1 && paddr < kPifRom) return cart_.read32(paddr - kCartDom1);
+    if (paddr >= kPifRam && paddr < kPifRam + 64) {
+        const auto ram = pif_.ram();
+        const std::uint32_t o = paddr - kPifRam;
+        return (static_cast<std::uint32_t>(ram[o]) << 24) | (ram[o + 1] << 16) | (ram[o + 2] << 8) | ram[o + 3];
+    }
+    if (paddr >= kPifRom && paddr < kPifRam) {
+        const std::uint32_t o = paddr - kPifRom;
+        if (o + 4 > pif_rom_.size()) return 0;
+        return (static_cast<std::uint32_t>(pif_rom_[o]) << 24) | (pif_rom_[o + 1] << 16) | (pif_rom_[o + 2] << 8) |
+               pif_rom_[o + 3];
+    }
     return 0;
 }
 
@@ -61,6 +74,16 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
         pi_.write(paddr - kPi, value, mi_, scheduler_, rdram_, cart_);
     } else if (paddr >= kRi && paddr < kSi) {
         ri_[(paddr >> 2) & 7] = value;
+    } else if (paddr >= kSi && paddr < kSi + 0x100000) {
+        si_.write(paddr - kSi, value, mi_, scheduler_, rdram_, pif_);
+    } else if (paddr >= kPifRam && paddr < kPifRam + 64) {
+        const std::uint32_t o = paddr - kPifRam;
+        auto ram = pif_.ram();
+        ram[o] = static_cast<std::uint8_t>(value >> 24);
+        ram[o + 1] = static_cast<std::uint8_t>(value >> 16);
+        ram[o + 2] = static_cast<std::uint8_t>(value >> 8);
+        ram[o + 3] = static_cast<std::uint8_t>(value);
+        if (o == 60) pif_.after_write();
     } else if (paddr == kIsViewer + 0x14) {  // ISViewer: print that many bytes of the buffer
         const std::uint32_t length = value < 0x10000 - 0x20 ? value : 0x10000 - 0x20;
         isviewer_out_.append(reinterpret_cast<const char*>(&isviewer_[0x20]), length);
@@ -132,9 +155,12 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
     switch (type) {
         case EventType::PiDma: pi_.finish_dma(mi_); break;
         case EventType::ViLine: vi_.on_line(mi_, scheduler_, when); break;
+        case EventType::SiDma: si_.finish_dma(mi_); break;
         default: break;
     }
 }
+
+void Bus::set_pif_rom(std::span<const std::uint8_t> rom) { pif_rom_.assign(rom.begin(), rom.end()); }
 
 std::string Bus::take_isviewer_output() {
     std::string out;
