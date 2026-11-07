@@ -5,11 +5,15 @@
 
 namespace ezy::n64 {
 
+// CRC-32 (zlib polynomial 0xEDB88320, reflected).
+std::uint32_t crc32(std::span<const std::uint8_t> data);
+
 namespace {
 
 constexpr std::size_t kHeaderAndIpl3 = 0x1000;
 
-// CRC-32 (zlib polynomial 0xEDB88320, reflected).
+}  // namespace
+
 std::uint32_t crc32(std::span<const std::uint8_t> data) {
     static const auto table = [] {
         std::array<std::uint32_t, 256> t{};
@@ -24,6 +28,8 @@ std::uint32_t crc32(std::span<const std::uint8_t> data) {
     for (const std::uint8_t byte : data) crc = table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
     return crc ^ 0xFFFFFFFFU;
 }
+
+namespace {
 
 // Each CIC pairs with its own IPL3 (ROM 0x40-0xFFF), so a CRC of the IPL3 identifies it.
 Cic detect_cic(std::span<const std::uint8_t> rom, Region region) {
@@ -83,6 +89,7 @@ std::optional<Cartridge> Cartridge::load(std::span<const std::uint8_t> file) {
     rom.resize((rom.size() + 3) & ~std::size_t{3}, 0);
     cart.region_ = region_from_code(rom[0x3E]);
     cart.cic_ = detect_cic(rom, cart.region_);
+    cart.crc32_ = ezy::n64::crc32(rom);
     return cart;
 }
 

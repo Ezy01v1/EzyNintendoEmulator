@@ -31,6 +31,7 @@ public:
     [[nodiscard]] std::string title() const;  // header 0x20-0x33, trailing spaces removed
     [[nodiscard]] Cic cic() const { return cic_; }
     [[nodiscard]] Region region() const { return region_; }
+    [[nodiscard]] std::uint32_t crc32() const { return crc32_; }  // of the whole ROM: identifies the game
     // Big-endian word at a ROM offset; 0 past the end.
     [[nodiscard]] std::uint32_t read32(std::uint32_t offset) const;
 
@@ -38,6 +39,7 @@ private:
     std::vector<std::uint8_t> rom_;  // padded with zeros to a multiple of 4 bytes
     Cic cic_ = Cic::Cic6102;
     Region region_ = Region::Ntsc;
+    std::uint32_t crc32_ = 0;
 };
 
 }  // namespace ezy::n64

@@ -82,9 +82,13 @@ Vi::Image Vi::image(std::span<const std::uint8_t> rdram) const {
     const std::uint32_t v_start = (regs_[kVVideo] >> 16) & 0x3FF, v_end = regs_[kVVideo] & 0x3FF;
     if (h_end <= h_start || v_end <= v_start) return img;
     const std::uint32_t x_scale = regs_[kXScale] & 0xFFF, y_scale = regs_[kYScale] & 0xFFF;
-    // Screen area in pixels and lines (V_VIDEO is in half-lines), times the scale (2.10).
+    // Width: the active screen pixels (H_VIDEO) times X_SCALE (2.10 fixed point). Height:
+    // the nominal 240 (NTSC) or 288 (PAL) lines of a field times Y_SCALE. V_VIDEO usually
+    // shows a few lines less (474 of a 480-line framebuffer in PeterLemon's 640x480 mode),
+    // but the framebuffer, which is what we show and compare, is the full height.
+    const std::uint32_t nominal_lines = region_ == Region::Pal ? 288 : 240;
     img.width = static_cast<int>(((h_end - h_start) * x_scale) >> 10);
-    img.height = static_cast<int>((((v_end - v_start) / 2) * y_scale) >> 10);
+    img.height = static_cast<int>((nominal_lines * y_scale) >> 10);
     if (img.width <= 0 || img.height <= 0) return Image{};
     img.argb.assign(static_cast<std::size_t>(img.width) * static_cast<std::size_t>(img.height), 0xFF000000);
 

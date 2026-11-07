@@ -93,7 +93,7 @@ TEST_CASE("image decodes RGBA5551 from VI_ORIGIN") {
     vi.write(kYScale, 0x400);
     const Vi::Image img = vi.image(rdram);
     REQUIRE(img.width == 4);
-    REQUIRE(img.height == 2);
+    REQUIRE(img.height == 240);  // the nominal 240 NTSC lines x Y_SCALE 1.0
     CHECK(img.argb[1 * 4 + 1] == 0xFFFF0000);
     CHECK(img.argb[2] == 0xFF0000FF);
     CHECK(img.argb[0] == 0xFF000000);
@@ -113,6 +113,24 @@ TEST_CASE("image decodes RGBA8888") {
     const Vi::Image img = vi.image(rdram);
     REQUIRE(img.width == 2);
     CHECK(img.argb[1] == 0xFF123456);
+}
+
+TEST_CASE("image height is the nominal field lines times Y_SCALE") {
+    // PeterLemon's 640x480 interlaced mode: V_VIDEO shows 474 lines of a 480-line framebuffer.
+    Vi vi;
+    std::vector<std::uint8_t> rdram(0x10000, 0);
+    vi.write(kCtrl, 3);
+    vi.write(kWidth, 640);
+    vi.write(kHVideo, 0x006C02EC);
+    vi.write(kVVideo, 0x002501FF);
+    vi.write(kXScale, 0x400);
+    vi.write(kYScale, 0x800);
+    const Vi::Image img = vi.image(rdram);
+    CHECK(img.width == 640);
+    CHECK(img.height == 480);
+    vi.set_region(Region::Pal);
+    vi.write(kYScale, 0x400);
+    CHECK(vi.image(rdram).height == 288);
 }
 
 TEST_CASE("blank type gives an empty image") {
