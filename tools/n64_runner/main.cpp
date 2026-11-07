@@ -8,10 +8,13 @@
 //       otherwise prints the sizes or the first differing pixel.
 //   ezy_n64_runner <rom> --isviewer [seconds]
 //       Prints what the ROM writes to the ISViewer port (n64-systemtest) for up to
-//       `seconds` of emulated time (default 60). Exit code 0 when the output ends with
-//       n64-systemtest's all-passed summary.
+//       `seconds` of emulated time (default 60). Exit code 0 when n64-systemtest's
+//       summary says no base test failed.
+//   ezy_n64_runner <rom> --pc [frames]
+//       Debugging: prints the CPU's PC and Cause after each frame (default 10 frames).
 // Option, anywhere after the ROM: --pif <file> (a real PIF ROM).
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -111,10 +114,19 @@ int run_isviewer(N64& n64, double seconds) {
         if (out.empty()) continue;
         std::cout << out << std::flush;
         all += out;
-        if (all.find("Done!") != std::string::npos) break;
+        if (all.find("Finished in") != std::string::npos) {
+            // The summary may arrive in more than one ISViewer chunk.
+            for (int i = 0; i < 10; ++i) {
+                n64.run_frame();
+                const std::string more = n64.bus().take_isviewer_output();
+                std::cout << more << std::flush;
+                all += more;
+            }
+            break;
+        }
     }
-    // n64-systemtest's summary (src/main.rs): "Done! Tests: N. Failed: M".
-    return all.find("Failed: 0") != std::string::npos ? 0 : 1;
+    // n64-systemtest's summary (src/tests/mod.rs): "Finished in X.XXs. Base: Failed N of M tests ...".
+    return all.find("Base: Failed 0 of") != std::string::npos ? 0 : 1;
 }
 
 }  // namespace
@@ -152,6 +164,20 @@ int main(int raw_argc, char* raw_argv[]) {
     }
     if (mode == "--compare" && argc >= 4) return run_compare(*n64, args[3], argc > 4 ? std::atoi(args[4]) : 120);
     if (mode == "--isviewer") return run_isviewer(*n64, argc > 3 ? std::atof(args[3]) : 60.0);
+    if (mode == "--pc") {
+        const int frames = argc > 3 ? std::atoi(args[3]) : 10;
+        for (int i = 0; i < frames; ++i) {
+            n64->run_frame();
+            std::printf("frame %3d  pc %016llX  cause %08llX  status %08llX  epc %016llX  badvaddr %016llX\n", i,
+                        static_cast<unsigned long long>(n64->cpu().pc()),
+                        static_cast<unsigned long long>(n64->cpu().cop0().read(ezy::n64::Cop0::kCause)),
+                        static_cast<unsigned long long>(n64->cpu().cop0().read(ezy::n64::Cop0::kStatus)),
+                        static_cast<unsigned long long>(n64->cpu().cop0().read(ezy::n64::Cop0::kEpc)),
+                        static_cast<unsigned long long>(n64->cpu().cop0().read(ezy::n64::Cop0::kBadVAddr)));
+        }
+        std::cout << n64->bus().take_isviewer_output();
+        return 0;
+    }
     std::cerr << "Unknown mode " << mode << '\n';
     return 2;
 }
