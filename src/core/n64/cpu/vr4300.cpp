@@ -106,11 +106,8 @@ void Vr4300::execute_cop0(std::uint32_t instr) {
         case 0x05: cop0_.write(rd, gpr(rt)); break;                                          // DMTC0
         default:
             if (instr & (1U << 25)) {  // CO
-                switch (instr & 0x3F) {
-                    case 0x18: eret(); return;
-                    default: break;  // TLB instructions: see tlb.cpp
-                }
-                execute_tlb(instr);
+                if ((instr & 0x3F) == 0x18) eret();
+                else execute_tlb(instr);
                 return;
             }
             raise(ExceptionCode::RI);
@@ -131,12 +128,102 @@ bool Vr4300::translate(std::uint64_t vaddr, bool write, Translation& out) {
     return translate_mapped(vaddr, write, out);
 }
 
-bool Vr4300::translate_mapped(std::uint64_t vaddr, bool write, Translation&) {
-    raise_address_error(vaddr, write);  // the TLB comes in tlb.cpp
-    return false;
+bool Vr4300::wide_addressing() const {
+    switch (mode()) {
+        case Mode::Kernel: return (cop0_.status() & Cop0::kKX) != 0;
+        case Mode::Supervisor: return (cop0_.status() & Cop0::kSX) != 0;
+        default: return (cop0_.status() & Cop0::kUX) != 0;
+    }
 }
 
-void Vr4300::execute_tlb(std::uint32_t) {}
+// Every address outside kernel-mode kseg0/kseg1. Segments (VR4300 manual, chapter 5):
+//   32-bit: kuseg 0-7FFFFFFF (all modes), ksseg C0000000-DFFFFFFF (supervisor, kernel),
+//           kseg3 E0000000-FFFFFFFF (kernel); all mapped. With ERL set, kernel kuseg is
+//           unmapped and uncached.
+//   64-bit: xkuseg below 2^40, xksseg 0x4000... (supervisor, kernel), xkphys 0x8000...-
+//           0xBFFF... (kernel; unmapped, bits 61:59 pick the cache mode), xkseg 0xC000...
+//           (kernel), plus the 32-bit compatibility segments at the top.
+// In 32-bit addressing an address must be a sign-extended 32-bit value.
+bool Vr4300::translate_mapped(std::uint64_t vaddr, bool write, Translation& out) {
+    const Mode m = mode();
+    const bool wide = wide_addressing();
+    const auto sext = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(vaddr)));
+    bool ok = false;
+    if (!wide || vaddr == sext) {
+        if (vaddr != sext) {
+            ok = false;
+        } else if (vaddr < 0x80000000ULL) {
+            if (m == Mode::Kernel && (cop0_.status() & Cop0::kERL)) {
+                out.paddr = static_cast<std::uint32_t>(vaddr);
+                out.cached = false;
+                return true;
+            }
+            ok = true;
+        } else if (vaddr >= 0xFFFFFFFFC0000000ULL && vaddr < 0xFFFFFFFFE0000000ULL) {
+            ok = m != Mode::User;
+        } else if (vaddr >= 0xFFFFFFFFE0000000ULL) {
+            ok = m == Mode::Kernel;
+        }  // kseg0/kseg1 outside kernel mode: address error
+    } else {
+        switch (vaddr >> 62) {
+            case 0: ok = vaddr < (1ULL << 40); break;
+            case 1: ok = m != Mode::User && (vaddr & 0x3FFFFFFFFFFFFFFFULL) < (1ULL << 40); break;
+            case 2:
+                if (m != Mode::Kernel || (vaddr & 0x07FFFFFF00000000ULL) != 0) break;
+                out.paddr = static_cast<std::uint32_t>(vaddr);
+                out.cached = ((vaddr >> 59) & 7) != 2;
+                return true;
+            default: ok = m == Mode::Kernel && (vaddr & 0x3FFFFFFFFFFFFFFFULL) < (1ULL << 40); break;
+        }
+    }
+    if (!ok) {
+        raise_address_error(vaddr, write);
+        return false;
+    }
+    const auto asid = static_cast<std::uint8_t>(cop0_.read(Cop0::kEntryHi));
+    const Tlb::Result r = tlb_.translate(vaddr, asid);
+    if (!r.hit) {
+        raise_tlb(write ? ExceptionCode::TlbS : ExceptionCode::TlbL, vaddr, true, wide);
+        return false;
+    }
+    if (!r.valid) {
+        raise_tlb(write ? ExceptionCode::TlbS : ExceptionCode::TlbL, vaddr, false, wide);
+        return false;
+    }
+    if (write && !r.dirty) {
+        raise_tlb(ExceptionCode::Mod, vaddr, false, wide);
+        return false;
+    }
+    out.paddr = r.paddr;
+    out.cached = r.cached;
+    return true;
+}
+
+void Vr4300::raise_tlb(ExceptionCode code, std::uint64_t vaddr, bool refill, bool wide) {
+    cop0_.raw(Cop0::kBadVAddr) = vaddr;
+    std::uint64_t& context = cop0_.raw(Cop0::kContext);
+    context = (context & 0xFFFFFFFFFF800000ULL) | (((vaddr >> 13) & 0x7FFFF) << 4);
+    std::uint64_t& xcontext = cop0_.raw(Cop0::kXContext);
+    xcontext = (xcontext & 0xFFFFFFFE00000000ULL) | ((vaddr >> 62) << 31) | (((vaddr >> 13) & 0x7FFFFFF) << 4);
+    std::uint64_t& entry_hi = cop0_.raw(Cop0::kEntryHi);
+    entry_hi = (vaddr & 0xC00000FFFFFFE000ULL) | (entry_hi & 0xFF);
+    // TLB refill vectors: 0x000 (32-bit addressing) or 0x080 (64-bit); otherwise 0x180.
+    enter_exception(code, 0, refill ? (wide ? 0x080 : 0x000) : 0x180);
+}
+
+void Vr4300::execute_tlb(std::uint32_t instr) {
+    switch (instr & 0x3F) {
+        case 0x01: tlb_.read(static_cast<int>(cop0_.read(Cop0::kIndex) & 31), cop0_); break;    // TLBR
+        case 0x02: tlb_.write(static_cast<int>(cop0_.read(Cop0::kIndex) & 31), cop0_); break;   // TLBWI
+        case 0x06: tlb_.write(static_cast<int>(cop0_.read(Cop0::kRandom) & 31), cop0_); break;  // TLBWR
+        case 0x08: {                                                                            // TLBP
+            const int index = tlb_.probe(cop0_);
+            cop0_.raw(Cop0::kIndex) = index < 0 ? 0x80000000ULL : static_cast<std::uint64_t>(index);
+            break;
+        }
+        default: raise(ExceptionCode::RI); break;
+    }
+}
 
 void Vr4300::execute_cop1(std::uint32_t) {}
 

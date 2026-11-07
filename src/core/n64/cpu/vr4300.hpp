@@ -5,6 +5,7 @@
 
 #include "n64/cpu/cop0.hpp"
 #include "n64/cpu/cpu_bus.hpp"
+#include "n64/cpu/tlb.hpp"
 
 namespace ezy::n64 {
 
@@ -50,6 +51,7 @@ public:
     void serialize(Ar& ar) {
         ar(gpr_), ar(hi_), ar(lo_), ar(pc_), ar(next_pc_), ar(in_delay_slot_), ar(branch_taken_), ar(llbit_);
         cop0_.serialize(ar);
+        tlb_.serialize(ar);
     }
 
 private:
@@ -78,6 +80,9 @@ private:
     // Raises Reserved Instruction (and returns false) for a 64-bit op in 32-bit user or
     // supervisor mode.
     bool require_64bit();
+    // TLB miss/invalid/modified: BadVAddr, Context, XContext, EntryHi, then the vector.
+    void raise_tlb(ExceptionCode code, std::uint64_t vaddr, bool refill, bool wide);
+    [[nodiscard]] bool wide_addressing() const;  // 64-bit addressing in the current mode
     void eret();
     void raise_address_error(std::uint64_t vaddr, bool write);
     // The exception vector: base (BEV) + offset; refill uses the TLB refill offsets.
@@ -87,6 +92,7 @@ private:
 
     CpuBus& bus_;
     Cop0 cop0_;
+    Tlb tlb_;
     std::array<std::uint64_t, 32> gpr_{};
     std::uint64_t hi_ = 0, lo_ = 0;
     std::uint64_t pc_ = 0, next_pc_ = 4;
