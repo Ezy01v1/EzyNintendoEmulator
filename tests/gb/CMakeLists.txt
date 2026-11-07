@@ -45,7 +45,7 @@ endif()
 set(EZY_MOONEYE_DMG_TIMING
     ppu/intr_1_2_timing-GS ppu/intr_2_0_timing ppu/intr_2_mode0_timing ppu/intr_2_mode0_timing_sprites
     ppu/intr_2_mode3_timing ppu/intr_2_oam_ok_timing ppu/stat_irq_blocking ppu/stat_lyc_onoff
-    ppu/vblank_stat_intr-GS
+    ppu/vblank_stat_intr-GS ppu/hblank_ly_scx_timing-GS ppu/lcdon_timing-GS ppu/lcdon_write_timing-GS
     oam_dma/basic oam_dma/reg_read oam_dma/sources-GS oam_dma_start oam_dma_restart oam_dma_timing
     timer/div_write timer/rapid_toggle timer/tim00 timer/tim00_div_trigger timer/tim01
     timer/tim01_div_trigger timer/tim10 timer/tim10_div_trigger timer/tim11 timer/tim11_div_trigger

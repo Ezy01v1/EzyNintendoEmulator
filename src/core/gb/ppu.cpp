@@ -16,24 +16,31 @@ constexpr std::uint8_t apply_palette(std::uint8_t palette, std::uint8_t color_in
 
 }  // namespace
 
-// The LY register runs a few dots ahead of the line itself: it shows the next line number
-// 3 dots before the line ends (the same 3-dot offset as the mode 3 calibration in
-// ppu_draw.cpp). Line 153 is special: LY reads 153 for 4 dots, then 0 for the rest of it.
-constexpr int kLyEarlyDots = kLineOriginOffsetDots;
-constexpr int kFirstLineStartDot = 0;   // line 0 after LCD on starts this far in
-constexpr int kFirstLineDrawDelay = 0;   // ...and its mode 3 starts this much later
+// Timing around the end of a line (Mooneye lcdon_timing, hblank_ly_scx_timing-GS). The
+// hardware does several things one M-cycle (4 dots) before the STAT mode bits change:
+//  - LY shows the next line number 4 dots before the line ends. Line 153 is special: LY
+//    reads 153 for those 4 dots only (one M-cycle), and 0 for the whole of line 153.
+//  - The LY=LYC comparator only catches up 3 dots before the line ends (the line origin
+//    offset of ppu_draw.cpp); in between, STAT bit 2 reads 0.
+//  - The PPU takes the memory buses early, see oam_readable().
+constexpr int kLyEarlyDots = 4;
+constexpr int kLycCompareEarlyDots = kLineOriginOffsetDots;
+constexpr int kBusLockLeadDots = 4;
+// Line 0 after LCD on: no OAM scan, and with the bus locks above it needs no other offset.
+constexpr int kFirstLineDrawDelay = 0;
 // On a CGB the mode 2 STAT source of line 144 rises one M-cycle before VBlank does
 // (Mooneye misc/ppu/vblank_stat_intr-C); on a DMG both come together.
 constexpr int kCgbVblankOamLeadDots = 4;
 
-// Outside mode 3 a dot only matters at a few places in the line: dot 1 (line 153's LY
-// change, and the end of line 144's dot-0 mode 2 STAT source), the start of mode 3, the
-// CGB's early mode 2 STAT source before line 144, the early LY change and the end of the
-// line. Every other dot of modes 0, 1 and 2 leaves the state as it was, so tick() skips
-// straight over them.
+// Outside mode 3 a dot only matters at a few places in the line: dot 1 (the end of line
+// 144's dot-0 mode 2 STAT source), the start of mode 3, dot
+// 452 (LY changes; the CGB's early mode 2 STAT source before line 144), dot 453 (the LYC
+// comparator catches up) and the end of the line. Every other dot of modes 0, 1 and 2
+// leaves the state as it was, so tick() skips straight over them. (The bus locks are
+// worked out from dot_ when the CPU asks, so they need no event.)
 int Ppu::next_event_dot() const {
-    constexpr int kEvents[] = {4 - kLyEarlyDots, kOamScanDots + kFirstLineDrawDelay,
-                               kDotsPerLine - kCgbVblankOamLeadDots, kDotsPerLine - kLyEarlyDots, kDotsPerLine};
+    constexpr int kEvents[] = {1, kOamScanDots + kFirstLineDrawDelay, kDotsPerLine - kLyEarlyDots,
+                               kDotsPerLine - kCgbVblankOamLeadDots, kDotsPerLine - kLycCompareEarlyDots, kDotsPerLine};
     for (const int event : kEvents) {
         if (event > dot_) return event;
     }
@@ -59,7 +66,6 @@ void Ppu::tick(int dots) {
 void Ppu::step_dot() {
     ++dot_;
     if (dot_ == kDotsPerLine - kLyEarlyDots && ly_ != kLinesPerFrame - 1) ly_reg_ = static_cast<std::uint8_t>(ly_ + 1);
-    if (ly_ == kLinesPerFrame - 1 && dot_ == 4 - kLyEarlyDots) ly_reg_ = 0;
     if (dot_ == kDotsPerLine) {
         dot_ = 0;
         first_line_ = false;
@@ -67,6 +73,8 @@ void Ppu::step_dot() {
         if (ly_ == kLcdHeight) {
             interrupts_ |= interrupt::kVBlank;
             frame_ready_ = true;
+        } else if (ly_ == kLinesPerFrame - 1) {
+            ly_reg_ = 0;
         } else if (ly_ == kLinesPerFrame) {
             ly_ = 0;
             window_y_hit_ = false;
@@ -90,8 +98,41 @@ void Ppu::step_dot() {
         if (window_drawn_) ++window_line_;
     }
     mode_ = new_mode;
-    lyc_flag_ = ly_reg_ == lyc_;
+    lyc_flag_ = compare_lyc();
     update_stat_line();
+}
+
+// LY=LYC. Right after LY changes the comparison reads false until the comparator catches
+// up (Mooneye lcdon_timing: STAT bit 2 is clear when LY has just become equal to LYC).
+bool Ppu::compare_lyc() const {
+    const bool catching_up = ly_ != kLinesPerFrame - 1 && dot_ >= kDotsPerLine - kLyEarlyDots &&
+                             dot_ < kDotsPerLine - kLycCompareEarlyDots;
+    return !catching_up && ly_reg_ == lyc_;
+}
+
+// The PPU takes the memory buses a little before the STAT mode bits change (Mooneye
+// lcdon_timing and lcdon_write_timing, both from the line start):
+//  - OAM reads are locked from 4 dots before a visible line's OAM scan until mode 3 ends.
+//  - OAM writes are locked during the OAM scan and mode 3, except for the 4 dots just
+//    before mode 3, when the scan is over.
+//  - VRAM reads are locked from 4 dots before mode 3, VRAM writes only in mode 3.
+// Line 0 after LCD on has no OAM scan, so none of the early locks.
+bool Ppu::oam_readable() const {
+    if (!lcd_on()) return true;
+    if (mode_ == 2 || mode_ == 3) return false;
+    const bool next_line_visible = ly_ < kLcdHeight - 1 || ly_ == kLinesPerFrame - 1;
+    return !(next_line_visible && dot_ >= kDotsPerLine - kBusLockLeadDots);
+}
+
+bool Ppu::oam_accessible() const {
+    if (!lcd_on()) return true;
+    return mode_ != 3 && !(mode_ == 2 && dot_ < kOamScanDots - kBusLockLeadDots);
+}
+
+bool Ppu::vram_readable() const {
+    if (!vram_accessible()) return false;
+    if (!lcd_on()) return true;
+    return !(mode_ == 2 && dot_ >= kOamScanDots - kBusLockLeadDots);
 }
 
 // The STAT interrupt line is the OR of the enabled sources; only its rising edge requests
@@ -147,14 +188,12 @@ void Ppu::write_register(std::uint16_t addr, std::uint8_t value) {
                 window_line_ = 0;
                 frame_.fill(blank_color());
             } else if (!was_on && lcd_on()) {
-                // Line 0 starts over, in mode 0 (no OAM scan), and LY=LYC is checked at once.
-                // On hardware this line is also shorter and draws a little late (Mooneye
-                // lcdon_timing); those offsets aren't modelled yet (the two knobs below stay
-                // at 0), see the known failures in roms/README.md.
-                dot_ = kFirstLineStartDot;
+                // Line 0 starts over, in mode 0 (no OAM scan), and LY=LYC is checked at once
+                // (Mooneye lcdon_timing and lcdon_write_timing).
+                dot_ = 0;
                 mode_ = 0;
                 first_line_ = true;
-                lyc_flag_ = ly_reg_ == lyc_;
+                lyc_flag_ = compare_lyc();
             }
             break;
         }
@@ -164,7 +203,7 @@ void Ppu::write_register(std::uint16_t addr, std::uint8_t value) {
         case 0xFF44: break;  // LY is read-only
         case 0xFF45:
             lyc_ = value;
-            if (lcd_on()) lyc_flag_ = ly_reg_ == lyc_;  // the comparison only runs while on
+            if (lcd_on()) lyc_flag_ = compare_lyc();  // the comparison only runs while on
             break;
         case 0xFF47: bgp_ = value; break;
         case 0xFF48: obp0_ = value; break;

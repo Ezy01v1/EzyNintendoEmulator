@@ -4,9 +4,11 @@
 //  - Mode 3 starts with a dummy fetch. Then the fetcher reads a tile in 6 dots (tile
 //    number, low byte, high byte; 2 dots each) and pushes its 8 pixels into the BG FIFO
 //    on the next dot once the FIFO is empty. One pixel leaves the FIFO per dot.
-//    Pan Docs puts the whole of mode 3 at 172 dots. Mooneye's intr_2_mode0_timing(_sprites)
-//    show that, counted from our line start, the CPU sees mode 0 3 dots earlier than that,
-//    so the dummy fetch here is 3 dots: 3 + 6 + 160 = 169.
+//    Pan Docs puts the whole of mode 3 at 172 dots. Here the dummy fetch is 3 dots, so the
+//    last pixel is out after 3 + 6 + 160 = 169, and mode 0 starts 3 dots later. Sprite
+//    fetches absorb those 3 dots (kEndSlackDots), which is what Mooneye's
+//    intr_2_mode0_timing_sprites needs, while hblank_ly_scx_timing-GS and lcdon_timing-GS
+//    need the full 172 without sprites.
 //  - The first SCX % 8 pixels of the line are thrown away (+1 dot each).
 //  - When the window starts, the BG FIFO is cleared and the fetcher restarts on the window
 //    map, which costs the 6 dots of a fetch.
@@ -34,6 +36,11 @@ constexpr std::uint8_t kLcdcWindowMap = 0x40;
 constexpr int kDummyFetchDots = 6 - kLineOriginOffsetDots;  // = 3, see above
 constexpr int kFetchDots = 6;
 constexpr int kSpriteFetchDots = 6;
+// After the last pixel, mode 0 starts this many dots later, less the dots spent fetching
+// sprites (they absorb it). With no sprites mode 3 is 172 dots, like Pan Docs says; with
+// sprites the sprite timing calibrated against intr_2_mode0_timing_sprites is unchanged.
+// Mooneye hblank_ly_scx_timing-GS and lcdon_timing-GS pin the 172.
+constexpr int kEndSlackDots = 3;
 
 }  // namespace
 
@@ -67,6 +74,8 @@ void Ppu::begin_mode3() {
     window_drawn_ = false;
     sprite_dots_ = 0;
     penalty_tile_ = -1;
+    sprite_stall_dots_ = 0;
+    end_dots_ = 0;
 }
 
 // One fetcher dot. Steps 0-5 read the tile (the reads happen on the odd steps); at step 6
@@ -161,6 +170,7 @@ void Ppu::merge_sprite(const LineSprite& sprite) {
 
 // One dot of mode 3. Returns true once the 160th pixel is out (mode 3 is over).
 bool Ppu::draw_dot() {
+    if (end_dots_ > 0) return --end_dots_ == 0;  // all 160 pixels are out
     if (startup_dots_ > 0) {
         --startup_dots_;
         return false;
@@ -210,6 +220,7 @@ bool Ppu::draw_dot() {
                 penalty_tile_ = tile;
             }
             fetching_sprite_ = sprite;
+            sprite_stall_dots_ += kSpriteFetchDots + extra;
             sprite_dots_ = kSpriteFetchDots + extra - 1;  // this dot is the first one
             if (sprite_dots_ == 0) {
                 merge_sprite(line_sprites_[static_cast<std::size_t>(sprite)]);
@@ -229,7 +240,9 @@ bool Ppu::draw_dot() {
     }
     const FifoObjPixel obj = obj_fifo_.empty() ? FifoObjPixel{} : obj_fifo_.pop();
     frame_[static_cast<std::size_t>(ly_) * kLcdWidth + static_cast<std::size_t>(lx_)] = mix_pixel(bg, obj);
-    return ++lx_ == kLcdWidth;
+    if (++lx_ < kLcdWidth) return false;
+    end_dots_ = std::max(0, kEndSlackDots - sprite_stall_dots_);
+    return end_dots_ == 0;
 }
 
 // Final colour from a BG pixel and a (possibly transparent) sprite pixel.

@@ -19,7 +19,8 @@ inline constexpr std::array<std::uint16_t, 4> kDmgGreys = {0x7FFF, 0x56B5, 0x294
 
 // Our line timing is measured from an origin about 3 dots after the hardware's (found by
 // calibrating against Mooneye's hardware-verified PPU timing ROMs). Both the mode 3
-// dummy fetch (ppu_draw.cpp) and the early LY change (ppu.cpp) come from this one value.
+// dummy fetch (ppu_draw.cpp) and the LY=LYC comparator update (ppu.cpp) come from this
+// one value.
 inline constexpr int kLineOriginOffsetDots = 3;
 
 inline constexpr int kDotsPerFrame = kDotsPerLine * kLinesPerFrame;  // 70224 T-cycles
@@ -91,17 +92,23 @@ public:
         ar(lx_), ar(discard_), ar(startup_dots_), ar(fetch_step_), ar(fetch_tile_);
         ar(fetch_tile_index_), ar(fetch_attributes_), ar(fetch_lo_), ar(fetch_hi_);
         ar(window_active_), ar(window_drawn_), ar(sprite_dots_), ar(fetching_sprite_), ar(penalty_tile_);
+        ar(sprite_stall_dots_), ar(end_dots_);
     }
 
     [[nodiscard]] std::uint8_t ly() const { return ly_; }
     [[nodiscard]] int mode() const { return mode_; }
     [[nodiscard]] std::uint8_t lcdc() const { return lcdc_; }
     [[nodiscard]] bool lcd_on() const { return (lcdc_ & 0x80) != 0; }
+    // CPU writes (*_accessible) and reads (*_readable) are locked at slightly different
+    // times, see ppu.cpp.
     [[nodiscard]] bool vram_accessible() const { return !lcd_on() || mode_ != 3; }
-    [[nodiscard]] bool oam_accessible() const { return !lcd_on() || (mode_ != 2 && mode_ != 3); }
+    [[nodiscard]] bool oam_accessible() const;
+    [[nodiscard]] bool vram_readable() const;
+    [[nodiscard]] bool oam_readable() const;
 
 private:
     void step_dot();
+    [[nodiscard]] bool compare_lyc() const;
     [[nodiscard]] int next_event_dot() const;  // next dot outside mode 3 where step_dot() changes anything
     // Mode 3 (ppu_draw.cpp).
     void scan_oam();
@@ -177,6 +184,8 @@ private:
     int sprite_dots_ = 0;         // dots left in the current sprite fetch
     int fetching_sprite_ = 0;     // index into line_sprites_
     int penalty_tile_ = -1;       // BG tile that already paid the sprite alignment penalty
+    int sprite_stall_dots_ = 0;   // dots spent on sprite fetches this line
+    int end_dots_ = 0;            // dots of mode 3 left after the last pixel
 };
 
 }  // namespace ezy::gb

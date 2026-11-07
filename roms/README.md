@@ -72,17 +72,32 @@ Same method; the baseline was re-measured on this PC before the change.
   which is what CGB hardware does too; it still passes with `--model dmg`.
 - Mooneye: 81 of 115 ROMs pass on both models (115 counts every `.gb` in the suite).
 
-Still open, with what was learned:
+What was still open then is fixed by the next pass.
 
-- `ppu/hblank_ly_scx_timing-GS`: it only passes when leaving HALT for the interrupt takes
-  one more M-cycle **and** the PPU starts at a different dot after boot (tried: env knobs).
-  Either change alone breaks `halt_ime1_timing2-GS`, `di_timing-GS`,
-  `halt_ime0_nointr_timing` and the `ppu/intr_2_*` ROMs, which were calibrated around the
-  current HALT timing. Sampling IF part way through the M-cycle (an interrupt in the last
-  dots seen one cycle later) did not help either.
-- `ppu/lcdon_timing-GS`, `lcdon_write_timing-GS`: no value of the two LCD-on knobs in
-  `ppu.cpp` (start dot 0..8, draw delay -4..4) passes. The expected tables say that on a
-  normal line STAT shows mode 0 at least 250 dots after the line starts, while our mode 3
-  ends at dot 249, and that LY changes at most 203 dots after mode 0 starts (ours: 204).
-  Fixing that means recalibrating `kLineOriginOffsetDots`, the mode 3 dummy fetch and the
-  HALT wake-up together against all the PPU ROMs.
+### PPU line timing recalibration (2026-11-06)
+
+The model was derived from the expected-value tables of `lcdon_timing-GS` and
+`lcdon_write_timing-GS` (they read LY, STAT, OAM and VRAM at known cycles after LCD on),
+then checked against every timing ROM. In our timing frame (CPU accesses see the PPU after
+the 4 dots of their M-cycle):
+
+- LY shows the next line 4 dots before the line ends (was 3). STAT bit 2 reads 0 until the
+  LY=LYC comparator catches up one dot later. LY reads 153 for exactly one M-cycle.
+- OAM reads are locked 4 dots before a visible line's OAM scan; VRAM reads 4 dots before
+  mode 3. OAM writes pass in the 4 dots between the end of the OAM scan and mode 3. CPU
+  reads and writes have separate locks.
+- Mode 3 is 172 dots without sprites. Mode 0 starts 3 dots after the last pixel, and
+  sprite fetches absorb those dots, which keeps `intr_2_mode0_timing_sprites` passing.
+- HALT is unchanged: `halt_ime1_timing2-GS` proves it has no extra delay.
+
+Results:
+
+- `hblank_ly_scx_timing-GS`, `lcdon_timing-GS`, `lcdon_write_timing-GS` pass and run in
+  ctest. Mooneye: **84** of 115 on both models (81 before), no ROM that passed fails now.
+- Pokémon Silver screenshots (frames 900, 1500, 2400, 3600) are identical to before.
+- Performance, both builds measured alternately on the same PC: Pokémon Silver 13.5-14.4 %
+  before, 14.8-14.9 % after (mode 3 is 3 dots longer and LYC is compared every dot).
+
+Remaining failures are all outside the DMG/CGB timing work: boot-state ROMs for other
+models (`boot_div-*`, `boot_hwio-*`, `boot_regs-*` for S/MGB/dmg0/SGB), `unused_hwio`,
+MBC2 and the MBC1 multicart.
