@@ -225,8 +225,6 @@ void Vr4300::execute_tlb(std::uint32_t instr) {
     }
 }
 
-void Vr4300::execute_cop1(std::uint32_t) {}
-
 bool Vr4300::require_64bit() {
     if (allow_64bit_ops()) return true;
     raise(ExceptionCode::RI);
@@ -384,6 +382,20 @@ void Vr4300::execute_load_store(std::uint32_t instr) {
             store(aligned, (dword & keep) | (reg << shift));
             break;
         }
+        // COP1 loads and stores (Status.CU1 was checked by the caller). With FR = 0, LDC1 and
+        // SDC1 use the even register of the pair.
+        case 0x31: {  // LWC1
+            std::uint32_t v;
+            if (load(vaddr, v)) cop1_.write32(rt, v, (cop0_.status() & Cop0::kFR) != 0);
+            break;
+        }
+        case 0x35: {  // LDC1
+            std::uint64_t v;
+            if (load(vaddr, v)) cop1_.write64(rt, v, (cop0_.status() & Cop0::kFR) != 0);
+            break;
+        }
+        case 0x39: store(vaddr, cop1_.read32(rt, (cop0_.status() & Cop0::kFR) != 0)); break;  // SWC1
+        case 0x3D: store(vaddr, cop1_.read64(rt, (cop0_.status() & Cop0::kFR) != 0)); break;  // SDC1
         default: break;
     }
 }

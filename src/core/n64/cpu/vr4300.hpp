@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "n64/cpu/cop0.hpp"
+#include "n64/cpu/cop1.hpp"
 #include "n64/cpu/cpu_bus.hpp"
 #include "n64/cpu/tlb.hpp"
 
@@ -40,6 +41,8 @@ public:
     [[nodiscard]] std::uint64_t lo() const { return lo_; }
     [[nodiscard]] Cop0& cop0() { return cop0_; }
     [[nodiscard]] const Cop0& cop0() const { return cop0_; }
+    [[nodiscard]] Cop1& cop1() { return cop1_; }
+    [[nodiscard]] const Cop1& cop1() const { return cop1_; }
 
     // Takes an exception for the instruction being executed (or, for Int, about to be).
     // coprocessor goes to Cause.CE for CpU.
@@ -52,6 +55,7 @@ public:
         ar(gpr_), ar(hi_), ar(lo_), ar(pc_), ar(next_pc_), ar(in_delay_slot_), ar(branch_taken_), ar(llbit_);
         cop0_.serialize(ar);
         tlb_.serialize(ar);
+        cop1_.serialize(ar);
     }
 
 private:
@@ -93,6 +97,7 @@ private:
     CpuBus& bus_;
     Cop0 cop0_;
     Tlb tlb_;
+    Cop1 cop1_;
     std::array<std::uint64_t, 32> gpr_{};
     std::uint64_t hi_ = 0, lo_ = 0;
     std::uint64_t pc_ = 0, next_pc_ = 4;

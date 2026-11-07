@@ -120,7 +120,8 @@ void Vr4300::execute(std::uint32_t instr) {
         case 0x10: execute_cop0(instr); break;
         case 0x11: case 0x31: case 0x35: case 0x39: case 0x3D:  // COP1, LWC1, LDC1, SWC1, SDC1
             if (!(cop0_.status() & Cop0::kCU1)) raise(ExceptionCode::CpU, 1);
-            else execute_cop1(instr);
+            else if (op == 0x11) execute_cop1(instr);
+            else execute_load_store(instr);
             break;
         case 0x12: case 0x32: case 0x36: case 0x3A: case 0x3E:  // COP2: there is none
             if (!(cop0_.status() & (1U << 30))) raise(ExceptionCode::CpU, 2);
