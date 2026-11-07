@@ -12,6 +12,7 @@
 #include "n64/pi.hpp"
 #include "n64/rsp_regs.hpp"
 #include "n64/scheduler.hpp"
+#include "n64/vi.hpp"
 
 namespace ezy::n64 {
 
@@ -47,6 +48,8 @@ public:
     [[nodiscard]] Mi& mi() { return mi_; }
     [[nodiscard]] Pi& pi() { return pi_; }
     [[nodiscard]] RspRegs& rsp() { return rsp_; }
+    [[nodiscard]] Vi& vi() { return vi_; }
+    [[nodiscard]] const Vi& vi() const { return vi_; }
     [[nodiscard]] std::span<std::uint8_t> rdram() { return rdram_; }
     [[nodiscard]] std::span<const std::uint8_t> rdram() const { return rdram_; }
     // Text a program printed through the ISViewer port since the last call.
@@ -58,6 +61,7 @@ public:
         mi_.serialize(ar);
         pi_.serialize(ar);
         rsp_.serialize(ar);
+        vi_.serialize(ar);
     }
 
 private:
@@ -77,6 +81,7 @@ private:
     Mi mi_;
     Pi pi_;
     RspRegs rsp_;
+    Vi vi_;
 };
 
 }  // namespace ezy::n64
