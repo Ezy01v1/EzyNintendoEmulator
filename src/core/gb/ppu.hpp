@@ -102,6 +102,7 @@ public:
 
 private:
     void step_dot();
+    [[nodiscard]] int next_event_dot() const;  // next dot outside mode 3 where step_dot() changes anything
     // Mode 3 (ppu_draw.cpp).
     void scan_oam();
     void begin_mode3();

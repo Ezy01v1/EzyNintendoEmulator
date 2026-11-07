@@ -520,6 +520,26 @@ TEST_CASE("entering VBlank also fires the mode 2 STAT source") {
     CHECK((ppu.take_interrupts() & interrupt::kStat) != 0);
 }
 
+// Mooneye vblank_stat_intr-GS / -C: together with VBlank on DMG, one M-cycle earlier on CGB.
+TEST_CASE("the line 144 mode 2 STAT source comes with VBlank on DMG, 4 dots earlier on CGB") {
+    for (const Model model : {Model::Dmg, Model::Cgb}) {
+        Ppu ppu;
+        ppu.set_model(model, model == Model::Cgb);
+        ppu.write_register(0xFF41, 0x20);  // mode 2 interrupt only
+        while (ppu.ly() != 143) ppu.tick(1);
+        ppu.take_interrupts();
+        int dots_before_vblank = 0;
+        bool stat_seen = false;
+        while (ppu.ly() != 144) {
+            ppu.tick(1);
+            if (ppu.take_interrupts() & interrupt::kStat) stat_seen = true;
+            if (stat_seen && ppu.ly() != 144) ++dots_before_vblank;
+        }
+        CHECK(stat_seen);
+        CHECK(dots_before_vblank == (model == Model::Cgb ? 4 : 0));
+    }
+}
+
 TEST_CASE("window at WX=7 is not shifted by SCX fine scroll") {
     Ppu ppu;
     ppu.write_register(0xFF40, 0x00);

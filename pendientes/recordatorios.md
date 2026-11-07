@@ -16,11 +16,14 @@ _Última actualización: 2026-11-06_
 
 ## Pendientes (en este orden, antes de empezar N64)
 
-1. [ ] **Optimizar rendimiento GB**: Pokémon Silver usa 32 % de un núcleo (25 % antes del FIFO).
-       Idea: saltar el bucle por dot en modos 0/1/2; los cambios de LY en el dot 453 y el dot 1 de la línea 153 deben seguir exactos.
-2. [ ] **ROMs Mooneye que fallan**: `ppu/hblank_ly_scx_timing-GS` (regresión del pase de precisión),
-       `lcdon_timing-GS`, `lcdon_write_timing-GS`, `misc/ppu/vblank_stat_intr-C`. Detalles en `roms/README.md`.
+1. [x] **Optimizar rendimiento GB**: hecho en la rama `gb/perf`. El PPU salta los dots sin eventos
+       de los modos 0/1/2. Pokémon Silver: 24 % → 12 % de un núcleo (medido en la PC con Build Tools).
+2. [ ] **ROMs Mooneye que fallan**: `misc/ppu/vblank_stat_intr-C` ya pasa (rama `gb/perf`).
+       Quedan `ppu/hblank_ly_scx_timing-GS`, `lcdon_timing-GS` y `lcdon_write_timing-GS`: hay que
+       recalibrar juntos el origen de línea del PPU, el dummy fetch y la salida de HALT.
+       Lo que se probó y las cuentas están en `roms/README.md`.
 3. [ ] **Probar Pokémon Silver a fondo**: guardado en el juego, RTC día/noche, glitches gráficos.
+       La intro se ve bien en `ezy_gb_runner --screenshot`; falta jugarlo en `ezyemu` (necesita al usuario).
 4. [ ] **GBA: probar juegos comerciales**. Hay que copiar dumps `.gba` propios a `roms/` (ignorado por git).
        Pokémon Emerald sirve para probar el RTC. Usar `ezy_gba_runner --screenshot`.
 5. [x] (Opcional) La ventana VRAM del debugger se encima con la ventana Screen (posición fija).
@@ -33,6 +36,10 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 
 ## Cómo trabajar
 
+- En la PC con solo Build Tools 2022 (sin Visual Studio completo), `cmake` no está en el PATH: viene en
+  `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`.
+- ROMs de prueba: todas en `roms/` (de dónde salen: `roms/README.md`). Datos SingleStepTests:
+  `git clone --depth 1 https://github.com/SingleStepTests/sm83.git testdata/sm83`.
 - Uso varios PCs: el código se mueve solo por git (`git pull` al empezar, `git push` al terminar).
 - Compilar solo con presets: `cmake --preset default` → `build/default`,
   `cmake --build --preset debug`, `ctest --preset debug`.
@@ -45,3 +52,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-05 — GBA terminado, PR #1. Se agregaron CMake presets.
 - 2026-11-06 — GBC mergeado (PR #2). Pase de precisión GB mergeado (PR #3). Se crea esta carpeta.
 - 2026-11-06 — Revisión de pendientes: el 5 (ventana VRAM) ya estaba resuelto en `f82824b`; se marca. 1–4 siguen abiertos.
+- 2026-11-06 — PC con Build Tools: se instalan Build Tools y ROMs de prueba. Pendiente 1 hecho (24 % → 12 %), `vblank_stat_intr-C` arreglado. hblank_ly_scx y lcdon siguen abiertos (rama `gb/perf`).
