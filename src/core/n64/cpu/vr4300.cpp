@@ -221,7 +221,7 @@ void Vr4300::execute_tlb(std::uint32_t instr) {
             cop0_.raw(Cop0::kIndex) = index < 0 ? 0x80000000ULL : static_cast<std::uint64_t>(index);
             break;
         }
-        default: raise(ExceptionCode::RI); break;
+        default: break;  // the other COP0 functions are undefined and do nothing
     }
 }
 

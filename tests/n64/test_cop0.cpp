@@ -167,6 +167,17 @@ TEST_CASE("LL sets LLAddr to the physical address >> 4") {
     CHECK(f.cpu.cop0().read(Cop0::kLLAddr) == 0x3C0);
 }
 
+// n64-systemtest probes for emulator extensions with COP0 function 0x20; on hardware the
+// undefined COP0 functions do nothing.
+TEST_CASE("an undefined COP0 function is a no-op") {
+    CpuFixture f;
+    kernel_ready(f);
+    f.load({r(0x10, 0x10, 0, 0, 0, 0x20), addiu(t0, 0, 7)});
+    f.run(2);
+    CHECK(f.cpu.pc() == CpuFixture::kEntry + 8);
+    CHECK(f.cpu.gpr(t0) == 7);
+}
+
 TEST_CASE("PRId and Random") {
     CpuFixture f;
     CHECK(f.cpu.cop0().read(Cop0::kPrId) == 0xB22);
