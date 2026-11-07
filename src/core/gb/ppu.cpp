@@ -1,5 +1,6 @@
 #include "gb/ppu.hpp"
 
+#include <algorithm>
 
 #include "gb/interrupts.hpp"
 
@@ -15,17 +16,41 @@ constexpr std::uint8_t apply_palette(std::uint8_t palette, std::uint8_t color_in
 
 }  // namespace
 
-void Ppu::tick(int dots) {
-    if (!lcd_on()) return;
-    for (int i = 0; i < dots; ++i) step_dot();
-}
-
 // The LY register runs a few dots ahead of the line itself: it shows the next line number
 // 3 dots before the line ends (the same 3-dot offset as the mode 3 calibration in
 // ppu_draw.cpp). Line 153 is special: LY reads 153 for 4 dots, then 0 for the rest of it.
 constexpr int kLyEarlyDots = kLineOriginOffsetDots;
 constexpr int kFirstLineStartDot = 0;   // line 0 after LCD on starts this far in
 constexpr int kFirstLineDrawDelay = 0;   // ...and its mode 3 starts this much later
+
+// Outside mode 3 a dot only matters at a few places in the line: dot 1 (line 153's LY
+// change, and the end of line 144's dot-0 mode 2 STAT source), the start of mode 3, the
+// early LY change and the end of the line. Every other dot of modes 0, 1 and 2 leaves
+// the state as it was, so tick() skips straight over them.
+int Ppu::next_event_dot() const {
+    constexpr int kEvents[] = {4 - kLyEarlyDots, kOamScanDots + kFirstLineDrawDelay, kDotsPerLine - kLyEarlyDots,
+                               kDotsPerLine};
+    for (const int event : kEvents) {
+        if (event > dot_) return event;
+    }
+    return kDotsPerLine;
+}
+
+void Ppu::tick(int dots) {
+    if (!lcd_on()) return;
+    while (dots > 0) {
+        if (mode_ != 3) {
+            const int idle = std::min(dots, next_event_dot() - dot_ - 1);
+            if (idle > 0) {
+                dot_ += idle;
+                dots -= idle;
+                if (dots == 0) break;
+            }
+        }
+        step_dot();
+        --dots;
+    }
+}
 
 void Ppu::step_dot() {
     ++dot_;
