@@ -16,9 +16,9 @@ _Última actualización: 2026-11-06_
 
 ## Pendientes (en este orden, antes de empezar N64)
 
-1. [x] **Optimizar rendimiento GB**: hecho en la rama `gb/perf`. El PPU salta los dots sin eventos
+1. [x] **Optimizar rendimiento GB**: hecho (PR #4, mergeado). El PPU salta los dots sin eventos
        de los modos 0/1/2. Pokémon Silver: 24 % → 12 % de un núcleo (medido en la PC con Build Tools).
-2. [ ] **ROMs Mooneye que fallan**: `misc/ppu/vblank_stat_intr-C` ya pasa (rama `gb/perf`).
+2. [ ] **ROMs Mooneye que fallan**: `misc/ppu/vblank_stat_intr-C` ya pasa (PR #4).
        Quedan `ppu/hblank_ly_scx_timing-GS`, `lcdon_timing-GS` y `lcdon_write_timing-GS`: hay que
        recalibrar juntos el origen de línea del PPU, el dummy fetch y la salida de HALT.
        Lo que se probó y las cuentas están en `roms/README.md`.
@@ -52,4 +52,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-05 — GBA terminado, PR #1. Se agregaron CMake presets.
 - 2026-11-06 — GBC mergeado (PR #2). Pase de precisión GB mergeado (PR #3). Se crea esta carpeta.
 - 2026-11-06 — Revisión de pendientes: el 5 (ventana VRAM) ya estaba resuelto en `f82824b`; se marca. 1–4 siguen abiertos.
-- 2026-11-06 — PC con Build Tools: se instalan Build Tools y ROMs de prueba. Pendiente 1 hecho (24 % → 12 %), `vblank_stat_intr-C` arreglado. hblank_ly_scx y lcdon siguen abiertos (rama `gb/perf`).
+- 2026-11-06 — PC con Build Tools: se instalan Build Tools y ROMs de prueba. Pendiente 1 hecho (24 % → 12 %), `vblank_stat_intr-C` arreglado. hblank_ly_scx y lcdon siguen abiertos. PR #4 mergeado.
