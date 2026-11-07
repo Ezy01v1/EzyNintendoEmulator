@@ -295,8 +295,8 @@ TEST_CASE("SCX fine scroll lengthens mode 3") {
     ppu.write_register(0xFF43, 5);
     run_dots(ppu, 80 + 168);
     CHECK(ppu.mode() == 3);
-    run_dots(ppu, 4);
-    CHECK(ppu.mode() == 3);  // 169 + 5 = 174 dots: still drawing at dot 252
+    run_dots(ppu, 8);
+    CHECK(ppu.mode() == 3);  // 172 + 5 = 177 dots: still drawing at dot 256
     run_dots(ppu, 4);
     CHECK(ppu.mode() == 0);
 }
@@ -331,16 +331,16 @@ int mode3_dots(Ppu& ppu) {
 
 }  // namespace
 
-// 169, not Pan Docs' 172: see the timing note at the top of ppu_draw.cpp.
-TEST_CASE("FIFO: mode 3 lasts 169 dots with SCX = 0 and no sprites") {
+// Pan Docs' 172: see the timing note at the top of ppu_draw.cpp.
+TEST_CASE("FIFO: mode 3 lasts 172 dots with SCX = 0 and no sprites") {
     Ppu ppu;
-    CHECK(mode3_dots(ppu) == 169);
+    CHECK(mode3_dots(ppu) == 172);
 }
 
 TEST_CASE("FIFO: SCX % 8 adds its value to mode 3") {
     Ppu ppu;
     ppu.write_register(0xFF43, 3);
-    CHECK(mode3_dots(ppu) == 172);
+    CHECK(mode3_dots(ppu) == 175);
 }
 
 TEST_CASE("FIFO: the window adds 6 dots") {
@@ -348,7 +348,7 @@ TEST_CASE("FIFO: the window adds 6 dots") {
     ppu.write_register(0xFF4A, 0);   // WY
     ppu.write_register(0xFF4B, 87);  // WX: window from x = 80
     ppu.write_register(0xFF40, 0x91 | 0x20);
-    CHECK(mode3_dots(ppu) == 175);
+    CHECK(mode3_dots(ppu) == 178);
 }
 
 TEST_CASE("FIFO: a mid-line BGP write changes only the pixels after it") {
@@ -372,7 +372,7 @@ TEST_CASE("FIFO: VRAM lock follows the real mode 3 end") {
     Ppu ppu;
     ppu.write_register(0xFF43, 7);
     while (!(ppu.ly() == 1 && ppu.mode() == 3)) ppu.tick(1);
-    for (int i = 0; i < 176; ++i) {  // 169 + SCX % 8
+    for (int i = 0; i < 179; ++i) {  // 172 + SCX % 8
         CHECK_FALSE(ppu.vram_accessible());
         ppu.tick(1);
     }
@@ -401,7 +401,9 @@ std::span<const std::uint16_t> line1(const Ppu& ppu) { return ppu.framebuffer().
 
 }  // namespace
 
-TEST_CASE("FIFO sprites: one sprite at X=8 adds 11 dots") {
+// The sprite fetch takes 11 dots, and absorbs the 3 dots mode 3 otherwise spends after
+// its last pixel: 169 + 11, not 172 + 11.
+TEST_CASE("FIFO sprites: one sprite at X=8 adds 11 dots to the pixel output") {
     Ppu ppu = make_sprite_ppu({8});
     CHECK(mode3_dots(ppu) == 169 + 11);
 }
@@ -430,7 +432,7 @@ TEST_CASE("FIFO sprites: sprites at X >= 168 count toward 10 but are not drawn")
     fill_tile(ppu, 0x8000, 3);
     ppu.write_register(0xFF47, 0x00);
     ppu.write_register(0xFF48, 0xFF);
-    CHECK(mode3_dots(ppu) == 169);  // nothing fetched: the 11th sprite never made the list
+    CHECK(mode3_dots(ppu) == 172);  // nothing fetched: the 11th sprite never made the list
     CHECK(line1(ppu)[0] == kDmgGreys[0]);
 }
 
@@ -570,4 +572,64 @@ TEST_CASE("switching to 8x8 sprites mid-line with a Y-flipped tall sprite stays 
     ppu.write_register(0xFF40, 0x93);    // back to 8x8 before the sprite is fetched
     while (ppu.mode() == 3) ppu.tick(1);  // must not read outside VRAM
     CHECK(ppu.mode() == 0);
+}
+
+namespace {
+
+// Runs a fresh PPU (post-boot state, LCD on since dot 0 of line 0) to line `ly`, dot `dot`.
+void run_to(Ppu& ppu, int ly, int dot) {
+    while (!(ppu.ly() == ly && ppu.mode() == 2)) ppu.tick(1);  // dot 0 of the line
+    for (int i = 0; i < dot; ++i) ppu.tick(1);
+}
+
+}  // namespace
+
+// Mooneye lcdon_timing: LY shows the next line one M-cycle before the line ends, and STAT
+// bit 2 stays clear until the comparator catches up.
+TEST_CASE("LY changes 4 dots before the line ends; LY=LYC follows 1 dot later") {
+    Ppu ppu;
+    ppu.write_register(0xFF45, 2);  // LYC
+    run_to(ppu, 1, 451);
+    CHECK(ppu.read_register(0xFF44) == 1);
+    ppu.tick(1);  // dot 452
+    CHECK(ppu.read_register(0xFF44) == 2);
+    CHECK((ppu.read_register(0xFF41) & 0x04) == 0);
+    ppu.tick(1);  // dot 453
+    CHECK((ppu.read_register(0xFF41) & 0x04) != 0);
+}
+
+// Mooneye lcdon_timing / lcdon_write_timing.
+TEST_CASE("OAM and VRAM reads are locked 4 dots before the mode changes, writes are not") {
+    Ppu ppu;
+    run_to(ppu, 1, 451);
+    CHECK(ppu.mode() == 0);
+    CHECK(ppu.oam_readable());
+    ppu.tick(1);  // dot 452: mode 0 still, but the next line's OAM scan has the bus
+    CHECK(ppu.mode() == 0);
+    CHECK_FALSE(ppu.oam_readable());
+    CHECK(ppu.oam_accessible());
+    run_to(ppu, 2, 75);
+    CHECK(ppu.vram_readable());
+    CHECK_FALSE(ppu.oam_accessible());
+    ppu.tick(1);  // dot 76: the OAM scan is over, mode 3 hasn't started
+    CHECK(ppu.mode() == 2);
+    CHECK_FALSE(ppu.vram_readable());
+    CHECK(ppu.vram_accessible());
+    CHECK_FALSE(ppu.oam_readable());
+    CHECK(ppu.oam_accessible());
+    for (int i = 0; i < 4; ++i) ppu.tick(1);  // dot 80: mode 3
+    CHECK(ppu.mode() == 3);
+    CHECK_FALSE(ppu.vram_accessible());
+    CHECK_FALSE(ppu.oam_accessible());
+}
+
+TEST_CASE("line 0 after LCD on has no early bus locks") {
+    Ppu ppu;
+    ppu.write_register(0xFF40, 0x00);
+    ppu.write_register(0xFF40, 0x91);
+    for (int i = 0; i < 79; ++i) ppu.tick(1);
+    CHECK(ppu.vram_readable());
+    CHECK(ppu.oam_readable());
+    ppu.tick(1);  // dot 80: mode 3
+    CHECK_FALSE(ppu.vram_readable());
 }

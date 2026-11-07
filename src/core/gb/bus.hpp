@@ -113,7 +113,7 @@ public:
     [[nodiscard]] const Ppu& ppu() const { return ppu_; }
 
 private:
-    [[nodiscard]] bool cpu_can_access(std::uint16_t addr) const;
+    [[nodiscard]] bool cpu_can_access(std::uint16_t addr, bool write) const;
     void advance();  // advances timer, APU, PPU and cartridge by one M-cycle
     // The APU frame sequencer runs off DIV: bit 12 of the timer counter falling.
     void clock_frame_sequencer(std::uint16_t counter_before);
