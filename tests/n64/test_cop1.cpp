@@ -175,3 +175,36 @@ TEST_CASE("FCR0 reads the VR4300 implementation number") {
     f.run(1);
     CHECK(f.cpu.gpr(t0) == 0xA00);
 }
+
+// n64-systemtest "Upper bits of 32 bit operation", "64 bit with odd indices (half mode)":
+// arithmetic reads its sources from the even register in FR=0 mode, but writes the exact
+// destination register, and a 32-bit result clears the upper half.
+TEST_CASE("FPU arithmetic writes the exact destination; a single result clears the upper half") {
+    CpuFixture f;
+    fpu_ready(f, true);
+    f.cpu.set_gpr(t0, 0x11112222'00000000ULL | std::bit_cast<std::uint32_t>(2.0f));
+    f.cpu.set_gpr(t1, std::bit_cast<std::uint32_t>(4.0f));
+    f.load({dmtc1(t0, 1), dmtc1(t0, 3), mtc1(t1, 2), fop(kS, 2, 1, 3, 0x00)});
+    f.run(4);
+    CHECK(f.cpu.cop1().fpr_bits(3) == std::bit_cast<std::uint32_t>(6.0f));
+}
+
+TEST_CASE("half mode: a double result goes to the odd register itself, sources come from the even one") {
+    CpuFixture f;
+    fpu_ready(f, false);
+    f.cpu.set_gpr(t0, std::bit_cast<std::uint64_t>(10.0));
+    f.cpu.set_gpr(t1, std::bit_cast<std::uint64_t>(16.0));
+    // f28 = 10.0, f30 = 16.0 (64-bit slots); ADD.D f1, f29, f30 reads f28 for f29.
+    f.load({dmtc1(t0, 28), dmtc1(t1, 30), fop(kD, 30, 29, 1, 0x00)});
+    f.run(3);
+    CHECK(f.cpu.cop1().fpr_bits(1) == std::bit_cast<std::uint64_t>(26.0));
+}
+
+TEST_CASE("DCFC1 and DCTC1 raise unimplemented operation") {
+    CpuFixture f;
+    fpu_ready(f, true);
+    f.load({r(0x11, 3, t0, 31, 0, 0)});
+    f.run(1);
+    CHECK(exc_code(f) == static_cast<std::uint32_t>(ExceptionCode::FPE));
+    CHECK((f.cpu.cop1().fcr31() & kCauseE) != 0);
+}

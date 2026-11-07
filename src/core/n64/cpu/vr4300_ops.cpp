@@ -124,8 +124,19 @@ void Vr4300::execute(std::uint32_t instr) {
             else execute_load_store(instr);
             break;
         case 0x12: case 0x32: case 0x36: case 0x3A: case 0x3E:  // COP2: there is none
-            if (!(cop0_.status() & (1U << 30))) raise(ExceptionCode::CpU, 2);
-            else raise(ExceptionCode::RI);
+            if (!(cop0_.status() & (1U << 30))) {
+                raise(ExceptionCode::CpU, 2);
+            } else if (op == 0x12 && ((instr >> 21) & 31) <= 6 && ((instr >> 21) & 31) != 3) {
+                // The moves still go through the coprocessor bus latch (n64-systemtest
+                // "MFC2/MTC2/DMFC2/DMTC2"): MTC2/DMTC2/CTC2 store, MFC2/CFC2/DMFC2 read it back.
+                switch ((instr >> 21) & 31) {
+                    case 0: case 2: set_gpr(rt, sext32(cop2_latch_)); break;  // MFC2, CFC2
+                    case 1: set_gpr(rt, cop2_latch_); break;                  // DMFC2
+                    default: cop2_latch_ = t; break;                          // MTC2, DMTC2, CTC2
+                }
+            } else {
+                raise(ExceptionCode::RI);
+            }
             break;
         case 0x2F: break;  // CACHE: the caches aren't emulated
         default:

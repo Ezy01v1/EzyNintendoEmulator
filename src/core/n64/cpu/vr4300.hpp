@@ -53,6 +53,7 @@ public:
     template <class Ar>
     void serialize(Ar& ar) {
         ar(gpr_), ar(hi_), ar(lo_), ar(pc_), ar(next_pc_), ar(in_delay_slot_), ar(branch_taken_), ar(llbit_);
+        ar(cop2_latch_);
         cop0_.serialize(ar);
         tlb_.serialize(ar);
         cop1_.serialize(ar);
@@ -105,6 +106,7 @@ private:
     bool in_delay_slot_ = false;    // the instruction being executed is in a delay slot
     bool branch_taken_ = false;     // the last instruction was a branch (its slot runs next)
     bool llbit_ = false;
+    std::uint64_t cop2_latch_ = 0;  // what the last COP2 move-to put on the coprocessor bus
     std::uint32_t last_paddr_ = 0;  // physical address of the last load (LL sets LLAddr from it)
     int cycles_ = 0;                // cycles of the instruction being executed
     bool exception_ = false;        // the instruction being executed raised an exception

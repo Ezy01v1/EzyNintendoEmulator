@@ -186,3 +186,24 @@ TEST_CASE("PRId and Random") {
     f.run(1);
     CHECK(f.cpu.cop0().read(Cop0::kRandom) == 30);
 }
+
+// n64-systemtest "Unaligned LW exception": address errors fill Context like TLB misses.
+TEST_CASE("address error sets Context's BadVPN2") {
+    CpuFixture f;
+    kernel_ready(f);
+    f.cpu.set_gpr(t0, 0xFFFFFFFF807FE001ULL);
+    f.load({lw(t1, t0, 0)});
+    f.run(1);
+    CHECK(f.cpu.cop0().read(Cop0::kContext) == ((0xFFFFFFFF807FE001ULL >> 13) & 0x7FFFF) << 4);
+}
+
+// n64-systemtest "COP2Usable": with CU2 set, the COP2 moves go through a 64-bit latch.
+TEST_CASE("COP2 moves with CU2 set use a latch") {
+    CpuFixture f;
+    kernel_ready(f, 1U << 30);
+    f.cpu.set_gpr(t0, 0x1234'5678'9ABC'DEF0ULL);
+    f.load({r(0x12, 5, t0, 3, 0, 0) /* DMTC2 */, r(0x12, 0, t1, 7, 0, 0) /* MFC2 */, r(0x12, 1, t2, 7, 0, 0) /* DMFC2 */});
+    f.run(3);
+    CHECK(f.cpu.gpr(t1) == 0xFFFFFFFF9ABCDEF0ULL);
+    CHECK(f.cpu.gpr(t2) == 0x123456789ABCDEF0ULL);
+}

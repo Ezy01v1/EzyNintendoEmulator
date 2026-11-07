@@ -23,6 +23,7 @@ public:
     [[nodiscard]] std::uint32_t fcr31() const { return fcr31_; }
     [[nodiscard]] std::uint32_t& fcr31_ref() { return fcr31_; }
     [[nodiscard]] std::uint64_t fpr_bits(int index) const { return fpr_[static_cast<std::size_t>(index)]; }
+    void set_fpr_bits(int index, std::uint64_t value) { fpr_[static_cast<std::size_t>(index)] = value; }
 
     [[nodiscard]] std::uint32_t read32(int reg, bool fr) const;
     void write32(int reg, std::uint32_t value, bool fr);

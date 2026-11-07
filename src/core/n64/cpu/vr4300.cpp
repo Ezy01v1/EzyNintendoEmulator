@@ -76,6 +76,12 @@ void Vr4300::raise(ExceptionCode code, int coprocessor) { enter_exception(code, 
 
 void Vr4300::raise_address_error(std::uint64_t vaddr, bool write) {
     cop0_.raw(Cop0::kBadVAddr) = vaddr;
+    // Like a TLB miss, an address error fills Context and XContext (n64-systemtest
+    // "Unaligned LW exception").
+    std::uint64_t& context = cop0_.raw(Cop0::kContext);
+    context = (context & 0xFFFFFFFFFF800000ULL) | (((vaddr >> 13) & 0x7FFFF) << 4);
+    std::uint64_t& xcontext = cop0_.raw(Cop0::kXContext);
+    xcontext = (xcontext & 0xFFFFFFFE00000000ULL) | ((vaddr >> 62) << 31) | (((vaddr >> 13) & 0x7FFFFFF) << 4);
     raise(write ? ExceptionCode::AdES : ExceptionCode::AdEL);
 }
 

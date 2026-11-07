@@ -144,6 +144,11 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
                 if (cause & enabled) raise(ExceptionCode::FPE);
             }
             return;
+        case 0x03:  // DCFC1, DCTC1: not implemented by the VR4300
+        case 0x07:
+            fcr31 = (fcr31 & ~(0x3FU << Cop1::kCauseShift)) | (kE << Cop1::kCauseShift);
+            raise(ExceptionCode::FPE);
+            return;
         case 0x08: {  // BC1F, BC1T, BC1FL, BC1TL
             const bool condition = (fcr31 & Cop1::kCondition) != 0;
             const bool want_true = (ft & 1) != 0;
@@ -154,6 +159,15 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
         }
         default: break;
     }
+
+    // Arithmetic, compares and conversions address the registers differently from the
+    // moves (n64-systemtest "full_vs_half_mode"): in FR=0 mode a source is read from the even
+    // register of its pair, but the result goes to the exact destination register, and a
+    // 32-bit result clears its upper half.
+    const auto src32 = [&](int reg, bool full) { return static_cast<std::uint32_t>(cop1_.fpr_bits(full ? reg : reg & ~1)); };
+    const auto src64 = [&](int reg, bool full) { return cop1_.fpr_bits(full ? reg : reg & ~1); };
+    const auto dst32 = [&](int reg, std::uint32_t value, bool) { cop1_.set_fpr_bits(reg, value); };
+    const auto dst64 = [&](int reg, std::uint64_t value, bool) { cop1_.set_fpr_bits(reg, value); };
 
     // Arithmetic. Every FPU operation starts by clearing the cause bits.
     fcr31 &= ~(0x3FU << Cop1::kCauseShift);
@@ -190,11 +204,11 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
         if (!(is_s || is_d)) return unimplemented();
         bool unordered, less, equal, snan;
         if (is_s) {
-            const float a = std::bit_cast<float>(cop1_.read32(fs, fr)), b = std::bit_cast<float>(cop1_.read32(ft, fr));
+            const float a = std::bit_cast<float>(src32(fs, fr)), b = std::bit_cast<float>(src32(ft, fr));
             if (is_denormal(a) || is_denormal(b)) return unimplemented();
             unordered = std::isnan(a) || std::isnan(b), less = a < b, equal = a == b, snan = is_snan(a) || is_snan(b);
         } else {
-            const double a = std::bit_cast<double>(cop1_.read64(fs, fr)), b = std::bit_cast<double>(cop1_.read64(ft, fr));
+            const double a = std::bit_cast<double>(src64(fs, fr)), b = std::bit_cast<double>(src64(ft, fr));
             if (is_denormal(a) || is_denormal(b)) return unimplemented();
             unordered = std::isnan(a) || std::isnan(b), less = a < b, equal = a == b, snan = is_snan(a) || is_snan(b);
         }
@@ -209,8 +223,8 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
 
     // MOV: a plain copy, no checks.
     if (funct == 0x06) {
-        if (is_s) cop1_.write32(fd, cop1_.read32(fs, fr), fr);
-        else if (is_d) cop1_.write64(fd, cop1_.read64(fs, fr), fr);
+        if (is_s) dst32(fd, src32(fs, fr), fr);
+        else if (is_d) dst64(fd, src64(fs, fr), fr);
         else unimplemented();
         return;
     }
@@ -219,29 +233,29 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
     if (is_w || is_l) {
         if (funct != 0x20 && funct != 0x21) return unimplemented();
         if (is_l) {
-            const auto v = static_cast<std::int64_t>(cop1_.read64(fs, fr));
+            const auto v = static_cast<std::int64_t>(src64(fs, fr));
             if (v >= (std::int64_t{1} << 55) || v < -(std::int64_t{1} << 55)) return unimplemented();
         }
         cycles_ += kCvtExtra;
         if (funct == 0x20) {  // CVT.S.W / CVT.S.L
             const float r = with_rounding(rm, cause, [&] {
-                return is_w ? static_cast<float>(static_cast<std::int32_t>(cop1_.read32(fs, fr)))
-                            : static_cast<float>(static_cast<std::int64_t>(cop1_.read64(fs, fr)));
+                return is_w ? static_cast<float>(static_cast<std::int32_t>(src32(fs, fr)))
+                            : static_cast<float>(static_cast<std::int64_t>(src64(fs, fr)));
             });
-            if (commit()) cop1_.write32(fd, std::bit_cast<std::uint32_t>(r), fr);
+            if (commit()) dst32(fd, std::bit_cast<std::uint32_t>(r), fr);
         } else {  // CVT.D.W / CVT.D.L
             const double r = with_rounding(rm, cause, [&] {
-                return is_w ? static_cast<double>(static_cast<std::int32_t>(cop1_.read32(fs, fr)))
-                            : static_cast<double>(static_cast<std::int64_t>(cop1_.read64(fs, fr)));
+                return is_w ? static_cast<double>(static_cast<std::int32_t>(src32(fs, fr)))
+                            : static_cast<double>(static_cast<std::int64_t>(src64(fs, fr)));
             });
-            if (commit()) cop1_.write64(fd, std::bit_cast<std::uint64_t>(r), fr);
+            if (commit()) dst64(fd, std::bit_cast<std::uint64_t>(r), fr);
         }
         return;
     }
 
     // From here the source is S or D. Read it as a double for the conversions.
-    const double src = is_s ? static_cast<double>(std::bit_cast<float>(cop1_.read32(fs, fr)))
-                            : std::bit_cast<double>(cop1_.read64(fs, fr));
+    const double src = is_s ? static_cast<double>(std::bit_cast<float>(src32(fs, fr)))
+                            : std::bit_cast<double>(src64(fs, fr));
 
     // Float -> integer: ROUND/TRUNC/CEIL/FLOOR.L (0x08-0x0B), .W (0x0C-0x0F), CVT.W (0x24),
     // CVT.L (0x25).
@@ -266,23 +280,23 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
         }
         if (rounded != src) cause |= kI;
         if (!commit()) return;
-        if (to_l) cop1_.write64(fd, static_cast<std::uint64_t>(static_cast<std::int64_t>(rounded)), fr);
-        else cop1_.write32(fd, static_cast<std::uint32_t>(static_cast<std::int32_t>(rounded)), fr);
+        if (to_l) dst64(fd, static_cast<std::uint64_t>(static_cast<std::int64_t>(rounded)), fr);
+        else dst32(fd, static_cast<std::uint32_t>(static_cast<std::int32_t>(rounded)), fr);
         return;
     }
 
     if (funct == 0x20 || funct == 0x21) {  // CVT.S.D / CVT.D.S
         if ((funct == 0x20) == is_s) return unimplemented();  // CVT.S.S / CVT.D.D
-        cause |= is_s ? check_operand(std::bit_cast<float>(cop1_.read32(fs, fr))) : check_operand(src);
+        cause |= is_s ? check_operand(std::bit_cast<float>(src32(fs, fr))) : check_operand(src);
         if (cause & kE) return unimplemented();
         cycles_ += kCvtExtra;
         if (funct == 0x20) {
             float r = with_rounding(rm, cause, [&] { return static_cast<float>(src); });
             r = fix_result(r, cause, flush);
-            if (commit()) cop1_.write32(fd, std::bit_cast<std::uint32_t>(r), fr);
+            if (commit()) dst32(fd, std::bit_cast<std::uint32_t>(r), fr);
         } else {
             double r = fix_result(src, cause, flush);
-            if (commit()) cop1_.write64(fd, std::bit_cast<std::uint64_t>(r), fr);
+            if (commit()) dst64(fd, std::bit_cast<std::uint64_t>(r), fr);
         }
         return;
     }
@@ -315,11 +329,11 @@ void Vr4300::execute_cop1(std::uint32_t instr) {
         default: break;
     }
     if (is_s) {
-        const float r = arith(std::bit_cast<float>(cop1_.read32(fs, fr)), std::bit_cast<float>(cop1_.read32(ft, fr)));
-        if (commit()) cop1_.write32(fd, std::bit_cast<std::uint32_t>(r), fr);
+        const float r = arith(std::bit_cast<float>(src32(fs, fr)), std::bit_cast<float>(src32(ft, fr)));
+        if (commit()) dst32(fd, std::bit_cast<std::uint32_t>(r), fr);
     } else {
-        const double r = arith(std::bit_cast<double>(cop1_.read64(fs, fr)), std::bit_cast<double>(cop1_.read64(ft, fr)));
-        if (commit()) cop1_.write64(fd, std::bit_cast<std::uint64_t>(r), fr);
+        const double r = arith(std::bit_cast<double>(src64(fs, fr)), std::bit_cast<double>(src64(ft, fr)));
+        if (commit()) dst64(fd, std::bit_cast<std::uint64_t>(r), fr);
     }
 }
 
