@@ -706,6 +706,48 @@ TEST_CASE("RDP two-cycle blender mixes fog by shade alpha in its first cycle") {
     }
 }
 
+namespace {
+
+constexpr std::uint64_t kOneCycle = (0x2FULL << 56) | (3ULL << 38);  // dither off, clamp coverage
+// RGB D = PRIM, alpha D = SHADE.
+constexpr auto kPrimShadeAlpha = set_combine({15, 15, 31, 3, 7, 7, 7, 4}, {15, 15, 31, 3, 7, 7, 7, 4});
+
+void set_blend_color(N64& n64, std::uint32_t rgba) {
+    auto& bus = n64.bus();
+    bus.write64(0x2000, 0x3900000000000000ULL | rgba);
+    bus.write64(0x2008, kSyncFull);
+    bus.write32(kDpcStart, 0x2000);
+    bus.write32(kDpcEnd, 0x2010);
+    for (unsigned i = 0; i < 10; ++i) n64.step();
+}
+
+}  // namespace
+
+TEST_CASE("RDP alpha compare drops pixels below the blend color alpha") {
+    const auto n64 = N64::create(counting_rom("RDP ALPHA COMPARE"));
+    REQUIRE(n64);
+    set_blend_color(*n64, 0x00000080);
+    draw_two_cycle_row(*n64, kOneCycle | 1U, kPrimShadeAlpha, 0x0000000000000040ULL);
+    for (unsigned x = 0; x < 4; ++x) CHECK(n64->bus().read32(0x4000 + 4 * x) == 0);
+    draw_two_cycle_row(*n64, kOneCycle | 1U, kPrimShadeAlpha, 0x00000000000000C0ULL);
+    for (unsigned x = 0; x < 4; ++x) CHECK(n64->bus().read32(0x4000 + 4 * x) == 0xC86432E0U);
+}
+
+TEST_CASE("RDP coverage times alpha scales coverage and feeds it to alpha compare") {
+    const auto n64 = N64::create(counting_rom("RDP CVG X ALPHA"));
+    REQUIRE(n64);
+    // Alpha 0x80 halves full coverage (8 -> 4); alpha coverage select makes alpha (0x80 * 8 + 4) >> 5 = 32.
+    set_blend_color(*n64, 0x00000020);
+    constexpr std::uint64_t modes = kOneCycle | (1U << 12) | (1U << 13) | 1U;
+    draw_two_cycle_row(*n64, modes, kPrimShadeAlpha, 0x0000000000000080ULL);
+    // Clamp mode stores the overflowing pixel's own coverage minus one.
+    for (unsigned x = 0; x < 4; ++x) CHECK(n64->bus().read32(0x4000 + 4 * x) == 0xC8643260U);
+    set_blend_color(*n64, 0x00000021);
+    draw_two_cycle_row(*n64, modes, kPrimShadeAlpha, 0x0000000000000080ULL);
+    // Alpha 32 is now below 33, so memory keeps the previous pixels.
+    for (unsigned x = 0; x < 4; ++x) CHECK(n64->bus().read32(0x4000 + 4 * x) == 0xC8643260U);
+}
+
 TEST_CASE("RDP combiner multiplies a texel by its own alpha") {
     const auto n64 = N64::create(counting_rom("RDP COMBINER TEXEL ALPHA"));
     REQUIRE(n64);

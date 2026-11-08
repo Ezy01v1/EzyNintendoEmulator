@@ -474,11 +474,11 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
 }
 
 bool Rdp::can_write_opaque(bool depth) const {
-    constexpr std::uint64_t unsupported = (1ULL << 40) |  // chroma key
-        (1U << 12) | 1U;  // coverage times alpha and alpha compare
+    constexpr std::uint64_t unsupported = 1ULL << 40;  // chroma key
     // Only opaque Z mode (0) is modeled, and only for primitives that carry a depth.
     const bool depth_modes = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
     if (depth_modes && (!depth || ((solid_.modes >> 10) & 3) != 0)) return false;
+    if ((solid_.modes & 3) == 3) return false;  // Alpha compare against a random threshold.
     return cycle_type_ <= 1 && color_width_ != 0 && solid_.format == 0 && (pixel_size_ == 2 || pixel_size_ == 3) &&
            !(solid_.modes & unsupported) && ((solid_.modes >> 38) & 3) != 2;
 }
@@ -605,6 +605,17 @@ void Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
     if (address + bytes > rdram.size()) return;
 
+    // Coverage times alpha scales the 0-8 coverage count by the combined alpha; alpha
+    // coverage select then replaces the pixel alpha with the (scaled) coverage.
+    unsigned alpha = combined[3];
+    const unsigned scaled = alpha * coverage + 4;
+    if (solid_.modes & (1U << 12)) coverage = (scaled >> 8) & 15;
+    if (solid_.modes & (1U << 13)) {
+        alpha = (solid_.modes & (1U << 12)) ? std::min(255U, scaled >> 5) : std::min(255U, coverage << 5);
+    }
+    // Alpha compare drops pixels whose alpha is below the blend color alpha.
+    if ((solid_.modes & 1) && alpha < (solid_.blend & 255)) return;
+    if (coverage == 0) return;
 
     // Memory color and coverage. Without image reads, memory coverage reads as full (7).
     // RGBA5551 keeps only the top coverage bit; the two hidden low bits are taken as set.
@@ -642,9 +653,9 @@ void Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         };
         const auto first = input(p_shift);
         if (final && !force_blend && overflow) return first;
-        const unsigned alpha = [&] {
+        const unsigned factor = [&] {
             switch ((solid_.modes >> a_shift) & 3) {
-                case 0: return combined[3];
+                case 0: return alpha;
                 case 1: return solid_.fog & 255;
                 case 2: return shade[3];
                 default: return 0U;
@@ -652,7 +663,7 @@ void Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         }();
         const auto second = input(m_shift);
         // Both factors keep five bits; 1 - A is the complement, so the weights sum to 32.
-        const unsigned a = alpha >> 3;
+        const unsigned a = factor >> 3;
         const unsigned m = [&] {
             switch ((solid_.modes >> b_shift) & 3) {
                 case 0: return 32 - a;
