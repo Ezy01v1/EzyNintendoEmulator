@@ -144,3 +144,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Pruebas unitarias N64 148/148, n64-systemtest 2984/3721. Siguiente: modo de dos ciclos.
 - 2026-11-07 — N64 subproyecto 3: modo de dos ciclos en combinador y blender. Pruebas unitarias
   N64 150/150, n64-systemtest 2984/3721.
+- 2026-11-08 — PR Ezy01v1/EzyNintendoEmulator#7 (n64/rsp-rdp: RSP y rasterizador RDP) mergeado a main.
