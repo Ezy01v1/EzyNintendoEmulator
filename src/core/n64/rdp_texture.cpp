@@ -230,8 +230,10 @@ void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
     if (solid_.modes & kTexturePerspective) return;  // Rectangles do not supply W.
     const auto header = draw_command_[0], coefficients = draw_command_[1];
     const auto& tile = texture_.tiles[(header >> 24) & 7];
-    const bool sample = combiner_reads_texel();
-    if (!can_write_opaque() || (sample && !can_sample_texture(tile))) return;
+    const unsigned texels = texels_read();
+    const auto& next_tile = texture_.tiles[(((header >> 24) & 7) + 1) & 7];
+    if (!can_write_opaque() || ((texels & 1) && !can_sample_texture(tile)) ||
+        ((texels & 2) && !can_sample_texture(next_tile))) return;
 
     const unsigned x0 = field12(header, 12), y0 = field12(header, 0);
     const unsigned left = std::max(x0, field12(scissor_, 44));
@@ -263,8 +265,9 @@ void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
             const int dx_quarters = static_cast<int>(4 * x) - static_cast<int>(x0);
             const int s = s0 + ((dx_quarters * ds) >> 7);
             // Rectangles carry no shade coefficients, so shade inputs read as zero.
-            const Rgba texel = sample ? sample_texel(tile, s, t) : Rgba{};
-            write_opaque_pixel(x, y, combine(texel, Rgba{}), Rgba{}, coverage, rdram);
+            const Rgba texel0 = (texels & 1) ? sample_texel(tile, s, t) : Rgba{};
+            const Rgba texel1 = (texels & 2) ? sample_texel(next_tile, s, t) : Rgba{};
+            write_opaque_pixel(x, y, combine(texel0, texel1, Rgba{}), Rgba{}, coverage, rdram);
         }
     }
 }

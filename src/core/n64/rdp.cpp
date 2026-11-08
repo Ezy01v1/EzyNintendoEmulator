@@ -322,9 +322,11 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     const auto& tile = texture_.tiles[(header >> 48) & 7];
     const bool fill = !textured && can_fill();
     if (!fill && !can_write_opaque(depth)) return;
-    // Without texture coefficients, S and T stay at zero.
-    const bool sample = !fill && combiner_reads_texel();
-    if (sample && !can_sample_texture(tile)) return;
+    // Without texture coefficients, S and T stay at zero. TEXEL1 comes from the next tile.
+    const unsigned texels = fill ? 0 : texels_read();
+    const bool sample = texels != 0;
+    const auto& next_tile = texture_.tiles[(((header >> 48) & 7) + 1) & 7];
+    if (((texels & 1) && !can_sample_texture(tile)) || ((texels & 2) && !can_sample_texture(next_tile))) return;
     // Coefficient blocks follow the edges in shade, texture, depth order.
     const unsigned texture_at = shaded ? 12 : 4, depth_at = texture_at + (textured ? 8 : 0);
 
@@ -434,17 +436,18 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
             }
             if (coverage != 0) {
                 const int dx = x - texture_x;
-                Rgba texel{}, shade_color{};  // Triangles without shade coefficients have zero shade.
+                Rgba texel0{}, texel1{}, shade_color{};  // Triangles without shade coefficients have zero shade.
                 if (sample) {
                     const int sample_s = s.sample(start_s, dx), sample_t = t.sample(start_t, dx);
                     const auto [u, v] = perspective ? project_texture_coordinates(sample_s, sample_t, w.sample(start_w, dx))
                                                     : std::array{sample_s, sample_t};
-                    texel = sample_texel(tile, u, v);
+                    if (texels & 1) texel0 = sample_texel(tile, u, v);
+                    if (texels & 2) texel1 = sample_texel(next_tile, u, v);
                 }
                 if (shaded) {
                     for (unsigned i = 0; i < shade.size(); ++i) shade_color[i] = clamp_shade(start_shade[i], shade[i], dx);
                 }
-                write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y), combine(texel, shade_color),
+                write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y), combine(texel0, texel1, shade_color),
                                    shade_color, coverage, rdram);
             }
         }
@@ -476,7 +479,7 @@ bool Rdp::can_write_opaque(bool depth) const {
     // Only opaque Z mode (0) is modeled, and only for primitives that carry a depth.
     const bool depth_modes = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
     if (depth_modes && (!depth || ((solid_.modes >> 10) & 3) != 0)) return false;
-    return cycle_type_ == 0 && color_width_ != 0 && solid_.format == 0 && (pixel_size_ == 2 || pixel_size_ == 3) &&
+    return cycle_type_ <= 1 && color_width_ != 0 && solid_.format == 0 && (pixel_size_ == 2 || pixel_size_ == 3) &&
            !(solid_.modes & unsupported) && ((solid_.modes >> 38) & 3) != 2;
 }
 
@@ -493,58 +496,90 @@ unsigned clamp_combined(int value) {
 
 }  // namespace
 
-bool Rdp::combiner_reads_texel() const {
+namespace {
+
+// Bit positions of one combiner cycle's selectors in Set Combine.
+struct CombinerFields {
+    unsigned a, b, c, d, alpha_a, alpha_b, alpha_c, alpha_d;
+};
+constexpr CombinerFields kCycle0{52, 28, 47, 15, 44, 12, 41, 9};
+constexpr CombinerFields kCycle1{37, 24, 32, 6, 21, 3, 18, 0};
+
+}  // namespace
+
+unsigned Rdp::texels_read() const {
+    // Returns bit 0 for the primitive's tile and bit 1 for the next tile.
     const auto field = [this](unsigned shift, unsigned mask) {
         return static_cast<unsigned>(solid_.combine >> shift) & mask;
     };
-    const auto texel_rgb = [](unsigned source) { return source == kTexel0 || source == kTexel1; };
-    const unsigned multiplier = field(32, 31);
-    return texel_rgb(field(37, 15)) || texel_rgb(field(24, 15)) || texel_rgb(field(6, 7)) ||
-           texel_rgb(multiplier) || multiplier == 8 || multiplier == 9 ||
-           texel_rgb(field(21, 7)) || texel_rgb(field(3, 7)) || texel_rgb(field(18, 7)) || texel_rgb(field(0, 7));
+    const auto sources = [&](const CombinerFields& f) {
+        const unsigned multiplier = field(f.c, 31);
+        const unsigned rgb_c = multiplier >= 7 && multiplier <= 12 ? multiplier - 7 : multiplier;
+        return std::array{field(f.a, 15), field(f.b, 15), rgb_c, field(f.d, 7),
+                          field(f.alpha_a, 7), field(f.alpha_b, 7), field(f.alpha_c, 7), field(f.alpha_d, 7)};
+    };
+    unsigned used = 0;
+    const auto mark = [&](const CombinerFields& f, unsigned texel0_bit, unsigned texel1_bit) {
+        for (const unsigned source : sources(f)) {
+            if (source == kTexel0) used |= texel0_bit;
+            if (source == kTexel1) used |= texel1_bit;
+        }
+    };
+    if (cycle_type_ == 1) {
+        mark(kCycle0, 1, 2);
+        mark(kCycle1, 2, 1);  // Cycle 1 sees TEXEL1 as TEXEL0 and the next pixel's TEXEL0 as TEXEL1.
+    } else {
+        mark(kCycle1, 1, 1);  // One cycle reads both texel inputs from the same tile.
+    }
+    return used;
 }
 
-Rdp::Rgba Rdp::combine(const Rgba& texel, const Rgba& shade) const {
-    // One cycle evaluates cycle 1's (A - B) * C + D. TEXEL1 reads the same tile as TEXEL0.
-    // TODO: two-cycle mode, noise, chroma key center/scale, convert K4/K5 and LOD fractions,
-    // which read as zero here. COMBINED reads as zero because no earlier cycle ran.
+Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const {
+    // Each cycle evaluates (A - B) * C + D. Two-cycle mode feeds cycle 0 into COMBINED.
+    // TODO: noise, chroma key center/scale, convert K4/K5 and LOD fractions read as zero.
     const auto unpack = [](std::uint32_t rgba) {
         return Rgba{rgba >> 24, (rgba >> 16) & 255, (rgba >> 8) & 255, rgba & 255};
     };
     const Rgba primitive = unpack(solid_.primitive), environment = unpack(solid_.environment);
-    const auto input = [&](unsigned source, unsigned channel) -> int {
-        switch (source) {
-            case kTexel0: case kTexel1: return static_cast<int>(texel[channel]);
-            case kPrimitive: return static_cast<int>(primitive[channel]);
-            case kShade: return static_cast<int>(shade[channel]);
-            case kEnvironment: return static_cast<int>(environment[channel]);
-            case kOne: return 255;
-            default: return 0;
-        }
-    };
     const auto field = [this](unsigned shift, unsigned mask) {
         return static_cast<unsigned>(solid_.combine >> shift) & mask;
     };
     const auto equation = [](int a, int b, int c, int d) { return clamp_combined(((a - b) * c + (d << 8) + 0x80) >> 8); };
 
-    Rgba out{};
-    const unsigned sub_a = field(37, 15), sub_b = field(24, 15), multiplier = field(32, 31), add = field(6, 7);
-    for (unsigned i = 0; i < 3; ++i) {
-        // Inputs 6 and up differ per slot: A has ONE then NOISE, B has KEY CENTER then K4.
-        const int a = sub_a < 6 ? input(sub_a, i) : (sub_a == 6 ? 255 : 0);
-        const int b = sub_b < 6 ? input(sub_b, i) : 0;
-        int c = 0;
-        if (multiplier < 6) c = input(multiplier, i);
-        else if (multiplier >= 7 && multiplier <= 12) {
-            static constexpr std::array alpha_sources{kCombined, kTexel0, kTexel1, kPrimitive, kShade, kEnvironment};
-            c = input(alpha_sources[multiplier - 7], 3);
+    const auto cycle = [&](const CombinerFields& f, const Rgba& combined, const Rgba& t0, const Rgba& t1) {
+        const auto input = [&](unsigned source, unsigned channel) -> int {
+            switch (source) {
+                case kCombined: return static_cast<int>(combined[channel]);
+                case kTexel0: return static_cast<int>(t0[channel]);
+                case kTexel1: return static_cast<int>(t1[channel]);
+                case kPrimitive: return static_cast<int>(primitive[channel]);
+                case kShade: return static_cast<int>(shade[channel]);
+                case kEnvironment: return static_cast<int>(environment[channel]);
+                case kOne: return 255;
+                default: return 0;
+            }
+        };
+        Rgba out{};
+        const unsigned sub_a = field(f.a, 15), sub_b = field(f.b, 15), multiplier = field(f.c, 31), add = field(f.d, 7);
+        for (unsigned i = 0; i < 3; ++i) {
+            // Inputs 6 and up differ per slot: A has ONE then NOISE, B has KEY CENTER then K4.
+            const int a = sub_a < 6 ? input(sub_a, i) : (sub_a == 6 ? 255 : 0);
+            const int b = sub_b < 6 ? input(sub_b, i) : 0;
+            int c = 0;
+            if (multiplier < 6) c = input(multiplier, i);
+            else if (multiplier >= 7 && multiplier <= 12) c = input(multiplier - 7, 3);  // alpha inputs
+            out[i] = equation(a, b, c, input(add, i));
         }
-        out[i] = equation(a, b, c, input(add, i));
-    }
-    const unsigned alpha_multiplier = field(18, 7);
-    const int c = (alpha_multiplier == 0 || alpha_multiplier == 6) ? 0 : input(alpha_multiplier, 3);  // LOD fractions
-    out[3] = equation(input(field(21, 7), 3), input(field(3, 7), 3), c, input(field(0, 7), 3));
-    return out;
+        const unsigned alpha_multiplier = field(f.alpha_c, 7);
+        const int c = (alpha_multiplier == 0 || alpha_multiplier == 6) ? 0 : input(alpha_multiplier, 3);  // LOD fractions
+        out[3] = equation(input(field(f.alpha_a, 7), 3), input(field(f.alpha_b, 7), 3), c, input(field(f.alpha_d, 7), 3));
+        return out;
+    };
+
+    if (cycle_type_ != 1) return cycle(kCycle1, Rgba{}, texel0, texel1);  // COMBINED has no earlier cycle.
+    const Rgba first = cycle(kCycle0, Rgba{}, texel0, texel1);
+    // TODO: cycle 1's TEXEL1 is the next pixel's TEXEL0; this pixel's TEXEL0 stands in for it.
+    return cycle(kCycle1, first, texel1, texel0);
 }
 bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const {
     const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
@@ -586,39 +621,40 @@ void Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         }
     }
 
-    // One cycle uses cycle 0's blender: (P * A + M * B) / (A + B). Without force blend,
+    // Each blender cycle computes (P * A + M * B) / (A + B). One cycle uses cycle 0's
+    // selectors. Two-cycle mode always blends cycle 0 without dividing and feeds the
+    // result to cycle 1 as its pixel input. In the final cycle, without force blend,
     // only pixels whose coverage does not overflow memory coverage (edges) are blended.
     const bool overflow = coverage + memory_coverage >= 8;
     const bool force_blend = (solid_.modes & (1U << 14)) != 0;
     const auto constant = [](std::uint32_t rgba) {
         return std::array<unsigned, 3>{rgba >> 24, (rgba >> 16) & 255, (rgba >> 8) & 255};
     };
-    const std::array<unsigned, 3> pixel{combined[0], combined[1], combined[2]};
-    const auto blender_input = [&](unsigned select) {
-        switch (select) {
-            case 1: return memory;
-            case 2: return constant(solid_.blend);
-            case 3: return constant(solid_.fog);
-            default: return pixel;
-        }
-    };
-    const auto first = blender_input((solid_.modes >> 30) & 3);
-    unsigned r = first[0], g = first[1], b = first[2];
-    if (force_blend || !overflow) {
+    const auto blend_cycle = [&](const std::array<unsigned, 3>& pixel, unsigned p_shift, unsigned a_shift,
+                                 unsigned m_shift, unsigned b_shift, bool final) {
+        const auto input = [&](unsigned shift) {
+            switch ((solid_.modes >> shift) & 3) {
+                case 1: return memory;
+                case 2: return constant(solid_.blend);
+                case 3: return constant(solid_.fog);
+                default: return pixel;
+            }
+        };
+        const auto first = input(p_shift);
+        if (final && !force_blend && overflow) return first;
         const unsigned alpha = [&] {
-            switch ((solid_.modes >> 26) & 3) {
+            switch ((solid_.modes >> a_shift) & 3) {
                 case 0: return combined[3];
                 case 1: return solid_.fog & 255;
                 case 2: return shade[3];
                 default: return 0U;
             }
         }();
-        const auto second = blender_input((solid_.modes >> 22) & 3);
-
+        const auto second = input(m_shift);
         // Both factors keep five bits; 1 - A is the complement, so the weights sum to 32.
         const unsigned a = alpha >> 3;
         const unsigned m = [&] {
-            switch ((solid_.modes >> 18) & 3) {
+            switch ((solid_.modes >> b_shift) & 3) {
                 case 0: return 32 - a;
                 case 1: return memory_coverage << 2;
                 case 2: return 31U;
@@ -628,12 +664,19 @@ void Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         std::array<unsigned, 3> out{};
         for (unsigned i = 0; i < 3; ++i) {
             const unsigned sum = first[i] * a + second[i] * m;
-            if (force_blend) out[i] = std::min(255U, sum >> 5);
+            if (!final || force_blend) out[i] = std::min(255U, sum >> 5);
             else out[i] = (a + m) != 0 ? std::min(255U, sum / (a + m)) : first[i];
         }
-        r = out[0], g = out[1], b = out[2];
+        return out;
+    };
+    std::array<unsigned, 3> blended{combined[0], combined[1], combined[2]};
+    if (cycle_type_ == 1) {
+        blended = blend_cycle(blended, 30, 26, 22, 18, false);
+        blended = blend_cycle(blended, 28, 24, 20, 16, true);
+    } else {
+        blended = blend_cycle(blended, 30, 26, 22, 18, true);
     }
-    const unsigned dither = static_cast<unsigned>(solid_.modes >> 38) & 3;
+    unsigned r = blended[0], g = blended[1], b = blended[2];    const unsigned dither = static_cast<unsigned>(solid_.modes >> 38) & 3;
     if (dither < 2) {
         static constexpr std::array magic{0U, 6U, 1U, 7U, 4U, 2U, 5U, 3U, 3U, 5U, 2U, 4U, 7U, 1U, 6U, 0U};
         static constexpr std::array bayer{0U, 4U, 1U, 5U, 4U, 0U, 5U, 1U, 3U, 7U, 2U, 6U, 7U, 3U, 6U, 2U};

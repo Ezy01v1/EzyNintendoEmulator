@@ -630,6 +630,82 @@ TEST_CASE("RDP combiner evaluates (A - B) * C + D with shade alpha as the multip
     }
 }
 
+namespace {
+
+// Set Combine fields: RGB A, B, C, D and alpha A, B, C, D for one cycle.
+struct CombinerCycle {
+    unsigned a, b, c, d, alpha_a, alpha_b, alpha_c, alpha_d;
+};
+
+constexpr std::uint64_t set_combine(CombinerCycle first, CombinerCycle second) {
+    using U = std::uint64_t;
+    return (U{0x3C} << 56) | (U{first.a} << 52) | (U{first.c} << 47) | (U{first.alpha_a} << 44) |
+           (U{first.alpha_c} << 41) | (U{second.a} << 37) | (U{second.c} << 32) | (U{first.b} << 28) |
+           (U{second.b} << 24) | (U{second.alpha_a} << 21) | (U{second.alpha_c} << 18) | (U{first.d} << 15) |
+           (U{first.alpha_b} << 12) | (U{first.alpha_d} << 9) | (U{second.d} << 6) | (U{second.alpha_b} << 3) |
+           U{second.alpha_d};
+}
+
+// Draws a shaded one-row triangle (x = 0..3) with constant shade into an RGBA8888 framebuffer.
+void draw_two_cycle_row(N64& n64, std::uint64_t modes, std::uint64_t combine, std::uint64_t shade_rgba) {
+    auto& bus = n64.bus();
+    constexpr int pixel = 65536;
+    const std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        modes,
+        combine,
+        0x3A000000C86432FFULL,   // primitive (200, 100, 50)
+        0x3B00000080808080ULL,   // environment 128
+        0x3800000000FF0000ULL,   // fog: green
+        rdp_triangle_header(true, 0, 0, 4) | (0x04ULL << 56),
+        rdp_edge(4 * pixel, 0),
+        rdp_edge(0, 0),
+        rdp_edge(0, 0),
+        shade_rgba, 0, 0, 0, 0, 0, 0, 0,
+        kSyncFull,
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 30; ++i) n64.step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+}
+
+constexpr std::uint64_t kTwoCycle = (0x2FULL << 56) | (1ULL << 52) | (3ULL << 38) | (1U << 9);  // dither off, zap
+
+}  // namespace
+
+TEST_CASE("RDP two-cycle combiner feeds cycle 0 into COMBINED for cycle 1") {
+    const auto n64 = N64::create(counting_rom("RDP TWO CYCLE COMBINE"));
+    REQUIRE(n64);
+    // Cycle 0: PRIM * SHADE, alpha 1. Cycle 1: COMBINED * ENV, alpha COMBINED.
+    const auto combine = set_combine({3, 15, 4, 7, 7, 7, 7, 6}, {0, 15, 5, 7, 7, 7, 7, 0});
+    draw_two_cycle_row(*n64, kTwoCycle, combine, 0x0080008000800080ULL);
+    const auto scale = [](unsigned value, unsigned factor) { return (value * factor + 0x80) >> 8; };
+    const unsigned r = scale(scale(200, 128), 128), g = scale(scale(100, 128), 128), b = scale(scale(50, 128), 128);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(n64->bus().read32(0x4000 + 4 * x) == ((r << 24) | (g << 16) | (b << 8) | 0xE0U));
+    }
+}
+
+TEST_CASE("RDP two-cycle blender mixes fog by shade alpha in its first cycle") {
+    const auto n64 = N64::create(counting_rom("RDP TWO CYCLE FOG"));
+    REQUIRE(n64);
+    // Both combiner cycles pass the primitive color: D = PRIM, then D = COMBINED.
+    const auto combine = set_combine({15, 15, 31, 3, 7, 7, 7, 6}, {15, 15, 31, 0, 7, 7, 7, 0});
+    // Blender cycle 0: FOG * SHADE_ALPHA + PIXEL * (1 - A). Cycle 1 passes the result.
+    draw_two_cycle_row(*n64, kTwoCycle | (3ULL << 30) | (2ULL << 26), combine, 0x0000000000000080ULL);
+    // A = 0x80 >> 3 = 16, so fog and pixel each get half.
+    const unsigned r = (200 * 16) >> 5, g = (255 * 16 + 100 * 16) >> 5, b = (50 * 16) >> 5;
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(n64->bus().read32(0x4000 + 4 * x) == ((r << 24) | (g << 16) | (b << 8) | 0xE0U));
+    }
+}
+
 TEST_CASE("RDP combiner multiplies a texel by its own alpha") {
     const auto n64 = N64::create(counting_rom("RDP COMBINER TEXEL ALPHA"));
     REQUIRE(n64);

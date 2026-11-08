@@ -71,8 +71,8 @@ private:
     [[nodiscard]] bool can_write_opaque(bool depth = false) const;
     [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const;
     using Rgba = std::array<unsigned, 4>;
-    [[nodiscard]] bool combiner_reads_texel() const;
-    [[nodiscard]] Rgba combine(const Rgba& texel, const Rgba& shade) const;
+    [[nodiscard]] unsigned texels_read() const;
+    [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const;
     void write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
                             std::span<std::uint8_t> rdram) const;
     void load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram);
