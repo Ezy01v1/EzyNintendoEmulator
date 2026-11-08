@@ -45,6 +45,8 @@ public:
         else texture_ = {};
         if (version >= 9) ar(mask_address_), ar(prim_depth_);
         else mask_address_ = prim_depth_ = 0;
+        if (version >= 10) ar(key_gb_), ar(key_r_), ar(noise_state_);
+        else key_gb_ = 0, key_r_ = 0, noise_state_ = 1;
     }
 
     template <class Ar>
@@ -74,6 +76,7 @@ private:
                                   std::span<std::uint8_t> rdram) const;
     using Rgba = std::array<unsigned, 4>;
     [[nodiscard]] unsigned texels_read() const;
+    unsigned next_noise() const;
     [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const;
     void write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const;
     bool write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
@@ -126,6 +129,9 @@ private:
     std::uint32_t draw_words_ = 0;
     std::array<std::uint64_t, 22> draw_command_{};  // up to edges, shade, texture and depth
     std::uint32_t mask_address_ = 0, prim_depth_ = 0;  // Set Mask Image and Set Prim Depth
+    std::uint64_t key_gb_ = 0;  // Set Key GB
+    std::uint32_t key_r_ = 0;   // Set Key R
+    mutable std::uint32_t noise_state_ = 1;  // combiner noise generator, advanced per pixel
     SolidState solid_;
     TextureState texture_;
 };

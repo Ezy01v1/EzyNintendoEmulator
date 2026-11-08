@@ -748,6 +748,53 @@ TEST_CASE("RDP coverage times alpha scales coverage and feeds it to alpha compar
     for (unsigned x = 0; x < 4; ++x) CHECK(n64->bus().read32(0x4000 + 4 * x) == 0xC8643260U);
 }
 
+TEST_CASE("RDP chroma key turns the distance from the key center into alpha") {
+    const auto n64 = N64::create(counting_rom("RDP CHROMA KEY"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    const auto run = [&](std::initializer_list<std::uint64_t> words) {
+        std::uint32_t end = 0x2000;
+        for (const auto word : words) bus.write64(end, word), end += 8;
+        bus.write64(end, kSyncFull), end += 8;
+        bus.write32(kDpcStart, 0x2000);
+        bus.write32(kDpcEnd, end);
+        for (unsigned i = 0; i < 10; ++i) n64->step();
+    };
+    // RGB = (PRIM - KEY_CENTER) * KEY_SCALE; the primitive is (200, 100, 50).
+    const auto combine = set_combine({3, 6, 6, 7, 7, 7, 7, 6}, {3, 6, 6, 7, 7, 7, 7, 6});
+    constexpr std::uint64_t modes = kOneCycle | (1ULL << 40) | 1U;  // chroma key, alpha compare
+
+    // Key center on the primitive with zero widths: every channel is inside, alpha 0.
+    run({0x2B000000000000C8ULL | (0xC8ULL << 8), 0x2A00000064FF32FFULL, 0x3900000000000001ULL});
+    draw_two_cycle_row(*n64, modes, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0);
+
+    // Red keyed from 0 at full scale: R = 199 against a 1.0 width (256) leaves alpha 57.
+    run({0x2B000000001000FFULL, 0x2A01001064FF32FFULL, 0x3900000000000039ULL});
+    draw_two_cycle_row(*n64, modes, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0xC70000E0U);
+    for (unsigned x = 0; x < 4; ++x) bus.write32(0x4000 + 4 * x, 0);
+    run({0x390000000000003AULL});  // threshold 58 is above alpha 57
+    draw_two_cycle_row(*n64, modes, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0);
+}
+
+TEST_CASE("RDP combiner noise input is a 9-bit value with random top bits") {
+    const auto n64 = N64::create(counting_rom("RDP NOISE"));
+    REQUIRE(n64);
+    // RGB = NOISE * PRIM_ALPHA (255), since C = 6 is KEY_SCALE.
+    const auto combine = set_combine({7, 15, 10, 7, 7, 7, 7, 6}, {7, 15, 10, 7, 7, 7, 7, 6});
+    draw_two_cycle_row(*n64, kOneCycle, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        const auto pixel = n64->bus().read32(0x4000 + 4 * x);
+        const unsigned r = pixel >> 24;
+        // Positive noise 0x20, 0x60, 0xA0, 0xE0 times 255/256; negative values clamp to 0.
+        CHECK((r == 0 || r == 32 || r == 96 || r == 159 || r == 223));
+        CHECK(((pixel >> 16) & 255) == r);  // the same noise feeds all three channels
+    }
+}
+
 TEST_CASE("RDP combiner multiplies a texel by its own alpha") {
     const auto n64 = N64::create(counting_rom("RDP COMBINER TEXEL ALPHA"));
     REQUIRE(n64);

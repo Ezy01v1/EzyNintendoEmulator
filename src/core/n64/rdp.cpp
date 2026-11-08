@@ -281,6 +281,8 @@ void Rdp::execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
             break;
         case 0x2D: scissor_ = word; break;  // Set Scissor
         case 0x2E: prim_depth_ = static_cast<std::uint32_t>(word); break;  // Set Prim Depth
+        case 0x2A: key_gb_ = word & 0xFFFFFFFFFFFFFFULL; break;  // Set Key GB
+        case 0x2B: key_r_ = static_cast<std::uint32_t>(word) & 0xFFFFFFF; break;  // Set Key R
         case 0x3E: mask_address_ = static_cast<std::uint32_t>(word) & 0x3FFFFFF; break;  // Set Mask Image
         case 0x2F:  // Set Other Modes
             cycle_type_ = static_cast<std::uint32_t>(word >> 52) & 3;
@@ -498,13 +500,11 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
 }
 
 bool Rdp::can_write_opaque(bool depth) const {
-    constexpr std::uint64_t unsupported = 1ULL << 40;  // chroma key
     // Depth is only modeled for primitives that carry one.
     const bool depth_modes = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
     if (depth_modes && !depth) return false;
-    if ((solid_.modes & 3) == 3) return false;  // Alpha compare against a random threshold.
     return cycle_type_ <= 1 && color_width_ != 0 && solid_.format == 0 && (pixel_size_ == 2 || pixel_size_ == 3) &&
-           !(solid_.modes & unsupported) && ((solid_.modes >> 38) & 3) != 2;
+           ((solid_.modes >> 38) & 3) != 2;
 }
 
 namespace {
@@ -558,9 +558,29 @@ unsigned Rdp::texels_read() const {
     return used;
 }
 
+unsigned Rdp::next_noise() const {
+    // A deterministic generator stands in for the hardware's free-running noise.
+    noise_state_ = noise_state_ * 1103515245U + 12345U;
+    return noise_state_ >> 16;
+}
+
 Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const {
     // Each cycle evaluates (A - B) * C + D. Two-cycle mode feeds cycle 0 into COMBINED.
-    // TODO: noise, chroma key center/scale, convert K4/K5 and LOD fractions read as zero.
+    // TODO: convert K4/K5 and LOD fractions read as zero.
+    // Key center and scale per channel (R, G, B) and the 4.8 key widths.
+    const std::array<int, 3> key_center{static_cast<int>((key_r_ >> 8) & 255), static_cast<int>((key_gb_ >> 24) & 255),
+                                        static_cast<int>((key_gb_ >> 8) & 255)};
+    const std::array<int, 3> key_scale{static_cast<int>(key_r_ & 255), static_cast<int>((key_gb_ >> 16) & 255),
+                                       static_cast<int>(key_gb_ & 255)};
+    const std::array<int, 3> key_width{static_cast<int>((key_r_ >> 16) & 0xFFF),
+                                       static_cast<int>((key_gb_ >> 44) & 0xFFF),
+                                       static_cast<int>((key_gb_ >> 32) & 0xFFF)};
+    // Noise is a 9-bit signed value with only its top three bits random.
+    const int noise = [&] {
+        const unsigned value = ((next_noise() & 7) << 6) | 0x20;
+        return value & 0x100 ? static_cast<int>(value) - 0x200 : static_cast<int>(value);
+    }();
+    std::array<int, 3> raw{};  // the final cycle's unclamped RGB, for the chroma key
     const auto unpack = [](std::uint32_t rgba) {
         return Rgba{rgba >> 24, (rgba >> 16) & 255, (rgba >> 8) & 255, rgba & 255};
     };
@@ -568,7 +588,8 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
     const auto field = [this](unsigned shift, unsigned mask) {
         return static_cast<unsigned>(solid_.combine >> shift) & mask;
     };
-    const auto equation = [](int a, int b, int c, int d) { return clamp_combined(((a - b) * c + (d << 8) + 0x80) >> 8); };
+    const auto unclamped = [](int a, int b, int c, int d) { return ((a - b) * c + (d << 8) + 0x80) >> 8; };
+    const auto equation = [&](int a, int b, int c, int d) { return clamp_combined(unclamped(a, b, c, d)); };
 
     const auto cycle = [&](const CombinerFields& f, const Rgba& combined, const Rgba& t0, const Rgba& t1) {
         const auto input = [&](unsigned source, unsigned channel) -> int {
@@ -587,12 +608,14 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
         const unsigned sub_a = field(f.a, 15), sub_b = field(f.b, 15), multiplier = field(f.c, 31), add = field(f.d, 7);
         for (unsigned i = 0; i < 3; ++i) {
             // Inputs 6 and up differ per slot: A has ONE then NOISE, B has KEY CENTER then K4.
-            const int a = sub_a < 6 ? input(sub_a, i) : (sub_a == 6 ? 255 : 0);
-            const int b = sub_b < 6 ? input(sub_b, i) : 0;
+            const int a = sub_a < 6 ? input(sub_a, i) : (sub_a == 6 ? 255 : sub_a == 7 ? noise : 0);
+            const int b = sub_b < 6 ? input(sub_b, i) : (sub_b == 6 ? key_center[i] : 0);
             int c = 0;
             if (multiplier < 6) c = input(multiplier, i);
+            else if (multiplier == 6) c = key_scale[i];
             else if (multiplier >= 7 && multiplier <= 12) c = input(multiplier - 7, 3);  // alpha inputs
-            out[i] = equation(a, b, c, input(add, i));
+            raw[i] = unclamped(a, b, c, input(add, i));
+            out[i] = clamp_combined(raw[i]);
         }
         const unsigned alpha_multiplier = field(f.alpha_c, 7);
         const int c = (alpha_multiplier == 0 || alpha_multiplier == 6) ? 0 : input(alpha_multiplier, 3);  // LOD fractions
@@ -600,10 +623,26 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
         return out;
     };
 
-    if (cycle_type_ != 1) return cycle(kCycle1, Rgba{}, texel0, texel1);  // COMBINED has no earlier cycle.
-    const Rgba first = cycle(kCycle0, Rgba{}, texel0, texel1);
-    // TODO: cycle 1's TEXEL1 is the next pixel's TEXEL0; this pixel's TEXEL0 stands in for it.
-    return cycle(kCycle1, first, texel1, texel0);
+    Rgba result{};
+    if (cycle_type_ != 1) {
+        result = cycle(kCycle1, Rgba{}, texel0, texel1);  // COMBINED has no earlier cycle.
+    } else {
+        const Rgba first = cycle(kCycle0, Rgba{}, texel0, texel1);
+        // TODO: cycle 1's TEXEL1 is the next pixel's TEXEL0; this pixel's TEXEL0 stands in for it.
+        result = cycle(kCycle1, first, texel1, texel0);
+    }
+    if (solid_.modes & (1ULL << 40)) {
+        // Chroma key: each channel's distance from the key center (already scaled by the
+        // equation) is subtracted from its width; the smallest margin becomes the alpha.
+        int key_alpha = 255;
+        for (unsigned i = 0; i < 3; ++i) {
+            int key = (raw[i] << 15) >> 15;  // 17-bit signed
+            if (key > 0) key = (key & 15) == 8 ? 16 - key : -key;
+            key_alpha = std::min(key_alpha, (key_width[i] << 4) + key);
+        }
+        result[3] = static_cast<unsigned>(std::clamp(key_alpha, 0, 255));
+    }
+    return result;
 }
 unsigned Rdp::memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const {
     // Without image reads, memory coverage reads as full (7). RGBA5551 keeps only the top
@@ -672,7 +711,11 @@ bool Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         alpha = (solid_.modes & (1U << 12)) ? std::min(255U, scaled >> 5) : std::min(255U, coverage << 5);
     }
     // Alpha compare drops pixels whose alpha is below the blend color alpha.
-    if ((solid_.modes & 1) && alpha < (solid_.blend & 255)) return false;
+    // With dither alpha the threshold is random instead of the blend color alpha.
+    if (solid_.modes & 1) {
+        const unsigned threshold = (solid_.modes & 2) ? next_noise() & 255 : solid_.blend & 255;
+        if (alpha < threshold) return false;
+    }
     if (coverage == 0) return false;
 
     // Memory color and coverage. Without image reads, memory coverage reads as full (7).
