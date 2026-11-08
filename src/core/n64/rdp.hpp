@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 
@@ -47,6 +48,24 @@ public:
         else mask_address_ = prim_depth_ = 0;
         if (version >= 10) ar(key_gb_), ar(key_r_), ar(noise_state_), ar(convert_), ar(prim_lod_);
         else key_gb_ = 0, key_r_ = 0, noise_state_ = 1, convert_ = 0, prim_lod_ = 0;
+        if (version >= 11) {
+            auto count = static_cast<std::uint32_t>(hidden_.size());
+            ar(count);
+            if constexpr (Ar::kLoading) {
+                hidden_.clear();
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    std::uint32_t halfword = 0;
+                    std::uint8_t bits = 0;
+                    ar(halfword), ar(bits);
+                    if (bits > 3) ar.fail();
+                    else if (bits != 0) hidden_[halfword] = bits;
+                }
+            } else {
+                for (auto [halfword, bits] : hidden_) ar(halfword), ar(bits);
+            }
+        } else {
+            hidden_.clear();
+        }
     }
 
     template <class Ar>
@@ -71,8 +90,10 @@ private:
     void fill_span(unsigned y, unsigned left, unsigned right, std::span<std::uint8_t> rdram) const;
     [[nodiscard]] bool field_matches(unsigned y) const;
     [[nodiscard]] bool can_write_opaque(bool depth = false) const;
+    [[nodiscard]] unsigned hidden_bits(std::size_t address) const;
+    void set_hidden_bits(std::size_t address, unsigned bits) const;
     [[nodiscard]] unsigned memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const;
-    [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned coverage,
+    [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned& coverage,
                                   std::span<std::uint8_t> rdram) const;
     using Rgba = std::array<unsigned, 4>;
     [[nodiscard]] unsigned texels_read() const;
@@ -139,7 +160,10 @@ private:
     std::uint32_t key_r_ = 0;   // Set Key R
     std::uint64_t convert_ = 0;   // Set Convert: K0..K5, 9 bits each
     std::uint32_t prim_lod_ = 0;  // Set Primitive Color: min level and LOD fraction
-    mutable std::uint32_t noise_state_ = 1;  // combiner noise generator, advanced per pixel
+    mutable std::uint32_t noise_state_ = 1;
+    // RDRAM hidden bits (two per halfword), kept sparse: only nonzero entries, keyed by
+    // halfword index. Only depth writes set them; fills clear them.
+    mutable std::map<std::uint32_t, std::uint8_t> hidden_;  // combiner noise generator, advanced per pixel
     SolidState solid_;
     TextureState texture_;
 };

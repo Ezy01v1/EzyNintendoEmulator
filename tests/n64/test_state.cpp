@@ -1162,6 +1162,78 @@ TEST_CASE("RDP depth writes the DZ code from the Z slopes and uses it for non-ov
     for (unsigned x = 0; x < 4; ++x) CHECK(bus.read16(0x6000 + 2 * x) == 0x0402);
 }
 
+namespace {
+
+// Draws two one-row Z triangles over x = 0..3: a base surface (compare and update), then a
+// second one with other modes. Returns the framebuffer row.
+std::array<std::uint32_t, 4> draw_depth_pair(N64& n64, std::uint32_t base_dzdy, std::uint64_t second_modes,
+                                             std::uint32_t second_z) {
+    auto& bus = n64.bus();
+    constexpr int pixel = 65536;
+    for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);
+    std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        0x3E00000000006000ULL,
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        0x2F0000C000000230ULL,
+        0x3C00001F000000C0ULL,
+    };
+    const auto add = [&](std::uint32_t z, std::uint32_t dzdy, std::uint32_t color) {
+        commands.push_back(0x3A00000000000000ULL | color);
+        for (const auto word : {rdp_triangle_header(true, 0, 0, 4) | (0x01ULL << 56), rdp_edge(4 * pixel, 0),
+                                rdp_edge(0, 0), rdp_edge(0, 0), std::uint64_t{z} << 32, std::uint64_t{dzdy}}) {
+            commands.push_back(word);
+        }
+    };
+    add(0x4000U << 10, base_dzdy, 0xFF0000FF);  // red base surface
+    commands.push_back(second_modes);
+    add(second_z << 10, 0, 0x00FF00FF);         // green
+    commands.push_back(kSyncFull);
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 40; ++i) n64.step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    std::array<std::uint32_t, 4> row{};
+    for (unsigned x = 0; x < 4; ++x) row[x] = bus.read32(0x4000 + 4 * x);
+    return row;
+}
+
+}  // namespace
+
+TEST_CASE("RDP keeps the low DZ bits in RDRAM hidden bits") {
+    const auto n64 = N64::create(counting_rom("RDP HIDDEN DZ"));
+    REQUIRE(n64);
+    // DzDy 0x700 rounds to DZ 0x400, code 10: top bits 2 in RDRAM, low bits 2 hidden.
+    // Memory DZ 0x400 widens to 0x800, so the decal range is 0x800 << 3 = 0x4000; losing the
+    // hidden bits would leave 0x100 -> 0x200 and a range of only 0x1000.
+    const auto row = draw_depth_pair(*n64, 0x07000000U, 0x2F0000C000000E10ULL, 0x4000 - 0x2000);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(row[x] == 0x00FF00E0U);
+        CHECK(n64->bus().read16(0x6000 + 2 * x) == 0x0402);
+    }
+    // Hidden bits are part of the save state.
+    const auto state = n64->save_state();
+    const auto restored = N64::create(counting_rom("RDP HIDDEN DZ"));
+    REQUIRE(restored);
+    REQUIRE(restored->load_state(state));
+    CHECK(restored->save_state() == state);
+}
+
+TEST_CASE("RDP interpenetrating Z scales coverage where surfaces intersect") {
+    const auto n64 = N64::create(counting_rom("RDP INTERPENETRATE"));
+    REQUIRE(n64);
+    // Base DZ 0x100 widens to 0x200 (shift 9). The green pixel is 0x400 in front, inside the
+    // range: coverage becomes ((0x4000 >> 9) - (0x3C00 >> 9)) * 8 >> 3 = 2, stored as 1 by clamp.
+    const auto row = draw_depth_pair(*n64, 0x01000000U, 0x2F0000C000000430ULL, 0x4000 - 0x400);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(row[x] == 0x00FF0020U);
+    }
+}
+
 TEST_CASE("RDP alpha compare keeps the depth buffer for dropped pixels") {
     const auto n64 = N64::create(counting_rom("RDP ZALPHA"));
     REQUIRE(n64);
