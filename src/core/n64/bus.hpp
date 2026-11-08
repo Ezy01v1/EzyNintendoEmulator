@@ -12,6 +12,7 @@
 #include "n64/mi.hpp"
 #include "n64/pi.hpp"
 #include "n64/pif.hpp"
+#include "n64/rdp.hpp"
 #include "n64/rsp_regs.hpp"
 #include "n64/scheduler.hpp"
 #include "n64/si.hpp"
@@ -64,15 +65,16 @@ public:
     [[nodiscard]] std::string take_isviewer_output();
 
     template <class Ar>
-    void serialize(Ar& ar) {
+    void serialize(Ar& ar, std::uint32_t version) {
         ar(rdram_), ar(rdram_regs_), ar(ri_), ar(isviewer_);
         mi_.serialize(ar);
         pi_.serialize(ar);
-        rsp_.serialize(ar);
+        rsp_.serialize(ar, version, rdp_);
         vi_.serialize(ar);
         si_.serialize(ar);
         pif_.serialize(ar);
         ai_.serialize(ar);
+        if (version >= 4) rdp_.serialize(ar, version);
     }
 
 private:
@@ -94,6 +96,7 @@ private:
     Mi mi_;
     Pi pi_;
     RspRegs rsp_;
+    Rdp rdp_;
     Vi vi_;
     Si si_;
     Pif pif_;

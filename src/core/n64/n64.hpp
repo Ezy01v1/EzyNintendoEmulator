@@ -15,7 +15,7 @@ namespace ezy::n64 {
 // The whole console: what the frontend and the runner talk to.
 //
 // Main loop: the CPU runs one instruction, the scheduler advances by the cycles it took,
-// and every event that is due (VI lines, PI/SI/AI DMA ends) is dispatched to the bus.
+// and every event that is due (VI lines, DMA completions, RSP and RDP work) is dispatched to the bus.
 class N64 {
 public:
     // nullptr if the file isn't an N64 ROM. Without a PIF ROM the console boots through
@@ -49,9 +49,9 @@ private:
     explicit N64(Cartridge cart);
 
     template <class Ar>
-    void serialize(Ar& ar) {
-        scheduler_.serialize(ar);
-        bus_.serialize(ar);
+    void serialize(Ar& ar, std::uint32_t version) {
+        scheduler_.serialize(ar, version);
+        bus_.serialize(ar, version);
         cpu_.serialize(ar);
     }
 

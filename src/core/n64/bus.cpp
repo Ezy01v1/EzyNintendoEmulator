@@ -37,7 +37,7 @@ std::uint32_t Bus::read_io(std::uint32_t paddr) {
     paddr &= ~3U;
     if (paddr >= 0x03F00000 && paddr < 0x04000000) return rdram_regs_[(paddr >> 2) & 15];
     if (paddr >= kSpRegs && paddr < kDp) return rsp_.read_sp(paddr - kSpRegs);
-    if (paddr >= kDp && paddr < kDp + 0x100000) return rsp_.read_dp(paddr - kDp);
+    if (paddr >= kDp && paddr < kDp + 0x100000) return rdp_.read(paddr - kDp, scheduler_.now());
     if (paddr >= kMi && paddr < kVi) return mi_.read(paddr - kMi);
     if (paddr >= kVi && paddr < kAi) return vi_.read(paddr - kVi);
     if (paddr >= kAi && paddr < kPi) return ai_.read(paddr - kAi, scheduler_.now());
@@ -65,9 +65,9 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     if (paddr >= 0x03F00000 && paddr < 0x04000000) {
         rdram_regs_[(paddr >> 2) & 15] = value;
     } else if (paddr >= kSpRegs && paddr < kDp) {
-        rsp_.write_sp(paddr - kSpRegs, value, mi_);
+        rsp_.write_sp(paddr - kSpRegs, value, mi_, scheduler_, scheduler_.now());
     } else if (paddr >= kDp && paddr < kDp + 0x100000) {
-        rsp_.write_dp(paddr - kDp, value);
+        rdp_.write(paddr - kDp, value, scheduler_, scheduler_.now());
     } else if (paddr >= kMi && paddr < kVi) {
         mi_.write(paddr - kMi, value);
     } else if (paddr >= kVi && paddr < kAi) {
@@ -172,6 +172,9 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         case EventType::ViLine: vi_.on_line(mi_, scheduler_, when); break;
         case EventType::SiDma: si_.finish_dma(mi_); break;
         case EventType::AiDma: ai_.on_dma_end(mi_, scheduler_, rdram_); break;
+        case EventType::SpDma: rsp_.finish_dma_row(scheduler_, rdram_, when); break;
+        case EventType::RspStep: rsp_.step(mi_, rdp_, scheduler_, when); break;
+        case EventType::RdpWord: rdp_.step(mi_, scheduler_, rdram_, rsp_.dmem(), when); break;
         default: break;
     }
 }

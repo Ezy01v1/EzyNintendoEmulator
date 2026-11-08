@@ -140,3 +140,153 @@ The failures:
 **Performance** (Release, this PC, median of 3): `CPUADD.N64` 600 frames (10 s emulated)
 in 4.86 s. n64-systemtest's base set takes about 13 minutes of real time (much of it waiting
 on an RSP that never runs).
+
+### Nintendo 64 RSP scalar core and SP DMA (2026-11-07)
+
+With the same `n64-systemtest` ROM, **2824 of 3721** base tests pass. All scalar RSP, SP
+register and `spmem: DMA` cases in this ROM pass. Vector instructions and RDP remain open.
+The scalar execution and SP DMA use approximate timing. The 91 PeterLemon comparisons still
+match their references.
+
+### Nintendo 64 RSP vector unit (2026-11-07)
+
+**2977 of 3721** base cases now pass in the same `n64-systemtest` ROM, 153 more than the
+scalar build. All vector cases pass, including every 16-bit input for `VRCP` and `VRSQ`.
+The two remaining cases labeled `RSP STATUS: start-valid` exercise the RDP freeze flag.
+Vector instructions share the RSP's approximate instruction timing.
+
+Instruction references include the SGI programmer's guide and hardware behavior documented
+in ares. [SGI RSP Programmer's Guide](https://ultra64.ca/files/documentation/silicon-graphics/SGI_Nintendo_64_RSP_Programmers_Guide.pdf)
+[ares vector interpreter](https://github.com/ares-emulator/ares/blob/master/ares/n64/rsp/interpreter-vpu.cpp)
+
+### Nintendo 64 RDP command interface and fill rectangles (2026-11-07)
+
+**2984 of 3721** base cases pass, seven more than the vector build. The RDP basic group
+now passes, including both `start-valid` cases, incremental END writes and lists that wrap
+inside DMEM. Integration tests also check the VI image, an XBUS list submitted by the RSP
+and save-state resume inside a multiword command.
+
+The command timing and whole-pixel fill clipping are approximate. Triangles, texture sampling,
+depth and the general color pipeline remain open. [SGI RDP Command Summary](https://ultra64.ca/files/documentation/silicon-graphics/SGI_RDP_Command_Summary.pdf)
+[n64-systemtest RDP cases](https://github.com/lemmy-64/n64-systemtest/blob/main/src/tests/rdp/mod.rs)
+
+### Nintendo 64 RDP fill triangles (2026-11-07)
+
+The `0x08` triangle command draws solid spans in `FILL` cycle mode. Integration tests
+check the pixel patterns for both major-edge directions, scissor clipping, signed
+edge coefficients, XBUS wrap and save-state resume with part of the command buffered.
+The installed `n64-systemtest` base ROM has no triangle cases. Single-cycle color,
+shading, depth and textures remain open.
+
+Edge setup and fill spans were checked against the command format and rasterizer
+reference. [SGI RDP Command Summary](https://ultra64.ca/files/documentation/silicon-graphics/SGI_RDP_Command_Summary.pdf)
+[paraLLEl-RDP span setup](https://github.com/Themaister/parallel-rdp/blob/master/parallel-rdp/shaders/span_setup.comp)
+
+### Nintendo 64 RDP opaque one-cycle triangles (2026-11-07)
+
+The untextured `0x08` triangle command also draws opaque single-cycle spans into
+RGBA5551 and RGBA8888. This path supports a constant RGB combiner input or direct
+blend/fog color, eight-sample coverage with the non-AA sample rule, and ordered
+RGB dithering. Integration tests compare pixels and coverage and restore the
+color state with part of a triangle buffered.
+
+Framebuffer reads, weighted blending, alpha comparison, noise dithering,
+depth, shading and textures remain open. RGBA5551 writes the visible coverage bit.
+The installed base ROM still serves as a regression check for the RDP interface.
+[paraLLEl-RDP coverage](https://github.com/Themaister/parallel-rdp/blob/master/parallel-rdp/shaders/coverage.h)
+[Angrylion framebuffer formats](https://github.com/ata4/angrylion-rdp-plus/blob/master/src/core/n64video/rdp/fbuffer.c)
+
+### Nintendo 64 RDP texture copy (2026-11-07)
+
+`Load Tile` and `Load Block` transfer RGBA5551 texels from RDRAM into TMEM.
+The regular texture rectangle command in `COPY` mode reads those texels and
+writes RGBA5551 pixels, with optional alpha testing. Integration tests compare
+the resulting pixels after modifying source RDRAM, check odd-row layout and
+TMEM wrapping, and restore TMEM with part of a rectangle command buffered.
+
+All 131 N64 unit tests and all 91 PeterLemon cases registered in CTest pass.
+The installed n64-systemtest ROM remains at 2984 of 3721 passing cases. Indexed
+formats and palettes, filtering and textured triangles remain open. Command
+timing and copy-mode scissor behavior are approximate.
+[SGI RDP Command Summary](https://ultra64.ca/files/documentation/silicon-graphics/SGI_RDP_Command_Summary.pdf)
+[paraLLEl-RDP TMEM upload](https://github.com/Themaister/parallel-rdp/blob/master/parallel-rdp/shaders/tmem_update.comp)
+[paraLLEl-RDP COPY sampler](https://github.com/Themaister/parallel-rdp/blob/master/parallel-rdp/shaders/texture.h)
+
+### Nintendo 64 RDP indexed texture copy (2026-11-07)
+
+`Load TLUT` expands 16-bit palette entries into the four banks of upper TMEM.
+In `COPY` mode, CI4 selects a 16-entry palette through the tile's palette field,
+and CI8 addresses all 256 entries. The 16-bit framebuffer receives the raw
+palette entry. With alpha comparison enabled, its low bit controls whether
+the pixel is written. Integration tests verify the packed uploads, palette
+selection, per-bank lookup and save-state restoration with a partial command.
+The save-state format is unchanged because it already stores all of TMEM.
+All 133 N64 unit tests pass. The installed n64-systemtest ROM has the same
+2984 of 3721 base cases passing as the RGBA5551 copy build.
+[Nintendo programming manual](https://ultra64.ca/files/documentation/online-manuals/man/pro-man/pro13/13-09.html)
+[Angrylion COPY pipeline](https://github.com/ata4/angrylion-rdp-plus/blob/master/src/core/n64video/rdp/rasterizer.c)
+
+### Nintendo 64 RDP one-cycle point-sampled rectangles (2026-11-07)
+
+Regular texture rectangles now support opaque one-cycle rendering from RGBA5551
+or indexed CI4/CI8 textures with RGBA16 or IA16 palettes. The RGB combiner can
+pass TEXEL0 through or multiply it by the primitive color. This path supports
+RGBA5551 and RGBA8888 framebuffers, tile coordinate shift, clamp and mirroring,
+and the existing coverage and ordered dithering rules. Tests check scaling,
+scissor clipping, fractional coverage, indexed color, and save-state
+restoration with part of a rectangle command buffered.
+
+All 135 N64 unit tests pass. The installed n64-systemtest ROM retains the same
+2984 of 3721 passing base cases as the indexed copy build.
+Texture interpolation and pipeline timing are approximate.
+[SGI RDP Command Summary](https://ultra64.ca/files/documentation/silicon-graphics/SGI_RDP_Command_Summary.pdf)
+[paraLLEl-RDP texture sampler](https://github.com/Themaister/parallel-rdp/blob/master/parallel-rdp/shaders/texture.h)
+[paraLLEl-RDP span setup](https://github.com/Themaister/parallel-rdp/blob/master/parallel-rdp/shaders/span_setup.comp)
+
+### Nintendo 64 RDP one-cycle filtered rectangles (2026-11-07)
+
+Opaque texture rectangles support the three-tap filter for RGBA5551 and
+indexed CI4/CI8 textures with RGBA16 or IA16 palettes. The five-bit S and T
+fractions choose the interpolation triangle and its weights. With
+`G_TF_AVERAGE`, the exact midpoint averages four texels. Each tap uses the
+tile's coordinate addressing and the palette bank selected by the filter.
+
+Integration tests check both interpolation triangles, the diagonal and
+midpoint, tile-edge clamping, wrapping, mirroring and palette banks. All
+137 N64 unit tests pass. The installed n64-systemtest ROM retains 2984 of
+3721 passing base cases.
+[Nintendo texture filter reference](https://ultra64.ca/files/documentation/online-manuals/man/n64man/gdp/gDPSetTextureFilter.html)
+[Angrylion texture filtering](https://github.com/ata4/angrylion-rdp-plus/blob/master/src/core/n64video/rdp/tex.c)
+[paraLLEl-RDP texture sampler](https://github.com/Themaister/parallel-rdp/blob/master/parallel-rdp/shaders/texture.h)
+
+### Nintendo 64 RDP affine textured triangles (2026-11-07)
+
+The unshaded `0x0A` command draws opaque one-cycle triangles with affine S
+and T interpolation. The triangle shares the rectangle's point and
+three-tap samplers, its TEXEL0 and primitive-color modulation paths, and
+the RGBA5551/RGBA8888 framebuffer writer. The texture origin follows the
+unclipped major edge. Tests check fractional coefficients, both major-edge
+orientations, clipping, coverage and indexed filtering.
+
+Save-state version 8 stores all twelve buffered words. Earlier states
+retain their original four-word layout and skip counts. Tests resume a
+partially buffered triangle and a version 7 RDP state with an in-flight skip.
+All 140 N64 unit tests pass. The installed n64-systemtest ROM retains 2984 of
+3721 passing base cases.
+[SGI RDP Command Summary](https://ultra64.ca/files/documentation/silicon-graphics/SGI_RDP_Command_Summary.pdf)
+[Angrylion triangle rasterizer](https://github.com/ata4/angrylion-rdp-plus/blob/master/src/core/n64video/rdp/rasterizer.c)
+
+### Nintendo 64 RDP perspective-correct textured triangles (2026-11-07)
+
+Opaque one-cycle `0x0A` triangles interpolate W with the same fixed-point
+scanline setup as S and T. With perspective enabled, the RDP's quantized
+reciprocal projects S and T before tile shifts, clamping and sampling.
+Integration tests cover point and filtered sampling, horizontal and vertical
+W gradients, fractional coefficients, reciprocal rounding, and saturation
+with very small or nonpositive W. All 142 N64 unit tests pass. The installed
+n64-systemtest ROM retains 2984 of 3721 passing base cases.
+
+Perspective correction uses the selected tile. Texture LOD, shading, depth,
+and one-cycle alpha comparison and blending remain open.
+[paraLLEl-RDP perspective divider](https://github.com/Themaister/parallel-rdp/blob/master/parallel-rdp/shaders/perspective.h)
+[Angrylion texture coordinates](https://github.com/ata4/angrylion-rdp-plus/blob/master/src/core/n64video/rdp/tcoord.c)
