@@ -69,11 +69,13 @@ private:
     void fill_span(unsigned y, unsigned left, unsigned right, std::span<std::uint8_t> rdram) const;
     [[nodiscard]] bool field_matches(unsigned y) const;
     [[nodiscard]] bool can_write_opaque(bool depth = false) const;
-    [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const;
+    [[nodiscard]] unsigned memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const;
+    [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned coverage,
+                                  std::span<std::uint8_t> rdram) const;
     using Rgba = std::array<unsigned, 4>;
     [[nodiscard]] unsigned texels_read() const;
     [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const;
-    void write_depth(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const;
+    void write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const;
     bool write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
                             std::span<std::uint8_t> rdram) const;
     void load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram);

@@ -144,6 +144,18 @@ std::uint32_t decompress_depth(unsigned stored) {
     return ones | (mantissa << shift);
 }
 
+// DZ is kept as a power of two: the 4-bit code is the position of the highest set bit.
+unsigned compress_dz(unsigned dz) {
+    unsigned code = 0;
+    while (code < 15 && (dz >> (code + 1)) != 0) ++code;
+    return code;
+}
+
+// Rounds DZ down to its highest power of two, as the hardware comparator does.
+unsigned highest_power_of_two(unsigned value) {
+    return value == 0 ? 0 : 1U << compress_dz(value);
+}
+
 unsigned dither_channel(unsigned channel, unsigned threshold) {
     if ((channel & 7) <= threshold) return channel;
     return std::min(255U, (channel & ~7U) + 8);
@@ -377,6 +389,12 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         };
         z = {word(depth_at, 32), word(depth_at, 0), word(depth_at + 1, 32), word(depth_at + 1, 0)};
     }
+    // Pixel DZ is the sum of the X and Y slopes (or the primitive's DZ), rounded to a power of two.
+    const auto magnitude = [](std::int32_t slope) { return static_cast<std::int64_t>(slope < 0 ? ~slope : slope); };
+    const unsigned pixel_dz = highest_power_of_two(
+        (solid_.modes & (1U << 2)) ? prim_depth_ & 0xFFFF
+                                   : static_cast<unsigned>(std::min<std::int64_t>(
+                                         (magnitude(z.dx) + magnitude(z.dy)) >> 16, 0x7FFF)));
     const bool late = (major.step < 0) == major_left;
     for (int y = top >> 2; 4 * y < bottom; ++y) {
         if (!field_matches(static_cast<unsigned>(y))) continue;
@@ -432,7 +450,9 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
             if (coverage != 0 && use_depth) {
                 pixel_z = (solid_.modes & (1U << 2)) ? ((prim_depth_ >> 16) & 0x7FFF) << 3
                                                      : clamp_depth(start_z + std::int64_t{z.dx} * (x - texture_x));
-                if (!depth_test(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, rdram)) continue;
+                if (!depth_test(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, pixel_dz, coverage, rdram)) {
+                    continue;
+                }
             }
             if (coverage != 0) {
                 const int dx = x - texture_x;
@@ -451,7 +471,7 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                 if (write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y),
                                        combine(texel0, texel1, shade_color), shade_color, coverage, rdram) &&
                     use_depth) {
-                    write_depth(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, rdram);
+                    write_depth(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, pixel_dz, rdram);
                 }
             }
         }
@@ -585,27 +605,53 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
     // TODO: cycle 1's TEXEL1 is the next pixel's TEXEL0; this pixel's TEXEL0 stands in for it.
     return cycle(kCycle1, first, texel1, texel0);
 }
-bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const {
+unsigned Rdp::memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const {
+    // Without image reads, memory coverage reads as full (7). RGBA5551 keeps only the top
+    // coverage bit; the two hidden low bits are taken as set.
+    if (!(solid_.modes & (1U << 6))) return 7;
+    const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
+    const std::size_t address = (color_address_ & ~(bytes - 1)) +
+        (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
+    if (address + bytes > rdram.size()) return 7;
+    if (bytes == 2) return ((rdram[address + 1] & 1U) << 2) | 3;
+    return rdram[address + 3] >> 5;
+}
+
+bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned coverage,
+                     std::span<std::uint8_t> rdram) const {
     const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
     if (address + 2 > rdram.size()) return false;
     if (!(solid_.modes & (1U << 4))) return true;
-    // Without DZ ranges, "nearer" and "farther" collapse to plain comparisons.
-    // TODO: DZ ranges, the hidden Z bits and the interpenetrating coverage adjustment.
+    // TODO: the two hidden DZ bits (taken as zero) and the interpenetrating coverage adjustment.
     const unsigned stored = (unsigned{rdram[address]} << 8) | rdram[address + 1];
     const std::uint32_t memory_z = decompress_depth(stored >> 2);
+    unsigned memory_dz = 1U << ((stored & 3) << 2);
+    // Low Z exponents have more precision than DZ can describe, so memory DZ is widened.
+    bool coplanar = false;
+    if ((stored >> 13) < 3) {
+        if (memory_dz != 0x8000) memory_dz = std::max(memory_dz << 1, 16U >> (stored >> 13));
+        else coplanar = true, memory_dz = 0xFFFF;
+    }
+    const std::int64_t range = std::int64_t{highest_power_of_two(dz | memory_dz)} << 3;
+    const std::int64_t pixel = z, memory = memory_z;
+    const bool farther = coplanar || pixel + range >= memory;
+    const bool nearer = coplanar || pixel - range <= memory;
+    const bool in_front = pixel < memory;
     const bool max = memory_z == 0x3FFFF;
+    const bool overflow = ((coverage + memory_coverage(x, y, rdram)) & 8) != 0;
     switch ((solid_.modes >> 10) & 3) {
-        case 2: return max || z < memory_z;       // transparent
-        case 3: return !max && z == memory_z;     // decal: coplanar with memory
-        default: return max || z < memory_z;      // opaque and interpenetrating
+        case 2: return in_front || max;                             // transparent
+        case 3: return farther && nearer && !max;                   // decal
+        default: return max || (overflow ? in_front : nearer);      // opaque and interpenetrating
     }
 }
 
-void Rdp::write_depth(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const {
+void Rdp::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const {
     if (!(solid_.modes & (1U << 5))) return;
     const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
     if (address + 2 > rdram.size()) return;
-    const unsigned packed = compress_depth(z) << 2;
+    // Only the top two bits of the 4-bit DZ code fit in RDRAM; the low two are hidden bits.
+    const unsigned packed = (compress_depth(z) << 2) | (compress_dz(dz) >> 2);
     rdram[address] = static_cast<std::uint8_t>(packed >> 8);
     rdram[address + 1] = static_cast<std::uint8_t>(packed);
 }

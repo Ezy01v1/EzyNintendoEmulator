@@ -896,8 +896,9 @@ TEST_CASE("RDP decal Z mode only draws pixels coplanar with the depth buffer") {
     };
     add(0, 0x4000U << 10, 0xFF0000FF);           // red base surface
     commands.push_back(0x2F0000C000000E10ULL);   // decal Z, compare only
-    add(2, 0x4000U << 10, 0x00FF00FF);           // green decal on the red surface
-    add(3, 0x2000U << 10, 0x0000FFFF);           // blue is nearer, so not coplanar
+    // Flat memory DZ at a low exponent widens to 16, so the coplanar range is 16 << 3 = 128.
+    add(2, (0x4000U - 0x40) << 10, 0x00FF00FF);  // green decal, within the DZ range
+    add(3, (0x4000U - 0x100) << 10, 0x0000FFFF); // blue is nearer than the range, so not coplanar
     commands.push_back(kSyncFull);
     std::uint32_t end = 0x1000;
     for (const auto command : commands) bus.write64(end, command), end += 8;
@@ -910,6 +911,33 @@ TEST_CASE("RDP decal Z mode only draws pixels coplanar with the depth buffer") {
         CHECK(bus.read32(0x4000 + 4 * x) == (x >= 2 ? 0x00FF00E0U : 0xFF0000E0U));
         CHECK(bus.read16(0x6000 + 2 * x) == 0x0400);
     }
+}
+
+TEST_CASE("RDP depth writes the DZ code from the Z slopes and uses it for non-overflowing pixels") {
+    const auto n64 = N64::create(counting_rom("RDP ZDZ"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);
+    // Constant Z with DzDy = 0x0100'0000: DZ = 0x100, code 8, stored top bits 2.
+    const std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        0x3E00000000006000ULL,
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        0x2F0000C000000230ULL,
+        0x3C00001F000000C0ULL,
+        0x3A000000FF0000FFULL,
+        rdp_triangle_header(true, 0, 0, 8) | (0x01ULL << 56), rdp_edge(4 * pixel, 0), rdp_edge(0, 0),
+        rdp_edge(0, 0), std::uint64_t{0x4000U << 10} << 32, 0x01000000ULL,
+        kSyncFull,
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 30; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read16(0x6000 + 2 * x) == 0x0402);
 }
 
 TEST_CASE("RDP alpha compare keeps the depth buffer for dropped pixels") {
