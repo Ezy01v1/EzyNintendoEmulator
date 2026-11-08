@@ -337,14 +337,20 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     const bool textured = (op & 2) != 0, shaded = (op & 4) != 0;
     // Primitive depth also lets triangles without Z coefficients use the depth buffer.
     const bool depth = (op & 1) != 0 || (solid_.modes & (1U << 2));
-    const auto& tile = texture_.tiles[(header >> 48) & 7];
+    const unsigned base_tile = static_cast<unsigned>(header >> 48) & 7;
     const bool fill = !textured && can_fill();
     if (!fill && !can_write_opaque(depth)) return;
     // Without texture coefficients, S and T stay at zero. TEXEL1 comes from the next tile.
     const unsigned texels = fill ? 0 : texels_read();
     const bool sample = texels != 0;
-    const auto& next_tile = texture_.tiles[(((header >> 48) & 7) + 1) & 7];
-    if (((texels & 1) && !can_sample_texture(tile)) || ((texels & 2) && !can_sample_texture(next_tile))) return;
+    // With LOD, the tile is picked per pixel from base_tile up to base_tile + max level.
+    const bool lod = sample && (solid_.modes & (1ULL << 48));
+    const unsigned max_level = static_cast<unsigned>(header >> 51) & 7;
+    // The second texel only moves past the first below the last level, so max level is the highest tile.
+    for (unsigned level = 0; level <= (lod ? max_level : 1); ++level) {
+        const bool used = lod || (level == 0 ? (texels & 1) : (texels & 2));
+        if (used && !can_sample_texture(texture_.tiles[(base_tile + level) & 7], true)) return;
+    }
     // Coefficient blocks follow the edges in shade, texture, depth order.
     const unsigned texture_at = shaded ? 12 : 4, depth_at = texture_at + (textured ? 8 : 0);
 
@@ -463,19 +469,36 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
             if (coverage != 0) {
                 const int dx = x - texture_x;
                 Rgba texel0{}, texel1{}, shade_color{};  // Triangles without shade coefficients have zero shade.
+                int lod_fraction = 0;
                 if (sample) {
-                    const int sample_s = s.sample(start_s, dx), sample_t = t.sample(start_t, dx);
-                    const auto [u, v] = perspective ? project_texture_coordinates(sample_s, sample_t, w.sample(start_w, dx))
-                                                    : std::array{sample_s, sample_t};
-                    if (texels & 1) texel0 = sample_texel(tile, u, v);
-                    if (texels & 2) texel1 = sample_texel(next_tile, u, v);
+                    const auto coordinates = [&](std::int64_t s_start, std::int64_t t_start, std::int64_t w_start, int at) {
+                        const int sample_s = s.sample(s_start, at), sample_t = t.sample(t_start, at);
+                        return perspective ? project_texture_coordinates(sample_s, sample_t, w.sample(w_start, at))
+                                           : std::array{sample_s, sample_t};
+                    };
+                    const auto [u, v] = coordinates(start_s, start_t, start_w, dx);
+                    unsigned first = base_tile, second = base_tile + 1;
+                    if (lod) {
+                        // LOD is the largest texel step to the next pixel and the next line (10.5).
+                        const auto right = coordinates(start_s, start_t, start_w, dx + 1);
+                        const auto down = coordinates(start_s + s.dy, start_t + t.dy, start_w + w.dy, dx);
+                        int step = std::max({std::abs(right[0] - u), std::abs(right[1] - v),
+                                             std::abs(down[0] - u), std::abs(down[1] - v)});
+                        const auto level = select_lod(step, max_level);
+                        first = base_tile + level.tile;
+                        second = level.distant ? first : first + 1;
+                        lod_fraction = level.fraction;
+                    }
+                    if (texels & 1) texel0 = sample_texel(texture_.tiles[first & 7], u, v);
+                    if (texels & 2) texel1 = sample_texel(texture_.tiles[second & 7], u, v);
                 }
                 if (shaded) {
                     for (unsigned i = 0; i < shade.size(); ++i) shade_color[i] = clamp_shade(start_shade[i], shade[i], dx);
                 }
                 // Z is only updated for pixels the blender actually writes (alpha compare can drop them).
                 if (write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y),
-                                       combine(texel0, texel1, shade_color), shade_color, coverage, rdram) &&
+                                       combine(texel0, texel1, shade_color, lod_fraction), shade_color, coverage,
+                                       rdram) &&
                     use_depth) {
                     write_depth(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, pixel_dz, rdram);
                 }
@@ -562,13 +585,30 @@ unsigned Rdp::texels_read() const {
     return used;
 }
 
+Rdp::LodLevel Rdp::select_lod(int step, unsigned max_level) const {
+    // step is in 10.5 texels per pixel. Each mip level halves the texture, so the level is
+    // log2 of the whole-texel step and the fraction is the position between two levels.
+    unsigned lod = static_cast<unsigned>(step);
+    if (lod & 0x4000) lod = 0x7FFF;
+    lod = std::max(lod, (prim_lod_ >> 8) & 31);  // minimum level from Set Primitive Color
+    const bool magnify = lod < 32;
+    unsigned level = 0;
+    while (level < 7 && (lod >> 5) >> (level + 1)) ++level;
+    const bool distant = (lod & 0x6000) || level >= max_level;
+    int fraction = static_cast<int>(((lod << 3) >> level) & 0xFF);
+    // Without sharpen or detail textures, magnification and the last level clamp the fraction.
+    if (distant) fraction = 0xFF;
+    else if (magnify) fraction = 0;
+    return {distant ? max_level : level, distant, fraction};
+}
+
 unsigned Rdp::next_noise() const {
     // A deterministic generator stands in for the hardware's free-running noise.
     noise_state_ = noise_state_ * 1103515245U + 12345U;
     return noise_state_ >> 16;
 }
 
-Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const {
+Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction) const {
     // Each cycle evaluates (A - B) * C + D. Two-cycle mode feeds cycle 0 into COMBINED.
     // Key center and scale per channel (R, G, B) and the 4.8 key widths.
     const std::array<int, 3> key_center{static_cast<int>((key_r_ >> 8) & 255), static_cast<int>((key_gb_ >> 24) & 255),
@@ -587,7 +627,6 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
     // Set Convert's K4 and K5 are 9-bit values; the YUV converter's K0-K3 are not modeled.
     const int k4 = static_cast<int>((convert_ >> 9) & 0x1FF), k5 = static_cast<int>(convert_ & 0x1FF);
     const int prim_lod_fraction = static_cast<int>(prim_lod_ & 0xFF);
-    const int lod_fraction = 0;  // TODO: needs texture LOD (mipmapping), which is not sampled yet.
     const auto unpack = [](std::uint32_t rgba) {
         return Rgba{rgba >> 24, (rgba >> 16) & 255, (rgba >> 8) & 255, rgba & 255};
     };

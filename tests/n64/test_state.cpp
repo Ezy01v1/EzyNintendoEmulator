@@ -821,6 +821,58 @@ TEST_CASE("RDP combiner noise input is a 9-bit value with random top bits") {
     }
 }
 
+TEST_CASE("RDP mipmapped triangle picks tiles by LOD and lerps them by LOD_FRACTION") {
+    struct Case {
+        int step;              // texels per pixel along S, in 10.5
+        std::uint32_t expected;
+    };
+    // 1.5 texels: level 0 with fraction 0x80 halfway to level 1 (white to red).
+    // 3 texels: past the last level, so both texels come from level 1 (red).
+    for (const auto [step, expected] : {Case{48, 0xFF8080E0U}, Case{96, 0xFF0000E0U}}) {
+        CAPTURE(step);
+        const auto n64 = N64::create(counting_rom("RDP MIPMAP"));
+        REQUIRE(n64);
+        auto& bus = n64->bus();
+        constexpr int pixel = 65536;
+        constexpr std::uint32_t white = 0x2000, red = 0x2100;
+        for (std::uint32_t at = 0; at < 32; at += 8) {
+            bus.write64(white + at, ~0ULL);
+            bus.write64(red + at, 0xF801F801F801F801ULL);
+        }
+        constexpr std::uint64_t modes = (0x2FULL << 56) | (1ULL << 52) | (1ULL << 48) | (6ULL << 41) |
+                                        (3ULL << 38) | (1U << 9);  // two cycles, LOD, zap
+        const std::vector<std::uint64_t> commands{
+            0x3F18000300004000ULL,
+            rdp_rectangle(0x2D, 0, 0, 4, 4),
+            modes,
+            // Cycle 0: (TEXEL1 - TEXEL0) * LOD_FRACTION + TEXEL0; cycle 1 passes COMBINED.
+            set_combine({2, 1, 13, 1, 7, 7, 7, 6}, {15, 15, 31, 0, 7, 7, 7, 0}),
+            0x3D10000300000000ULL | white,
+            rdp_tile(0, 2, 0, 1, 0),
+            rdp_rectangle(0x34, 0, 0, 3, 3),
+            0x3D10000300000000ULL | red,
+            rdp_tile(0, 2, 1, 1, 4),
+            rdp_rectangle(0x34, 0, 0, 3, 3) | (1ULL << 24),
+            rdp_triangle_header(true, 0, 0, 4) | (0x02ULL << 56) | (1ULL << 51),  // 0x0A, max level 1
+            rdp_edge(4 * pixel, 0),
+            rdp_edge(0, 0),
+            rdp_edge(0, 0),
+            0, std::uint64_t(step) << 48, 0, 0, 0, 0, 0, 0,  // S = T = 0, DsDx = step
+            kSyncFull,
+        };
+        std::uint32_t end = 0x1000;
+        for (const auto command : commands) bus.write64(end, command), end += 8;
+        bus.write32(kDpcStart, 0x1000);
+        bus.write32(kDpcEnd, end);
+        for (unsigned i = 0; i < 60; ++i) n64->step();
+        CHECK(bus.read32(kDpcCurrent) == end);
+        for (unsigned x = 0; x < 4; ++x) {
+            CAPTURE(x);
+            CHECK(bus.read32(0x4000 + 4 * x) == expected);
+        }
+    }
+}
+
 TEST_CASE("RDP combiner multiplies a texel by its own alpha") {
     const auto n64 = N64::create(counting_rom("RDP COMBINER TEXEL ALPHA"));
     REQUIRE(n64);

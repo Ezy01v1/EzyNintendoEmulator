@@ -77,7 +77,13 @@ private:
     using Rgba = std::array<unsigned, 4>;
     [[nodiscard]] unsigned texels_read() const;
     unsigned next_noise() const;
-    [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const;
+    struct LodLevel {
+        unsigned tile;  // offset from the primitive's tile
+        bool distant;   // at or past the last level: both texels use it
+        int fraction;   // LOD_FRACTION combiner input
+    };
+    [[nodiscard]] LodLevel select_lod(int step, unsigned max_level) const;
+    [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction = 0) const;
     void write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const;
     bool write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
                             std::span<std::uint8_t> rdram) const;
@@ -93,7 +99,7 @@ private:
         void serialize(Ar& ar) { ar(descriptor), ar(bounds); }
     };
 
-    [[nodiscard]] bool can_sample_texture(const Tile& tile) const;
+    [[nodiscard]] bool can_sample_texture(const Tile& tile, bool allow_lod = false) const;
     [[nodiscard]] Rgba sample_texel(const Tile& tile, int s, int t) const;
     [[nodiscard]] std::uint16_t read_texel(const Tile& tile, unsigned s, unsigned t, unsigned bank) const;
     [[nodiscard]] Rgba sample_texture_rgba(const Tile& tile, int s, int t) const;
