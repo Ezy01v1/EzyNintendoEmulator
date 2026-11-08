@@ -150,3 +150,6 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-08 — PR #8 (alpha compare) mergeado. N64 subproyecto 3: modos Z transparente, interpenetrante y decal (sin DZ);
   Z solo se escribe si el blender escribe el pixel. Pruebas unitarias en verde, n64-systemtest 2984/3721.
   Pendiente: rangos DZ, ajuste de cobertura del modo interpenetrante, chroma key, ruido.
+- 2026-11-08 — N64 subproyecto 3: rangos DZ (DZ del pixel por pendientes o prim depth, código de 4 bits, ensanche por
+  precisión, overflow de cobertura). Pruebas unitarias en verde, n64-systemtest 2984/3721.
+  Pendiente: bits DZ ocultos (se toman como 0), ajuste de cobertura del modo interpenetrante, chroma key, ruido.
