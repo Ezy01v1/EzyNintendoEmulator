@@ -281,6 +281,8 @@ void Rdp::execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
             break;
         case 0x2D: scissor_ = word; break;  // Set Scissor
         case 0x2E: prim_depth_ = static_cast<std::uint32_t>(word); break;  // Set Prim Depth
+        case 0x2A: key_gb_ = word & 0xFFFFFFFFFFFFFFULL; break;  // Set Key GB
+        case 0x2B: key_r_ = static_cast<std::uint32_t>(word) & 0xFFFFFFF; break;  // Set Key R
         case 0x3E: mask_address_ = static_cast<std::uint32_t>(word) & 0x3FFFFFF; break;  // Set Mask Image
         case 0x2F:  // Set Other Modes
             cycle_type_ = static_cast<std::uint32_t>(word >> 52) & 3;
@@ -295,7 +297,11 @@ void Rdp::execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
         case 0x37: fill_color_ = static_cast<std::uint32_t>(word); break;
         case 0x38: solid_.fog = static_cast<std::uint32_t>(word); break;
         case 0x39: solid_.blend = static_cast<std::uint32_t>(word); break;
-        case 0x3A: solid_.primitive = static_cast<std::uint32_t>(word); break;
+        case 0x3A:  // Set Primitive Color
+            solid_.primitive = static_cast<std::uint32_t>(word);
+            prim_lod_ = static_cast<std::uint32_t>(word >> 32) & 0x1FFF;
+            break;
+        case 0x2C: convert_ = word & 0x3FFFFFFFFFFFFFULL; break;  // Set Convert
         case 0x3B: solid_.environment = static_cast<std::uint32_t>(word); break;
         case 0x3C: solid_.combine = word; break;
         case 0x3D: texture_.image = word; break;  // Set Texture Image
@@ -331,14 +337,22 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     const bool textured = (op & 2) != 0, shaded = (op & 4) != 0;
     // Primitive depth also lets triangles without Z coefficients use the depth buffer.
     const bool depth = (op & 1) != 0 || (solid_.modes & (1U << 2));
-    const auto& tile = texture_.tiles[(header >> 48) & 7];
+    const unsigned base_tile = static_cast<unsigned>(header >> 48) & 7;
     const bool fill = !textured && can_fill();
     if (!fill && !can_write_opaque(depth)) return;
     // Without texture coefficients, S and T stay at zero. TEXEL1 comes from the next tile.
     const unsigned texels = fill ? 0 : texels_read();
     const bool sample = texels != 0;
-    const auto& next_tile = texture_.tiles[(((header >> 48) & 7) + 1) & 7];
-    if (((texels & 1) && !can_sample_texture(tile)) || ((texels & 2) && !can_sample_texture(next_tile))) return;
+    // With LOD, the tile is picked per pixel from base_tile up to base_tile + max level.
+    const bool lod = sample && (solid_.modes & (1ULL << 48));
+    const unsigned max_level = static_cast<unsigned>(header >> 51) & 7;
+    // The second texel only moves past the first below the last level, so max level is the highest tile.
+    // Detail textures shift the chain up one tile.
+    const unsigned last_tile = max_level + ((solid_.modes & (1ULL << 50)) ? 1 : 0);
+    for (unsigned level = 0; level <= (lod ? last_tile : 1); ++level) {
+        const bool used = lod || (level == 0 ? (texels & 1) : (texels & 2));
+        if (used && !can_sample_texture(texture_.tiles[(base_tile + level) & 7], true)) return;
+    }
     // Coefficient blocks follow the edges in shade, texture, depth order.
     const unsigned texture_at = shaded ? 12 : 4, depth_at = texture_at + (textured ? 8 : 0);
 
@@ -457,19 +471,46 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
             if (coverage != 0) {
                 const int dx = x - texture_x;
                 Rgba texel0{}, texel1{}, shade_color{};  // Triangles without shade coefficients have zero shade.
+                int lod_fraction = 0;
+                Rgba next_texel0{};
                 if (sample) {
-                    const int sample_s = s.sample(start_s, dx), sample_t = t.sample(start_t, dx);
-                    const auto [u, v] = perspective ? project_texture_coordinates(sample_s, sample_t, w.sample(start_w, dx))
-                                                    : std::array{sample_s, sample_t};
-                    if (texels & 1) texel0 = sample_texel(tile, u, v);
-                    if (texels & 2) texel1 = sample_texel(next_tile, u, v);
+                    const auto coordinates = [&](std::int64_t s_start, std::int64_t t_start, std::int64_t w_start, int at) {
+                        const int sample_s = s.sample(s_start, at), sample_t = t.sample(t_start, at);
+                        return perspective ? project_texture_coordinates(sample_s, sample_t, w.sample(w_start, at))
+                                           : std::array{sample_s, sample_t};
+                    };
+                    // Samples one pixel's texels; returns its LOD fraction.
+                    const auto sample_pixel = [&](int at, Rgba& out0, Rgba* out1) {
+                        const auto [u, v] = coordinates(start_s, start_t, start_w, at);
+                        unsigned first = base_tile, second = base_tile + 1;
+                        int fraction = 0;
+                        if (lod) {
+                            // LOD is the largest texel step to the next pixel and the next line (10.5).
+                            const auto right = coordinates(start_s, start_t, start_w, at + 1);
+                            const auto down = coordinates(start_s + s.dy, start_t + t.dy, start_w + w.dy, at);
+                            const int step = std::max({std::abs(right[0] - u), std::abs(right[1] - v),
+                                                       std::abs(down[0] - u), std::abs(down[1] - v)});
+                            const auto level = select_lod(step, max_level);
+                            first = base_tile + level.first;
+                            second = base_tile + level.second;
+                            fraction = level.fraction;
+                        }
+                        if (texels & 1) out0 = sample_texel(texture_.tiles[first & 7], u, v);
+                        if (out1 && (texels & 2)) *out1 = sample_texel(texture_.tiles[second & 7], u, v);
+                        return fraction;
+                    };
+                    lod_fraction = sample_pixel(dx, texel0, &texel1);
+                    // Two-cycle mode pipelines texels: cycle 1's TEXEL1 is the next pixel's TEXEL0.
+                    if (cycle_type_ == 1) sample_pixel(dx + 1, next_texel0, nullptr);
                 }
                 if (shaded) {
                     for (unsigned i = 0; i < shade.size(); ++i) shade_color[i] = clamp_shade(start_shade[i], shade[i], dx);
                 }
                 // Z is only updated for pixels the blender actually writes (alpha compare can drop them).
                 if (write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y),
-                                       combine(texel0, texel1, shade_color), shade_color, coverage, rdram) &&
+                                       combine(texel0, texel1, shade_color, lod_fraction, &next_texel0),
+                                       shade_color, coverage,
+                                       rdram) &&
                     use_depth) {
                     write_depth(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, pixel_dz, rdram);
                 }
@@ -498,13 +539,11 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
 }
 
 bool Rdp::can_write_opaque(bool depth) const {
-    constexpr std::uint64_t unsupported = 1ULL << 40;  // chroma key
     // Depth is only modeled for primitives that carry one.
     const bool depth_modes = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
     if (depth_modes && !depth) return false;
-    if ((solid_.modes & 3) == 3) return false;  // Alpha compare against a random threshold.
     return cycle_type_ <= 1 && color_width_ != 0 && solid_.format == 0 && (pixel_size_ == 2 || pixel_size_ == 3) &&
-           !(solid_.modes & unsupported) && ((solid_.modes >> 38) & 3) != 2;
+           ((solid_.modes >> 38) & 3) != 2;
 }
 
 namespace {
@@ -558,9 +597,61 @@ unsigned Rdp::texels_read() const {
     return used;
 }
 
-Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const {
+Rdp::LodLevel Rdp::select_lod(int step, unsigned max_level) const {
+    // step is in 10.5 texels per pixel. Each mip level halves the texture, so the level is
+    // log2 of the whole-texel step and the fraction is the position between two levels.
+    unsigned lod = static_cast<unsigned>(step);
+    if (lod & 0x4000) lod = 0x7FFF;
+    lod = std::max(lod, (prim_lod_ >> 8) & 31);  // minimum level from Set Primitive Color
+    const bool magnify = lod < 32;
+    unsigned level = 0;
+    while (level < 7 && (lod >> 5) >> (level + 1)) ++level;
+    const bool distant = (lod & 0x6000) || level >= max_level;
+    if (distant) level = max_level;
+    int fraction = static_cast<int>(((lod << 3) >> level) & 0xFF);
+    const bool sharpen = (solid_.modes & (1ULL << 49)) != 0, detail = (solid_.modes & (1ULL << 50)) != 0;
+    // Without sharpen or detail textures, magnification and the last level clamp the fraction.
+    if (!sharpen && !detail) {
+        if (distant) fraction = 0xFF;
+        else if (magnify) fraction = 0;
+    }
+    // Sharpen sets the 9-bit sign while magnifying, so the combiner extrapolates past level 0.
+    if (sharpen && magnify) fraction -= 0x100;
+    if (!detail) {
+        const bool same = distant || (!sharpen && magnify);
+        return {level, same ? level : level + 1, fraction};
+    }
+    // Detail textures sit in the primitive tile; the mip chain starts one tile later.
+    const unsigned first = magnify ? 0 : level + 1;
+    return {first, (!distant && !magnify) ? level + 2 : level + 1, fraction};
+}
+
+unsigned Rdp::next_noise() const {
+    // A deterministic generator stands in for the hardware's free-running noise.
+    noise_state_ = noise_state_ * 1103515245U + 12345U;
+    return noise_state_ >> 16;
+}
+
+Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction,
+                       const Rgba* next_texel0) const {
     // Each cycle evaluates (A - B) * C + D. Two-cycle mode feeds cycle 0 into COMBINED.
-    // TODO: noise, chroma key center/scale, convert K4/K5 and LOD fractions read as zero.
+    // Key center and scale per channel (R, G, B) and the 4.8 key widths.
+    const std::array<int, 3> key_center{static_cast<int>((key_r_ >> 8) & 255), static_cast<int>((key_gb_ >> 24) & 255),
+                                        static_cast<int>((key_gb_ >> 8) & 255)};
+    const std::array<int, 3> key_scale{static_cast<int>(key_r_ & 255), static_cast<int>((key_gb_ >> 16) & 255),
+                                       static_cast<int>(key_gb_ & 255)};
+    const std::array<int, 3> key_width{static_cast<int>((key_r_ >> 16) & 0xFFF),
+                                       static_cast<int>((key_gb_ >> 44) & 0xFFF),
+                                       static_cast<int>((key_gb_ >> 32) & 0xFFF)};
+    // Noise is a 9-bit signed value with only its top three bits random.
+    const int noise = [&] {
+        const unsigned value = ((next_noise() & 7) << 6) | 0x20;
+        return value & 0x100 ? static_cast<int>(value) - 0x200 : static_cast<int>(value);
+    }();
+    std::array<int, 3> raw{};  // the final cycle's unclamped RGB, for the chroma key
+    // Set Convert's K4 and K5 are 9-bit values; the YUV converter's K0-K3 are not modeled.
+    const int k4 = static_cast<int>((convert_ >> 9) & 0x1FF), k5 = static_cast<int>(convert_ & 0x1FF);
+    const int prim_lod_fraction = static_cast<int>(prim_lod_ & 0xFF);
     const auto unpack = [](std::uint32_t rgba) {
         return Rgba{rgba >> 24, (rgba >> 16) & 255, (rgba >> 8) & 255, rgba & 255};
     };
@@ -568,7 +659,8 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
     const auto field = [this](unsigned shift, unsigned mask) {
         return static_cast<unsigned>(solid_.combine >> shift) & mask;
     };
-    const auto equation = [](int a, int b, int c, int d) { return clamp_combined(((a - b) * c + (d << 8) + 0x80) >> 8); };
+    const auto unclamped = [](int a, int b, int c, int d) { return ((a - b) * c + (d << 8) + 0x80) >> 8; };
+    const auto equation = [&](int a, int b, int c, int d) { return clamp_combined(unclamped(a, b, c, d)); };
 
     const auto cycle = [&](const CombinerFields& f, const Rgba& combined, const Rgba& t0, const Rgba& t1) {
         const auto input = [&](unsigned source, unsigned channel) -> int {
@@ -587,23 +679,48 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
         const unsigned sub_a = field(f.a, 15), sub_b = field(f.b, 15), multiplier = field(f.c, 31), add = field(f.d, 7);
         for (unsigned i = 0; i < 3; ++i) {
             // Inputs 6 and up differ per slot: A has ONE then NOISE, B has KEY CENTER then K4.
-            const int a = sub_a < 6 ? input(sub_a, i) : (sub_a == 6 ? 255 : 0);
-            const int b = sub_b < 6 ? input(sub_b, i) : 0;
+            const int a = sub_a < 6 ? input(sub_a, i) : (sub_a == 6 ? 255 : sub_a == 7 ? noise : 0);
+            const int b = sub_b < 6 ? input(sub_b, i) : (sub_b == 6 ? key_center[i] : sub_b == 7 ? k4 : 0);
             int c = 0;
             if (multiplier < 6) c = input(multiplier, i);
+            else if (multiplier == 6) c = key_scale[i];
             else if (multiplier >= 7 && multiplier <= 12) c = input(multiplier - 7, 3);  // alpha inputs
-            out[i] = equation(a, b, c, input(add, i));
+            else if (multiplier == 13) c = lod_fraction;
+            else if (multiplier == 14) c = prim_lod_fraction;
+            else if (multiplier == 15) c = k5;
+            raw[i] = unclamped(a, b, c, input(add, i));
+            out[i] = clamp_combined(raw[i]);
         }
+        // Alpha multiplier inputs 0 and 6 are the LOD fraction and the primitive LOD fraction.
         const unsigned alpha_multiplier = field(f.alpha_c, 7);
-        const int c = (alpha_multiplier == 0 || alpha_multiplier == 6) ? 0 : input(alpha_multiplier, 3);  // LOD fractions
+        const int c = alpha_multiplier == 0 ? lod_fraction
+                    : alpha_multiplier == 6 ? prim_lod_fraction
+                                            : input(alpha_multiplier, 3);
         out[3] = equation(input(field(f.alpha_a, 7), 3), input(field(f.alpha_b, 7), 3), c, input(field(f.alpha_d, 7), 3));
         return out;
     };
 
-    if (cycle_type_ != 1) return cycle(kCycle1, Rgba{}, texel0, texel1);  // COMBINED has no earlier cycle.
-    const Rgba first = cycle(kCycle0, Rgba{}, texel0, texel1);
-    // TODO: cycle 1's TEXEL1 is the next pixel's TEXEL0; this pixel's TEXEL0 stands in for it.
-    return cycle(kCycle1, first, texel1, texel0);
+    Rgba result{};
+    if (cycle_type_ != 1) {
+        result = cycle(kCycle1, Rgba{}, texel0, texel1);  // COMBINED has no earlier cycle.
+    } else {
+        const Rgba first = cycle(kCycle0, Rgba{}, texel0, texel1);
+        // Cycle 1 sees this pixel's TEXEL1 as TEXEL0 and the next pixel's TEXEL0 as TEXEL1.
+        // Callers without a next pixel fall back to this pixel's TEXEL0.
+        result = cycle(kCycle1, first, texel1, next_texel0 ? *next_texel0 : texel0);
+    }
+    if (solid_.modes & (1ULL << 40)) {
+        // Chroma key: each channel's distance from the key center (already scaled by the
+        // equation) is subtracted from its width; the smallest margin becomes the alpha.
+        int key_alpha = 255;
+        for (unsigned i = 0; i < 3; ++i) {
+            int key = (raw[i] << 15) >> 15;  // 17-bit signed
+            if (key > 0) key = (key & 15) == 8 ? 16 - key : -key;
+            key_alpha = std::min(key_alpha, (key_width[i] << 4) + key);
+        }
+        result[3] = static_cast<unsigned>(std::clamp(key_alpha, 0, 255));
+    }
+    return result;
 }
 unsigned Rdp::memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const {
     // Without image reads, memory coverage reads as full (7). RGBA5551 keeps only the top
@@ -672,7 +789,11 @@ bool Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         alpha = (solid_.modes & (1U << 12)) ? std::min(255U, scaled >> 5) : std::min(255U, coverage << 5);
     }
     // Alpha compare drops pixels whose alpha is below the blend color alpha.
-    if ((solid_.modes & 1) && alpha < (solid_.blend & 255)) return false;
+    // With dither alpha the threshold is random instead of the blend color alpha.
+    if (solid_.modes & 1) {
+        const unsigned threshold = (solid_.modes & 2) ? next_noise() & 255 : solid_.blend & 255;
+        if (alpha < threshold) return false;
+    }
     if (coverage == 0) return false;
 
     // Memory color and coverage. Without image reads, memory coverage reads as full (7).

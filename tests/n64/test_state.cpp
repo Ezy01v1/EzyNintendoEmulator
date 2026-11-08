@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <initializer_list>
@@ -647,7 +648,8 @@ constexpr std::uint64_t set_combine(CombinerCycle first, CombinerCycle second) {
 }
 
 // Draws a shaded one-row triangle (x = 0..3) with constant shade into an RGBA8888 framebuffer.
-void draw_two_cycle_row(N64& n64, std::uint64_t modes, std::uint64_t combine, std::uint64_t shade_rgba) {
+void draw_two_cycle_row(N64& n64, std::uint64_t modes, std::uint64_t combine, std::uint64_t shade_rgba,
+                        std::uint64_t primitive = 0x3A000000C86432FFULL) {
     auto& bus = n64.bus();
     constexpr int pixel = 65536;
     const std::vector<std::uint64_t> commands{
@@ -655,7 +657,7 @@ void draw_two_cycle_row(N64& n64, std::uint64_t modes, std::uint64_t combine, st
         rdp_rectangle(0x2D, 0, 0, 4, 4),
         modes,
         combine,
-        0x3A000000C86432FFULL,   // primitive (200, 100, 50)
+        primitive,               // default (200, 100, 50)
         0x3B00000080808080ULL,   // environment 128
         0x3800000000FF0000ULL,   // fog: green
         rdp_triangle_header(true, 0, 0, 4) | (0x04ULL << 56),
@@ -746,6 +748,226 @@ TEST_CASE("RDP coverage times alpha scales coverage and feeds it to alpha compar
     draw_two_cycle_row(*n64, modes, kPrimShadeAlpha, 0x0000000000000080ULL);
     // Alpha 32 is now below 33, so memory keeps the previous pixels.
     for (unsigned x = 0; x < 4; ++x) CHECK(n64->bus().read32(0x4000 + 4 * x) == 0xC8643260U);
+}
+
+TEST_CASE("RDP chroma key turns the distance from the key center into alpha") {
+    const auto n64 = N64::create(counting_rom("RDP CHROMA KEY"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    const auto run = [&](std::initializer_list<std::uint64_t> words) {
+        std::uint32_t end = 0x2000;
+        for (const auto word : words) bus.write64(end, word), end += 8;
+        bus.write64(end, kSyncFull), end += 8;
+        bus.write32(kDpcStart, 0x2000);
+        bus.write32(kDpcEnd, end);
+        for (unsigned i = 0; i < 10; ++i) n64->step();
+    };
+    // RGB = (PRIM - KEY_CENTER) * KEY_SCALE; the primitive is (200, 100, 50).
+    const auto combine = set_combine({3, 6, 6, 7, 7, 7, 7, 6}, {3, 6, 6, 7, 7, 7, 7, 6});
+    constexpr std::uint64_t modes = kOneCycle | (1ULL << 40) | 1U;  // chroma key, alpha compare
+
+    // Key center on the primitive with zero widths: every channel is inside, alpha 0.
+    run({0x2B000000000000C8ULL | (0xC8ULL << 8), 0x2A00000064FF32FFULL, 0x3900000000000001ULL});
+    draw_two_cycle_row(*n64, modes, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0);
+
+    // Red keyed from 0 at full scale: R = 199 against a 1.0 width (256) leaves alpha 57.
+    run({0x2B000000001000FFULL, 0x2A01001064FF32FFULL, 0x3900000000000039ULL});
+    draw_two_cycle_row(*n64, modes, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0xC70000E0U);
+    for (unsigned x = 0; x < 4; ++x) bus.write32(0x4000 + 4 * x, 0);
+    run({0x390000000000003AULL});  // threshold 58 is above alpha 57
+    draw_two_cycle_row(*n64, modes, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0);
+}
+
+TEST_CASE("RDP combiner reads K4, K5 and the primitive LOD fraction") {
+    const auto n64 = N64::create(counting_rom("RDP CONVERT K4 K5"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    bus.write64(0x2000, 0x2C00000000006480ULL);  // Set Convert: K4 = 50, K5 = 128
+    bus.write64(0x2008, kSyncFull);
+    bus.write32(kDpcStart, 0x2000);
+    bus.write32(kDpcEnd, 0x2010);
+    for (unsigned i = 0; i < 10; ++i) n64->step();
+    // RGB = (PRIM - K4) * K5; alpha = PRIM_ALPHA * PRIM_LOD_FRAC.
+    const auto combine = set_combine({3, 7, 15, 7, 3, 7, 6, 7}, {3, 7, 15, 7, 3, 7, 6, 7});
+    // Set Primitive Color with an LOD fraction of 0x40.
+    draw_two_cycle_row(*n64, kOneCycle, combine, 0, 0x3A000040C86432FFULL);
+    const unsigned r = (150 * 128 + 0x80) >> 8, g = (50 * 128 + 0x80) >> 8;
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == ((r << 24) | (g << 16) | 0xE0U));
+    // The blender sees the alpha, so check it through alpha compare: (255 * 0x40 + 0x80) >> 8 = 64.
+    for (unsigned x = 0; x < 4; ++x) bus.write32(0x4000 + 4 * x, 0);
+    bus.write64(0x2000, 0x3900000000000041ULL);  // threshold 65
+    bus.write32(kDpcStart, 0x2000);
+    bus.write32(kDpcEnd, 0x2010);
+    for (unsigned i = 0; i < 10; ++i) n64->step();
+    draw_two_cycle_row(*n64, kOneCycle | 1U, combine, 0, 0x3A000040C86432FFULL);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0);
+}
+
+TEST_CASE("RDP combiner noise input is a 9-bit value with random top bits") {
+    const auto n64 = N64::create(counting_rom("RDP NOISE"));
+    REQUIRE(n64);
+    // RGB = NOISE * PRIM_ALPHA (255), since C = 6 is KEY_SCALE.
+    const auto combine = set_combine({7, 15, 10, 7, 7, 7, 7, 6}, {7, 15, 10, 7, 7, 7, 7, 6});
+    draw_two_cycle_row(*n64, kOneCycle, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        const auto pixel = n64->bus().read32(0x4000 + 4 * x);
+        const unsigned r = pixel >> 24;
+        // Positive noise 0x20, 0x60, 0xA0, 0xE0 times 255/256; negative values clamp to 0.
+        CHECK((r == 0 || r == 32 || r == 96 || r == 159 || r == 223));
+        CHECK(((pixel >> 16) & 255) == r);  // the same noise feeds all three channels
+    }
+}
+
+TEST_CASE("RDP mipmapped triangle picks tiles by LOD and lerps them by LOD_FRACTION") {
+    constexpr std::uint64_t kWhite = ~0ULL, kGray = 0x8421842184218421ULL;  // gray 16/31 expands to 132
+    constexpr std::uint64_t kSharpen = 1ULL << 49, kDetail = 1ULL << 50;
+    struct Case {
+        int step;               // texels per pixel along S, in 10.5
+        std::uint64_t extra;    // sharpen / detail mode bits
+        unsigned max_level;
+        std::uint64_t level0;   // texels of tile 0; tile 1 is red
+        std::uint32_t expected;
+    };
+    const auto lerp = [](int from, int to, int fraction) {
+        return static_cast<std::uint32_t>(std::clamp(((to - from) * fraction + (from << 8) + 0x80) >> 8, 0, 255));
+    };
+    // Gray (132) toward red (255, 0, 0) with a negative fraction moves away from red.
+    const std::uint32_t sharp_r = lerp(132, 255, -128), sharp_gb = lerp(132, 0, -128);
+    const Case cases[] = {
+        // 1.5 texels: level 0 with fraction 0x80 halfway to level 1 (white to red).
+        {48, 0, 1, kWhite, 0xFF8080E0U},
+        // 3 texels: past the last level, so both texels come from level 1 (red).
+        {96, 0, 1, kWhite, 0xFF0000E0U},
+        // 0.5 texels magnifies: plain mipmapping clamps the fraction to 0 and keeps level 0.
+        {16, 0, 1, kGray, 0x848484E0U},
+        // Sharpen makes the magnified fraction negative (0x80 - 0x100), extrapolating away from level 1.
+        {16, kSharpen, 1, kGray, (sharp_r << 24) | (sharp_gb << 16) | (sharp_gb << 8) | 0xE0U},
+        // Detail while magnifying blends the detail tile (0) with level 0 (tile 1) by the raw fraction.
+        {16, kDetail, 0, kWhite, 0xFF8080E0U},
+    };
+    for (const auto& [step, extra, max_level, level0, expected] : cases) {
+        CAPTURE(step);
+        CAPTURE(extra);
+        const auto n64 = N64::create(counting_rom("RDP MIPMAP"));
+        REQUIRE(n64);
+        auto& bus = n64->bus();
+        constexpr int pixel = 65536;
+        constexpr std::uint32_t white = 0x2000, red = 0x2100;
+        for (std::uint32_t at = 0; at < 32; at += 8) {
+            bus.write64(white + at, level0);
+            bus.write64(red + at, 0xF801F801F801F801ULL);
+        }
+        const std::uint64_t modes = (0x2FULL << 56) | (1ULL << 52) | (1ULL << 48) | (6ULL << 41) |
+                                    (3ULL << 38) | (1U << 9) | extra;  // two cycles, LOD, zap
+        const std::vector<std::uint64_t> commands{
+            0x3F18000300004000ULL,
+            rdp_rectangle(0x2D, 0, 0, 4, 4),
+            modes,
+            // Cycle 0: (TEXEL1 - TEXEL0) * LOD_FRACTION + TEXEL0; cycle 1 passes COMBINED.
+            set_combine({2, 1, 13, 1, 7, 7, 7, 6}, {15, 15, 31, 0, 7, 7, 7, 0}),
+            0x3D10000300000000ULL | white,
+            rdp_tile(0, 2, 0, 1, 0),
+            rdp_rectangle(0x34, 0, 0, 3, 3),
+            0x3D10000300000000ULL | red,
+            rdp_tile(0, 2, 1, 1, 4),
+            rdp_rectangle(0x34, 0, 0, 3, 3) | (1ULL << 24),
+            rdp_triangle_header(true, 0, 0, 4) | (0x02ULL << 56) | (std::uint64_t{max_level} << 51),  // 0x0A
+            rdp_edge(4 * pixel, 0),
+            rdp_edge(0, 0),
+            rdp_edge(0, 0),
+            0, std::uint64_t(step) << 48, 0, 0, 0, 0, 0, 0,  // S = T = 0, DsDx = step
+            kSyncFull,
+        };
+        std::uint32_t end = 0x1000;
+        for (const auto command : commands) bus.write64(end, command), end += 8;
+        bus.write32(kDpcStart, 0x1000);
+        bus.write32(kDpcEnd, end);
+        for (unsigned i = 0; i < 60; ++i) n64->step();
+        CHECK(bus.read32(kDpcCurrent) == end);
+        for (unsigned x = 0; x < 4; ++x) {
+            CAPTURE(x);
+            CHECK(bus.read32(0x4000 + 4 * x) == expected);
+        }
+    }
+}
+
+TEST_CASE("RDP textured rectangle with LOD uses level 0 and detail blending") {
+    // Rectangles have no max level, so plain LOD is always at the last level (fraction 0xFF,
+    // both texels from tile 0). Detail while magnifying blends tile 0 with tile 1 by the raw fraction.
+    for (const auto [extra, expected] : {std::pair{0ULL, 0xFFFFFFE0U}, std::pair{1ULL << 50, 0xFF8080E0U}}) {
+        CAPTURE(extra);
+        const auto n64 = N64::create(counting_rom("RDP RECT LOD"));
+        REQUIRE(n64);
+        auto& bus = n64->bus();
+        constexpr std::uint32_t white = 0x2000, red = 0x2100;
+        for (std::uint32_t at = 0; at < 32; at += 8) {
+            bus.write64(white + at, ~0ULL);
+            bus.write64(red + at, 0xF801F801F801F801ULL);
+        }
+        const std::uint64_t modes = (0x2FULL << 56) | (1ULL << 52) | (1ULL << 48) | (6ULL << 41) |
+                                    (3ULL << 38) | (1U << 9) | extra;
+        const std::vector<std::uint64_t> commands{
+            0x3F18000300004000ULL,
+            rdp_rectangle(0x2D, 0, 0, 4, 4),
+            modes,
+            set_combine({2, 1, 13, 1, 7, 7, 7, 6}, {15, 15, 31, 0, 7, 7, 7, 0}),
+            0x3D10000300000000ULL | white,
+            rdp_tile(0, 2, 0, 1, 0),
+            rdp_rectangle(0x34, 0, 0, 3, 3),
+            0x3D10000300000000ULL | red,
+            rdp_tile(0, 2, 1, 1, 4),
+            rdp_rectangle(0x34, 0, 0, 3, 3) | (1ULL << 24),
+            rdp_rectangle(0x24, 4, 1, 0, 0),
+            rdp_texture_coords(0, 0, 512, 512),  // half a texel per pixel: magnified, fraction 0x80
+            kSyncFull,
+        };
+        std::uint32_t end = 0x1000;
+        for (const auto command : commands) bus.write64(end, command), end += 8;
+        bus.write32(kDpcStart, 0x1000);
+        bus.write32(kDpcEnd, end);
+        for (unsigned i = 0; i < 60; ++i) n64->step();
+        CHECK(bus.read32(kDpcCurrent) == end);
+        for (unsigned x = 0; x < 4; ++x) {
+            CAPTURE(x);
+            CHECK(bus.read32(0x4000 + 4 * x) == expected);
+        }
+    }
+}
+
+TEST_CASE("RDP two-cycle TEXEL1 in cycle 1 is the next pixel's TEXEL0") {
+    const auto n64 = N64::create(counting_rom("RDP NEXT TEXEL"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr std::uint32_t source = 0x2000;
+    bus.write64(source, 0xF80107C1003FFFFFULL);  // RGBA16 row: red, green, blue, white
+    const std::uint64_t modes = (0x2FULL << 56) | (1ULL << 52) | (6ULL << 41) | (3ULL << 38) | (1U << 9);
+    const std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        modes,
+        // Cycle 0 reads TEXEL0; cycle 1 outputs its TEXEL1.
+        set_combine({15, 15, 31, 1, 7, 7, 7, 6}, {15, 15, 31, 2, 7, 7, 7, 0}),
+        0x3D10000300000000ULL | source,
+        rdp_tile(0, 2, 0, 1, 0),
+        rdp_rectangle(0x34, 0, 0, 3, 0),
+        rdp_rectangle(0x24, 4, 1, 0, 0),
+        rdp_texture_coords(0, 0, 1024, 1024),  // one texel per pixel
+        kSyncFull,
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 40; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    // Pixel x shows texel x + 1.
+    CHECK(bus.read32(0x4000) == 0x00FF00E0U);
+    CHECK(bus.read32(0x4004) == 0x0000FFE0U);
+    CHECK(bus.read32(0x4008) == 0xFFFFFFE0U);
 }
 
 TEST_CASE("RDP combiner multiplies a texel by its own alpha") {

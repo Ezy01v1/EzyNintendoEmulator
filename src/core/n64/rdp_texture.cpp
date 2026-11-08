@@ -210,10 +210,12 @@ Rdp::Rgba Rdp::sample_texture_rgba(const Tile& tile, int s, int t) const {
     return result;
 }
 
-bool Rdp::can_sample_texture(const Tile& tile) const {
+bool Rdp::can_sample_texture(const Tile& tile, bool allow_lod) const {
     constexpr std::uint64_t texture_lod = 1ULL << 48;
     constexpr std::uint64_t texture_filter_path = 1ULL << 43;  // TEXEL0 uses sampling instead of color conversion.
-    if ((solid_.modes & texture_lod) || !(solid_.modes & texture_filter_path) ||
+    // Callers that pick tiles by LOD pass allow_lod.
+    const bool lod = (solid_.modes & texture_lod) != 0;
+    if ((lod && !allow_lod) || !(solid_.modes & texture_filter_path) ||
         ((solid_.modes >> 44) & 3) == 1) return false;  // Mid-texel flag without quad sampling.
     return supported_texture(tile.descriptor, (solid_.modes & (1ULL << 47)) != 0);
 }
@@ -229,11 +231,19 @@ Rdp::Rgba Rdp::sample_texel(const Tile& tile, int s, int t) const {
 void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
     if (solid_.modes & kTexturePerspective) return;  // Rectangles do not supply W.
     const auto header = draw_command_[0], coefficients = draw_command_[1];
-    const auto& tile = texture_.tiles[(header >> 24) & 7];
+    const unsigned base_tile = static_cast<unsigned>(header >> 24) & 7;
     const unsigned texels = texels_read();
-    const auto& next_tile = texture_.tiles[(((header >> 24) & 7) + 1) & 7];
-    if (!can_write_opaque() || ((texels & 1) && !can_sample_texture(tile)) ||
-        ((texels & 2) && !can_sample_texture(next_tile))) return;
+    const int ds_coefficient = static_cast<std::int16_t>(coefficients >> 16);
+    const int dt_coefficient = static_cast<std::int16_t>(coefficients);
+    // Rectangles carry no max level, so LOD always lands on the last (only) level: max level 0.
+    // Their texel step is constant: DsDx and DtDy (s5.10) converted to 10.5.
+    const bool lod = texels != 0 && (solid_.modes & (1ULL << 48));
+    LodLevel level{0, 1, 0};
+    if (lod) level = select_lod(std::max(std::abs(ds_coefficient), std::abs(dt_coefficient)) >> 5, 0);
+    const auto& tile = texture_.tiles[(base_tile + level.first) & 7];
+    const auto& next_tile = texture_.tiles[(base_tile + level.second) & 7];
+    if (!can_write_opaque() || ((texels & 1) && !can_sample_texture(tile, true)) ||
+        ((texels & 2) && !can_sample_texture(next_tile, true))) return;
 
     const unsigned x0 = field12(header, 12), y0 = field12(header, 0);
     const unsigned left = std::max(x0, field12(scissor_, 44));
@@ -267,7 +277,13 @@ void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
             // Rectangles carry no shade coefficients, so shade inputs read as zero.
             const Rgba texel0 = (texels & 1) ? sample_texel(tile, s, t) : Rgba{};
             const Rgba texel1 = (texels & 2) ? sample_texel(next_tile, s, t) : Rgba{};
-            write_opaque_pixel(x, y, combine(texel0, texel1, Rgba{}), Rgba{}, coverage, rdram);
+            // Two-cycle mode's cycle 1 TEXEL1 is the next pixel's TEXEL0.
+            Rgba next_texel0{};
+            if (cycle_type_ == 1 && (texels & 1)) {
+                next_texel0 = sample_texel(tile, s0 + (((dx_quarters + 4) * ds) >> 7), t);
+            }
+            write_opaque_pixel(x, y, combine(texel0, texel1, Rgba{}, level.fraction, &next_texel0), Rgba{}, coverage,
+                               rdram);
         }
     }
 }
