@@ -536,6 +536,12 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
         // The fill register is repeated as a packed big-endian word on the memory bus.
         rdram[addr] = static_cast<std::uint8_t>(fill_color_ >> ((3 - (addr & 3)) * 8));
     }
+    // Fills clear the hidden bits they cover. Hardware copies each halfword's low bit into them;
+    // only depth reads use them here, and depth clears (0xFFFC) have that bit clear.
+    if (first < end) {
+        hidden_.erase(hidden_.lower_bound(static_cast<std::uint32_t>(first >> 1)),
+                      hidden_.lower_bound(static_cast<std::uint32_t>((end + 1) >> 1)));
+    }
 }
 
 bool Rdp::can_write_opaque(bool depth) const {
@@ -734,21 +740,23 @@ unsigned Rdp::memory_coverage(unsigned x, unsigned y, std::span<const std::uint8
     return rdram[address + 3] >> 5;
 }
 
-bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned coverage,
+bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned& coverage,
                      std::span<std::uint8_t> rdram) const {
     const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
     if (address + 2 > rdram.size()) return false;
     if (!(solid_.modes & (1U << 4))) return true;
-    // TODO: the two hidden DZ bits (taken as zero) and the interpenetrating coverage adjustment.
     const unsigned stored = (unsigned{rdram[address]} << 8) | rdram[address + 1];
     const std::uint32_t memory_z = decompress_depth(stored >> 2);
-    unsigned memory_dz = 1U << ((stored & 3) << 2);
+    // The DZ code's low two bits live in the RDRAM hidden bits of the same halfword.
+    const unsigned memory_dz_code = ((stored & 3) << 2) | hidden_bits(address);
+    unsigned memory_dz = 1U << memory_dz_code;
     // Low Z exponents have more precision than DZ can describe, so memory DZ is widened.
     bool coplanar = false;
     if ((stored >> 13) < 3) {
         if (memory_dz != 0x8000) memory_dz = std::max(memory_dz << 1, 16U >> (stored >> 13));
         else coplanar = true, memory_dz = 0xFFFF;
     }
+    const unsigned range_shift = compress_dz(dz | memory_dz);
     const std::int64_t range = std::int64_t{highest_power_of_two(dz | memory_dz)} << 3;
     const std::int64_t pixel = z, memory = memory_z;
     const bool farther = coplanar || pixel + range >= memory;
@@ -757,10 +765,30 @@ bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsig
     const bool max = memory_z == 0x3FFFF;
     const bool overflow = ((coverage + memory_coverage(x, y, rdram)) & 8) != 0;
     switch ((solid_.modes >> 10) & 3) {
+        case 1:  // interpenetrating
+            // Where a full pixel pierces the stored surface within the DZ range, coverage is
+            // scaled by how far in front it is, so intersecting surfaces antialias their seam.
+            // TODO: the blender shift for the non-piercing case.
+            if (in_front && farther && overflow) {
+                const unsigned depth_coverage = static_cast<unsigned>(((memory >> range_shift) - (pixel >> range_shift)) & 15);
+                coverage = ((depth_coverage * coverage) >> 3) & 15;
+            }
+            return max || (overflow ? in_front : nearer);
         case 2: return in_front || max;                             // transparent
         case 3: return farther && nearer && !max;                   // decal
-        default: return max || (overflow ? in_front : nearer);      // opaque and interpenetrating
+        default: return max || (overflow ? in_front : nearer);      // opaque
     }
+}
+
+unsigned Rdp::hidden_bits(std::size_t address) const {
+    const auto found = hidden_.find(static_cast<std::uint32_t>(address >> 1));
+    return found == hidden_.end() ? 0 : found->second;
+}
+
+void Rdp::set_hidden_bits(std::size_t address, unsigned bits) const {
+    const auto key = static_cast<std::uint32_t>(address >> 1);
+    if (bits & 3) hidden_[key] = static_cast<std::uint8_t>(bits & 3);
+    else hidden_.erase(key);
 }
 
 void Rdp::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const {
@@ -768,9 +796,11 @@ void Rdp::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std:
     const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
     if (address + 2 > rdram.size()) return;
     // Only the top two bits of the 4-bit DZ code fit in RDRAM; the low two are hidden bits.
-    const unsigned packed = (compress_depth(z) << 2) | (compress_dz(dz) >> 2);
+    const unsigned code = compress_dz(dz);
+    const unsigned packed = (compress_depth(z) << 2) | (code >> 2);
     rdram[address] = static_cast<std::uint8_t>(packed >> 8);
     rdram[address + 1] = static_cast<std::uint8_t>(packed);
+    set_hidden_bits(address, code & 3);
 }
 
 bool Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
