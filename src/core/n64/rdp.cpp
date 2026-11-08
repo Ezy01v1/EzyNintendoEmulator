@@ -297,7 +297,11 @@ void Rdp::execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
         case 0x37: fill_color_ = static_cast<std::uint32_t>(word); break;
         case 0x38: solid_.fog = static_cast<std::uint32_t>(word); break;
         case 0x39: solid_.blend = static_cast<std::uint32_t>(word); break;
-        case 0x3A: solid_.primitive = static_cast<std::uint32_t>(word); break;
+        case 0x3A:  // Set Primitive Color
+            solid_.primitive = static_cast<std::uint32_t>(word);
+            prim_lod_ = static_cast<std::uint32_t>(word >> 32) & 0x1FFF;
+            break;
+        case 0x2C: convert_ = word & 0x3FFFFFFFFFFFFFULL; break;  // Set Convert
         case 0x3B: solid_.environment = static_cast<std::uint32_t>(word); break;
         case 0x3C: solid_.combine = word; break;
         case 0x3D: texture_.image = word; break;  // Set Texture Image
@@ -566,7 +570,6 @@ unsigned Rdp::next_noise() const {
 
 Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const {
     // Each cycle evaluates (A - B) * C + D. Two-cycle mode feeds cycle 0 into COMBINED.
-    // TODO: convert K4/K5 and LOD fractions read as zero.
     // Key center and scale per channel (R, G, B) and the 4.8 key widths.
     const std::array<int, 3> key_center{static_cast<int>((key_r_ >> 8) & 255), static_cast<int>((key_gb_ >> 24) & 255),
                                         static_cast<int>((key_gb_ >> 8) & 255)};
@@ -581,6 +584,10 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
         return value & 0x100 ? static_cast<int>(value) - 0x200 : static_cast<int>(value);
     }();
     std::array<int, 3> raw{};  // the final cycle's unclamped RGB, for the chroma key
+    // Set Convert's K4 and K5 are 9-bit values; the YUV converter's K0-K3 are not modeled.
+    const int k4 = static_cast<int>((convert_ >> 9) & 0x1FF), k5 = static_cast<int>(convert_ & 0x1FF);
+    const int prim_lod_fraction = static_cast<int>(prim_lod_ & 0xFF);
+    const int lod_fraction = 0;  // TODO: needs texture LOD (mipmapping), which is not sampled yet.
     const auto unpack = [](std::uint32_t rgba) {
         return Rgba{rgba >> 24, (rgba >> 16) & 255, (rgba >> 8) & 255, rgba & 255};
     };
@@ -609,16 +616,22 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
         for (unsigned i = 0; i < 3; ++i) {
             // Inputs 6 and up differ per slot: A has ONE then NOISE, B has KEY CENTER then K4.
             const int a = sub_a < 6 ? input(sub_a, i) : (sub_a == 6 ? 255 : sub_a == 7 ? noise : 0);
-            const int b = sub_b < 6 ? input(sub_b, i) : (sub_b == 6 ? key_center[i] : 0);
+            const int b = sub_b < 6 ? input(sub_b, i) : (sub_b == 6 ? key_center[i] : sub_b == 7 ? k4 : 0);
             int c = 0;
             if (multiplier < 6) c = input(multiplier, i);
             else if (multiplier == 6) c = key_scale[i];
             else if (multiplier >= 7 && multiplier <= 12) c = input(multiplier - 7, 3);  // alpha inputs
+            else if (multiplier == 13) c = lod_fraction;
+            else if (multiplier == 14) c = prim_lod_fraction;
+            else if (multiplier == 15) c = k5;
             raw[i] = unclamped(a, b, c, input(add, i));
             out[i] = clamp_combined(raw[i]);
         }
+        // Alpha multiplier inputs 0 and 6 are the LOD fraction and the primitive LOD fraction.
         const unsigned alpha_multiplier = field(f.alpha_c, 7);
-        const int c = (alpha_multiplier == 0 || alpha_multiplier == 6) ? 0 : input(alpha_multiplier, 3);  // LOD fractions
+        const int c = alpha_multiplier == 0 ? lod_fraction
+                    : alpha_multiplier == 6 ? prim_lod_fraction
+                                            : input(alpha_multiplier, 3);
         out[3] = equation(input(field(f.alpha_a, 7), 3), input(field(f.alpha_b, 7), 3), c, input(field(f.alpha_d, 7), 3));
         return out;
     };

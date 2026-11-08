@@ -647,7 +647,8 @@ constexpr std::uint64_t set_combine(CombinerCycle first, CombinerCycle second) {
 }
 
 // Draws a shaded one-row triangle (x = 0..3) with constant shade into an RGBA8888 framebuffer.
-void draw_two_cycle_row(N64& n64, std::uint64_t modes, std::uint64_t combine, std::uint64_t shade_rgba) {
+void draw_two_cycle_row(N64& n64, std::uint64_t modes, std::uint64_t combine, std::uint64_t shade_rgba,
+                        std::uint64_t primitive = 0x3A000000C86432FFULL) {
     auto& bus = n64.bus();
     constexpr int pixel = 65536;
     const std::vector<std::uint64_t> commands{
@@ -655,7 +656,7 @@ void draw_two_cycle_row(N64& n64, std::uint64_t modes, std::uint64_t combine, st
         rdp_rectangle(0x2D, 0, 0, 4, 4),
         modes,
         combine,
-        0x3A000000C86432FFULL,   // primitive (200, 100, 50)
+        primitive,               // default (200, 100, 50)
         0x3B00000080808080ULL,   // environment 128
         0x3800000000FF0000ULL,   // fog: green
         rdp_triangle_header(true, 0, 0, 4) | (0x04ULL << 56),
@@ -776,6 +777,31 @@ TEST_CASE("RDP chroma key turns the distance from the key center into alpha") {
     for (unsigned x = 0; x < 4; ++x) bus.write32(0x4000 + 4 * x, 0);
     run({0x390000000000003AULL});  // threshold 58 is above alpha 57
     draw_two_cycle_row(*n64, modes, combine, 0);
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0);
+}
+
+TEST_CASE("RDP combiner reads K4, K5 and the primitive LOD fraction") {
+    const auto n64 = N64::create(counting_rom("RDP CONVERT K4 K5"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    bus.write64(0x2000, 0x2C00000000006480ULL);  // Set Convert: K4 = 50, K5 = 128
+    bus.write64(0x2008, kSyncFull);
+    bus.write32(kDpcStart, 0x2000);
+    bus.write32(kDpcEnd, 0x2010);
+    for (unsigned i = 0; i < 10; ++i) n64->step();
+    // RGB = (PRIM - K4) * K5; alpha = PRIM_ALPHA * PRIM_LOD_FRAC.
+    const auto combine = set_combine({3, 7, 15, 7, 3, 7, 6, 7}, {3, 7, 15, 7, 3, 7, 6, 7});
+    // Set Primitive Color with an LOD fraction of 0x40.
+    draw_two_cycle_row(*n64, kOneCycle, combine, 0, 0x3A000040C86432FFULL);
+    const unsigned r = (150 * 128 + 0x80) >> 8, g = (50 * 128 + 0x80) >> 8;
+    for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == ((r << 24) | (g << 16) | 0xE0U));
+    // The blender sees the alpha, so check it through alpha compare: (255 * 0x40 + 0x80) >> 8 = 64.
+    for (unsigned x = 0; x < 4; ++x) bus.write32(0x4000 + 4 * x, 0);
+    bus.write64(0x2000, 0x3900000000000041ULL);  // threshold 65
+    bus.write32(kDpcStart, 0x2000);
+    bus.write32(kDpcEnd, 0x2010);
+    for (unsigned i = 0; i < 10; ++i) n64->step();
+    draw_two_cycle_row(*n64, kOneCycle | 1U, combine, 0, 0x3A000040C86432FFULL);
     for (unsigned x = 0; x < 4; ++x) CHECK(bus.read32(0x4000 + 4 * x) == 0);
 }
 

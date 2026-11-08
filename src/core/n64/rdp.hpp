@@ -45,8 +45,8 @@ public:
         else texture_ = {};
         if (version >= 9) ar(mask_address_), ar(prim_depth_);
         else mask_address_ = prim_depth_ = 0;
-        if (version >= 10) ar(key_gb_), ar(key_r_), ar(noise_state_);
-        else key_gb_ = 0, key_r_ = 0, noise_state_ = 1;
+        if (version >= 10) ar(key_gb_), ar(key_r_), ar(noise_state_), ar(convert_), ar(prim_lod_);
+        else key_gb_ = 0, key_r_ = 0, noise_state_ = 1, convert_ = 0, prim_lod_ = 0;
     }
 
     template <class Ar>
@@ -131,6 +131,8 @@ private:
     std::uint32_t mask_address_ = 0, prim_depth_ = 0;  // Set Mask Image and Set Prim Depth
     std::uint64_t key_gb_ = 0;  // Set Key GB
     std::uint32_t key_r_ = 0;   // Set Key R
+    std::uint64_t convert_ = 0;   // Set Convert: K0..K5, 9 bits each
+    std::uint32_t prim_lod_ = 0;  // Set Primitive Color: min level and LOD fraction
     mutable std::uint32_t noise_state_ = 1;  // combiner noise generator, advanced per pixel
     SolidState solid_;
     TextureState texture_;
