@@ -347,7 +347,9 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     const bool lod = sample && (solid_.modes & (1ULL << 48));
     const unsigned max_level = static_cast<unsigned>(header >> 51) & 7;
     // The second texel only moves past the first below the last level, so max level is the highest tile.
-    for (unsigned level = 0; level <= (lod ? max_level : 1); ++level) {
+    // Detail textures shift the chain up one tile.
+    const unsigned last_tile = max_level + ((solid_.modes & (1ULL << 50)) ? 1 : 0);
+    for (unsigned level = 0; level <= (lod ? last_tile : 1); ++level) {
         const bool used = lod || (level == 0 ? (texels & 1) : (texels & 2));
         if (used && !can_sample_texture(texture_.tiles[(base_tile + level) & 7], true)) return;
     }
@@ -485,8 +487,8 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                         int step = std::max({std::abs(right[0] - u), std::abs(right[1] - v),
                                              std::abs(down[0] - u), std::abs(down[1] - v)});
                         const auto level = select_lod(step, max_level);
-                        first = base_tile + level.tile;
-                        second = level.distant ? first : first + 1;
+                        first = base_tile + level.first;
+                        second = base_tile + level.second;
                         lod_fraction = level.fraction;
                     }
                     if (texels & 1) texel0 = sample_texel(texture_.tiles[first & 7], u, v);
@@ -595,11 +597,23 @@ Rdp::LodLevel Rdp::select_lod(int step, unsigned max_level) const {
     unsigned level = 0;
     while (level < 7 && (lod >> 5) >> (level + 1)) ++level;
     const bool distant = (lod & 0x6000) || level >= max_level;
+    if (distant) level = max_level;
     int fraction = static_cast<int>(((lod << 3) >> level) & 0xFF);
+    const bool sharpen = (solid_.modes & (1ULL << 49)) != 0, detail = (solid_.modes & (1ULL << 50)) != 0;
     // Without sharpen or detail textures, magnification and the last level clamp the fraction.
-    if (distant) fraction = 0xFF;
-    else if (magnify) fraction = 0;
-    return {distant ? max_level : level, distant, fraction};
+    if (!sharpen && !detail) {
+        if (distant) fraction = 0xFF;
+        else if (magnify) fraction = 0;
+    }
+    // Sharpen sets the 9-bit sign while magnifying, so the combiner extrapolates past level 0.
+    if (sharpen && magnify) fraction -= 0x100;
+    if (!detail) {
+        const bool same = distant || (!sharpen && magnify);
+        return {level, same ? level : level + 1, fraction};
+    }
+    // Detail textures sit in the primitive tile; the mip chain starts one tile later.
+    const unsigned first = magnify ? 0 : level + 1;
+    return {first, (!distant && !magnify) ? level + 2 : level + 1, fraction};
 }
 
 unsigned Rdp::next_noise() const {

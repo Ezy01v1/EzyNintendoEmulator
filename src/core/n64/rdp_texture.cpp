@@ -212,11 +212,10 @@ Rdp::Rgba Rdp::sample_texture_rgba(const Tile& tile, int s, int t) const {
 
 bool Rdp::can_sample_texture(const Tile& tile, bool allow_lod) const {
     constexpr std::uint64_t texture_lod = 1ULL << 48;
-    constexpr std::uint64_t sharpen_detail = (1ULL << 49) | (1ULL << 50);
     constexpr std::uint64_t texture_filter_path = 1ULL << 43;  // TEXEL0 uses sampling instead of color conversion.
-    // Only triangles model LOD, and only plain mipmapping (no sharpen or detail textures).
+    // Only triangles model LOD.
     const bool lod = (solid_.modes & texture_lod) != 0;
-    if ((lod && (!allow_lod || (solid_.modes & sharpen_detail))) || !(solid_.modes & texture_filter_path) ||
+    if ((lod && !allow_lod) || !(solid_.modes & texture_filter_path) ||
         ((solid_.modes >> 44) & 3) == 1) return false;  // Mid-texel flag without quad sampling.
     return supported_texture(tile.descriptor, (solid_.modes & (1ULL << 47)) != 0);
 }

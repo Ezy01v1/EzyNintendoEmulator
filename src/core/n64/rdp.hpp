@@ -78,9 +78,8 @@ private:
     [[nodiscard]] unsigned texels_read() const;
     unsigned next_noise() const;
     struct LodLevel {
-        unsigned tile;  // offset from the primitive's tile
-        bool distant;   // at or past the last level: both texels use it
-        int fraction;   // LOD_FRACTION combiner input
+        unsigned first, second;  // TEXEL0 and TEXEL1 tile offsets from the primitive's tile
+        int fraction;            // LOD_FRACTION combiner input (9-bit signed)
     };
     [[nodiscard]] LodLevel select_lod(int step, unsigned max_level) const;
     [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction = 0) const;

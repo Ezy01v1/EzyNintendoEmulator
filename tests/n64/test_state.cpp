@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <initializer_list>
@@ -822,25 +823,46 @@ TEST_CASE("RDP combiner noise input is a 9-bit value with random top bits") {
 }
 
 TEST_CASE("RDP mipmapped triangle picks tiles by LOD and lerps them by LOD_FRACTION") {
+    constexpr std::uint64_t kWhite = ~0ULL, kGray = 0x8421842184218421ULL;  // gray 16/31 expands to 132
+    constexpr std::uint64_t kSharpen = 1ULL << 49, kDetail = 1ULL << 50;
     struct Case {
-        int step;              // texels per pixel along S, in 10.5
+        int step;               // texels per pixel along S, in 10.5
+        std::uint64_t extra;    // sharpen / detail mode bits
+        unsigned max_level;
+        std::uint64_t level0;   // texels of tile 0; tile 1 is red
         std::uint32_t expected;
     };
-    // 1.5 texels: level 0 with fraction 0x80 halfway to level 1 (white to red).
-    // 3 texels: past the last level, so both texels come from level 1 (red).
-    for (const auto [step, expected] : {Case{48, 0xFF8080E0U}, Case{96, 0xFF0000E0U}}) {
+    const auto lerp = [](int from, int to, int fraction) {
+        return static_cast<std::uint32_t>(std::clamp(((to - from) * fraction + (from << 8) + 0x80) >> 8, 0, 255));
+    };
+    // Gray (132) toward red (255, 0, 0) with a negative fraction moves away from red.
+    const std::uint32_t sharp_r = lerp(132, 255, -128), sharp_gb = lerp(132, 0, -128);
+    const Case cases[] = {
+        // 1.5 texels: level 0 with fraction 0x80 halfway to level 1 (white to red).
+        {48, 0, 1, kWhite, 0xFF8080E0U},
+        // 3 texels: past the last level, so both texels come from level 1 (red).
+        {96, 0, 1, kWhite, 0xFF0000E0U},
+        // 0.5 texels magnifies: plain mipmapping clamps the fraction to 0 and keeps level 0.
+        {16, 0, 1, kGray, 0x848484E0U},
+        // Sharpen makes the magnified fraction negative (0x80 - 0x100), extrapolating away from level 1.
+        {16, kSharpen, 1, kGray, (sharp_r << 24) | (sharp_gb << 16) | (sharp_gb << 8) | 0xE0U},
+        // Detail while magnifying blends the detail tile (0) with level 0 (tile 1) by the raw fraction.
+        {16, kDetail, 0, kWhite, 0xFF8080E0U},
+    };
+    for (const auto& [step, extra, max_level, level0, expected] : cases) {
         CAPTURE(step);
+        CAPTURE(extra);
         const auto n64 = N64::create(counting_rom("RDP MIPMAP"));
         REQUIRE(n64);
         auto& bus = n64->bus();
         constexpr int pixel = 65536;
         constexpr std::uint32_t white = 0x2000, red = 0x2100;
         for (std::uint32_t at = 0; at < 32; at += 8) {
-            bus.write64(white + at, ~0ULL);
+            bus.write64(white + at, level0);
             bus.write64(red + at, 0xF801F801F801F801ULL);
         }
-        constexpr std::uint64_t modes = (0x2FULL << 56) | (1ULL << 52) | (1ULL << 48) | (6ULL << 41) |
-                                        (3ULL << 38) | (1U << 9);  // two cycles, LOD, zap
+        const std::uint64_t modes = (0x2FULL << 56) | (1ULL << 52) | (1ULL << 48) | (6ULL << 41) |
+                                    (3ULL << 38) | (1U << 9) | extra;  // two cycles, LOD, zap
         const std::vector<std::uint64_t> commands{
             0x3F18000300004000ULL,
             rdp_rectangle(0x2D, 0, 0, 4, 4),
@@ -853,7 +875,7 @@ TEST_CASE("RDP mipmapped triangle picks tiles by LOD and lerps them by LOD_FRACT
             0x3D10000300000000ULL | red,
             rdp_tile(0, 2, 1, 1, 4),
             rdp_rectangle(0x34, 0, 0, 3, 3) | (1ULL << 24),
-            rdp_triangle_header(true, 0, 0, 4) | (0x02ULL << 56) | (1ULL << 51),  // 0x0A, max level 1
+            rdp_triangle_header(true, 0, 0, 4) | (0x02ULL << 56) | (std::uint64_t{max_level} << 51),  // 0x0A
             rdp_edge(4 * pixel, 0),
             rdp_edge(0, 0),
             rdp_edge(0, 0),
