@@ -277,7 +277,13 @@ void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
             // Rectangles carry no shade coefficients, so shade inputs read as zero.
             const Rgba texel0 = (texels & 1) ? sample_texel(tile, s, t) : Rgba{};
             const Rgba texel1 = (texels & 2) ? sample_texel(next_tile, s, t) : Rgba{};
-            write_opaque_pixel(x, y, combine(texel0, texel1, Rgba{}, level.fraction), Rgba{}, coverage, rdram);
+            // Two-cycle mode's cycle 1 TEXEL1 is the next pixel's TEXEL0.
+            Rgba next_texel0{};
+            if (cycle_type_ == 1 && (texels & 1)) {
+                next_texel0 = sample_texel(tile, s0 + (((dx_quarters + 4) * ds) >> 7), t);
+            }
+            write_opaque_pixel(x, y, combine(texel0, texel1, Rgba{}, level.fraction, &next_texel0), Rgba{}, coverage,
+                               rdram);
         }
     }
 }

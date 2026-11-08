@@ -472,34 +472,44 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                 const int dx = x - texture_x;
                 Rgba texel0{}, texel1{}, shade_color{};  // Triangles without shade coefficients have zero shade.
                 int lod_fraction = 0;
+                Rgba next_texel0{};
                 if (sample) {
                     const auto coordinates = [&](std::int64_t s_start, std::int64_t t_start, std::int64_t w_start, int at) {
                         const int sample_s = s.sample(s_start, at), sample_t = t.sample(t_start, at);
                         return perspective ? project_texture_coordinates(sample_s, sample_t, w.sample(w_start, at))
                                            : std::array{sample_s, sample_t};
                     };
-                    const auto [u, v] = coordinates(start_s, start_t, start_w, dx);
-                    unsigned first = base_tile, second = base_tile + 1;
-                    if (lod) {
-                        // LOD is the largest texel step to the next pixel and the next line (10.5).
-                        const auto right = coordinates(start_s, start_t, start_w, dx + 1);
-                        const auto down = coordinates(start_s + s.dy, start_t + t.dy, start_w + w.dy, dx);
-                        int step = std::max({std::abs(right[0] - u), std::abs(right[1] - v),
-                                             std::abs(down[0] - u), std::abs(down[1] - v)});
-                        const auto level = select_lod(step, max_level);
-                        first = base_tile + level.first;
-                        second = base_tile + level.second;
-                        lod_fraction = level.fraction;
-                    }
-                    if (texels & 1) texel0 = sample_texel(texture_.tiles[first & 7], u, v);
-                    if (texels & 2) texel1 = sample_texel(texture_.tiles[second & 7], u, v);
+                    // Samples one pixel's texels; returns its LOD fraction.
+                    const auto sample_pixel = [&](int at, Rgba& out0, Rgba* out1) {
+                        const auto [u, v] = coordinates(start_s, start_t, start_w, at);
+                        unsigned first = base_tile, second = base_tile + 1;
+                        int fraction = 0;
+                        if (lod) {
+                            // LOD is the largest texel step to the next pixel and the next line (10.5).
+                            const auto right = coordinates(start_s, start_t, start_w, at + 1);
+                            const auto down = coordinates(start_s + s.dy, start_t + t.dy, start_w + w.dy, at);
+                            const int step = std::max({std::abs(right[0] - u), std::abs(right[1] - v),
+                                                       std::abs(down[0] - u), std::abs(down[1] - v)});
+                            const auto level = select_lod(step, max_level);
+                            first = base_tile + level.first;
+                            second = base_tile + level.second;
+                            fraction = level.fraction;
+                        }
+                        if (texels & 1) out0 = sample_texel(texture_.tiles[first & 7], u, v);
+                        if (out1 && (texels & 2)) *out1 = sample_texel(texture_.tiles[second & 7], u, v);
+                        return fraction;
+                    };
+                    lod_fraction = sample_pixel(dx, texel0, &texel1);
+                    // Two-cycle mode pipelines texels: cycle 1's TEXEL1 is the next pixel's TEXEL0.
+                    if (cycle_type_ == 1) sample_pixel(dx + 1, next_texel0, nullptr);
                 }
                 if (shaded) {
                     for (unsigned i = 0; i < shade.size(); ++i) shade_color[i] = clamp_shade(start_shade[i], shade[i], dx);
                 }
                 // Z is only updated for pixels the blender actually writes (alpha compare can drop them).
                 if (write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y),
-                                       combine(texel0, texel1, shade_color, lod_fraction), shade_color, coverage,
+                                       combine(texel0, texel1, shade_color, lod_fraction, &next_texel0),
+                                       shade_color, coverage,
                                        rdram) &&
                     use_depth) {
                     write_depth(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, pixel_dz, rdram);
@@ -622,7 +632,8 @@ unsigned Rdp::next_noise() const {
     return noise_state_ >> 16;
 }
 
-Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction) const {
+Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction,
+                       const Rgba* next_texel0) const {
     // Each cycle evaluates (A - B) * C + D. Two-cycle mode feeds cycle 0 into COMBINED.
     // Key center and scale per channel (R, G, B) and the 4.8 key widths.
     const std::array<int, 3> key_center{static_cast<int>((key_r_ >> 8) & 255), static_cast<int>((key_gb_ >> 24) & 255),
@@ -694,8 +705,9 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
         result = cycle(kCycle1, Rgba{}, texel0, texel1);  // COMBINED has no earlier cycle.
     } else {
         const Rgba first = cycle(kCycle0, Rgba{}, texel0, texel1);
-        // TODO: cycle 1's TEXEL1 is the next pixel's TEXEL0; this pixel's TEXEL0 stands in for it.
-        result = cycle(kCycle1, first, texel1, texel0);
+        // Cycle 1 sees this pixel's TEXEL1 as TEXEL0 and the next pixel's TEXEL0 as TEXEL1.
+        // Callers without a next pixel fall back to this pixel's TEXEL0.
+        result = cycle(kCycle1, first, texel1, next_texel0 ? *next_texel0 : texel0);
     }
     if (solid_.modes & (1ULL << 40)) {
         // Chroma key: each channel's distance from the key center (already scaled by the

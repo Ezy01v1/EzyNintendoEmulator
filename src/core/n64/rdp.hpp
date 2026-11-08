@@ -82,7 +82,8 @@ private:
         int fraction;            // LOD_FRACTION combiner input (9-bit signed)
     };
     [[nodiscard]] LodLevel select_lod(int step, unsigned max_level) const;
-    [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction = 0) const;
+    [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction = 0,
+                               const Rgba* next_texel0 = nullptr) const;
     void write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const;
     bool write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
                             std::span<std::uint8_t> rdram) const;

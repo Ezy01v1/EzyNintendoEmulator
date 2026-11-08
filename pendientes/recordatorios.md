@@ -168,3 +168,6 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-08 — N64 subproyecto 3: LOD en rectángulos texturizados (paso constante DsDx/DtDy, nivel máximo 0, sharpen
   y detail). Pruebas unitarias en verde, n64-systemtest 2984/3721.
   Pendiente: TEXEL1 del pixel siguiente, bits DZ ocultos, cobertura interpenetrante.
+- 2026-11-08 — N64 subproyecto 3: en dos ciclos, el TEXEL1 del ciclo 1 es el TEXEL0 del pixel siguiente (triángulos y
+  rectángulos). Pruebas unitarias en verde, n64-systemtest 2984/3721.
+  Pendiente: bits DZ ocultos, cobertura interpenetrante.

@@ -938,6 +938,38 @@ TEST_CASE("RDP textured rectangle with LOD uses level 0 and detail blending") {
     }
 }
 
+TEST_CASE("RDP two-cycle TEXEL1 in cycle 1 is the next pixel's TEXEL0") {
+    const auto n64 = N64::create(counting_rom("RDP NEXT TEXEL"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr std::uint32_t source = 0x2000;
+    bus.write64(source, 0xF80107C1003FFFFFULL);  // RGBA16 row: red, green, blue, white
+    const std::uint64_t modes = (0x2FULL << 56) | (1ULL << 52) | (6ULL << 41) | (3ULL << 38) | (1U << 9);
+    const std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        modes,
+        // Cycle 0 reads TEXEL0; cycle 1 outputs its TEXEL1.
+        set_combine({15, 15, 31, 1, 7, 7, 7, 6}, {15, 15, 31, 2, 7, 7, 7, 0}),
+        0x3D10000300000000ULL | source,
+        rdp_tile(0, 2, 0, 1, 0),
+        rdp_rectangle(0x34, 0, 0, 3, 0),
+        rdp_rectangle(0x24, 4, 1, 0, 0),
+        rdp_texture_coords(0, 0, 1024, 1024),  // one texel per pixel
+        kSyncFull,
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 40; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    // Pixel x shows texel x + 1.
+    CHECK(bus.read32(0x4000) == 0x00FF00E0U);
+    CHECK(bus.read32(0x4004) == 0x0000FFE0U);
+    CHECK(bus.read32(0x4008) == 0xFFFFFFE0U);
+}
+
 TEST_CASE("RDP combiner multiplies a texel by its own alpha") {
     const auto n64 = N64::create(counting_rom("RDP COMBINER TEXEL ALPHA"));
     REQUIRE(n64);
