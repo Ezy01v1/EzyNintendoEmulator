@@ -69,12 +69,12 @@ private:
     void fill_span(unsigned y, unsigned left, unsigned right, std::span<std::uint8_t> rdram) const;
     [[nodiscard]] bool field_matches(unsigned y) const;
     [[nodiscard]] bool can_write_opaque(bool depth = false) const;
-    [[nodiscard]] std::optional<std::uint32_t> opaque_color(bool depth = false) const;
-    [[nodiscard]] bool uses_shade_color(bool depth) const;
     [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const;
-    [[nodiscard]] unsigned combined_alpha(unsigned shade_alpha) const;
-    void write_opaque_pixel(unsigned x, unsigned y, std::uint32_t color, unsigned coverage,
-                            std::span<std::uint8_t> rdram, unsigned shade_alpha = 255) const;
+    using Rgba = std::array<unsigned, 4>;
+    [[nodiscard]] bool combiner_reads_texel() const;
+    [[nodiscard]] Rgba combine(const Rgba& texel, const Rgba& shade) const;
+    void write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
+                            std::span<std::uint8_t> rdram) const;
     void load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram);
     void load_palette(std::uint64_t word, std::span<const std::uint8_t> rdram);
     void draw_textured_rectangle(std::span<std::uint8_t> rdram) const;
@@ -87,12 +87,10 @@ private:
         void serialize(Ar& ar) { ar(descriptor), ar(bounds); }
     };
 
-    enum class TextureCombiner { Direct, Modulate, ModulateShade };
-    [[nodiscard]] std::optional<TextureCombiner> opaque_texture_combiner(const Tile& tile, bool depth = false) const;
-    [[nodiscard]] std::uint32_t textured_color(const Tile& tile, int s, int t, TextureCombiner combiner,
-                                               std::uint32_t shade = 0) const;
+    [[nodiscard]] bool can_sample_texture(const Tile& tile) const;
+    [[nodiscard]] Rgba sample_texel(const Tile& tile, int s, int t) const;
     [[nodiscard]] std::uint16_t read_texel(const Tile& tile, unsigned s, unsigned t, unsigned bank) const;
-    [[nodiscard]] std::array<unsigned, 3> sample_texture_rgb(const Tile& tile, int s, int t) const;
+    [[nodiscard]] Rgba sample_texture_rgba(const Tile& tile, int s, int t) const;
 
     struct TextureState {
         std::uint64_t image = 0;

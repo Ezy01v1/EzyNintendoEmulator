@@ -166,17 +166,18 @@ std::uint16_t Rdp::read_texel(const Tile& tile, unsigned s, unsigned t, unsigned
     return texture_.tmem[kTlutBase + entry * kHalfwordsPerWord + bank];
 }
 
-std::array<unsigned, 3> Rdp::sample_texture_rgb(const Tile& tile, int s, int t) const {
+Rdp::Rgba Rdp::sample_texture_rgba(const Tile& tile, int s, int t) const {
     const unsigned sampler_s = static_cast<unsigned>(tile.descriptor);
     const unsigned sampler_t = static_cast<unsigned>(tile.descriptor >> 10);
     const int s0 = wrap_texture_coord(s >> 5, sampler_s);
     const int wrapped_t = wrap_texture_coord(t >> 5, sampler_t);
     const int t0 = wrapped_t & 255;
     const bool intensity = ((solid_.modes >> 46) & 3) == 3;  // IA16 palette entries.
-    const auto fetch = [&](int x, int y, unsigned bank) -> std::array<unsigned, 3> {
+    const auto fetch = [&](int x, int y, unsigned bank) -> Rgba {
         const unsigned texel = read_texel(tile, static_cast<unsigned>(x), static_cast<unsigned>(y), bank);
-        if (intensity) return {texel >> 8, texel >> 8, texel >> 8};
-        return {expand_5_to_8(texel >> 11), expand_5_to_8((texel >> 6) & 31), expand_5_to_8((texel >> 1) & 31)};
+        if (intensity) return {texel >> 8, texel >> 8, texel >> 8, texel & 255};
+        return {expand_5_to_8(texel >> 11), expand_5_to_8((texel >> 6) & 31), expand_5_to_8((texel >> 1) & 31),
+                (texel & 1) ? 255U : 0U};
     };
     if (!(solid_.modes & (1ULL << 45))) return fetch(s0, t0, 0);  // Point sampling.
 
@@ -188,7 +189,7 @@ std::array<unsigned, 3> Rdp::sample_texture_rgb(const Tile& tile, int s, int t) 
     const unsigned bank_xor = upper ? 3 : 0;
     const auto right = fetch(s1, t0, 1 ^ bank_xor);
     const auto down = fetch(s0, t1, 2 ^ bank_xor);
-    std::array<unsigned, 3> result{};
+    Rgba result{};
     if ((solid_.modes & (1ULL << 44)) && frac_s == 16 && frac_t == 16) {
         const auto top_left = fetch(s0, t0, 3);
         const auto bottom_right = fetch(s1, t1, 0);
@@ -209,47 +210,28 @@ std::array<unsigned, 3> Rdp::sample_texture_rgb(const Tile& tile, int s, int t) 
     return result;
 }
 
-std::optional<Rdp::TextureCombiner> Rdp::opaque_texture_combiner(const Tile& tile, bool depth) const {
+bool Rdp::can_sample_texture(const Tile& tile) const {
     constexpr std::uint64_t texture_lod = 1ULL << 48;
     constexpr std::uint64_t texture_filter_path = 1ULL << 43;  // TEXEL0 uses sampling instead of color conversion.
-    if (!can_write_opaque(depth) || ((solid_.modes >> 30) & 3) != 0 ||
-        (solid_.modes & texture_lod) || !(solid_.modes & texture_filter_path) ||
-        ((solid_.modes >> 44) & 3) == 1) return std::nullopt;  // Mid-texel flag without quad sampling.
-    const bool indexed = (solid_.modes & (1ULL << 47)) != 0;
-    if (!supported_texture(tile.descriptor, indexed)) return std::nullopt;
-
-    // The one-cycle combiner takes its RGB inputs from cycle 1.
-    const unsigned source_a = static_cast<unsigned>(solid_.combine >> 37) & 15;
-    const unsigned source_b = static_cast<unsigned>(solid_.combine >> 24) & 15;
-    const unsigned multiplier = static_cast<unsigned>(solid_.combine >> 32) & 31;
-    const unsigned addend = static_cast<unsigned>(solid_.combine >> 6) & 7;
-    if (source_a == 1 && source_b >= 8 && multiplier == 3 && addend == 7) return TextureCombiner::Modulate;
-    if (source_a == 1 && source_b >= 8 && multiplier == 4 && addend == 7) return TextureCombiner::ModulateShade;
-    if (multiplier >= 16 && addend == 1) return TextureCombiner::Direct;
-    return std::nullopt;
+    if ((solid_.modes & texture_lod) || !(solid_.modes & texture_filter_path) ||
+        ((solid_.modes >> 44) & 3) == 1) return false;  // Mid-texel flag without quad sampling.
+    return supported_texture(tile.descriptor, (solid_.modes & (1ULL << 47)) != 0);
 }
 
-std::uint32_t Rdp::textured_color(const Tile& tile, int s, int t, TextureCombiner combiner, std::uint32_t shade) const {
+Rdp::Rgba Rdp::sample_texel(const Tile& tile, int s, int t) const {
     s = clamp_texture_coord(s, field12(tile.bounds, 44), field12(tile.bounds, 12),
                             static_cast<unsigned>(tile.descriptor));
     t = clamp_texture_coord(t, field12(tile.bounds, 32), field12(tile.bounds, 0),
                             static_cast<unsigned>(tile.descriptor >> 10));
-    auto [r, g, b] = sample_texture_rgb(tile, s, t);
-    if (combiner != TextureCombiner::Direct) {
-        const std::uint32_t factor = combiner == TextureCombiner::Modulate ? solid_.primitive : shade;
-        r = (r * (factor >> 24) + 128) >> 8;
-        g = (g * ((factor >> 16) & 255) + 128) >> 8;
-        b = (b * ((factor >> 8) & 255) + 128) >> 8;
-    }
-    return (r << 24) | (g << 16) | (b << 8);
+    return sample_texture_rgba(tile, s, t);
 }
 
 void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
     if (solid_.modes & kTexturePerspective) return;  // Rectangles do not supply W.
     const auto header = draw_command_[0], coefficients = draw_command_[1];
     const auto& tile = texture_.tiles[(header >> 24) & 7];
-    const auto combiner = opaque_texture_combiner(tile);
-    if (!combiner || *combiner == TextureCombiner::ModulateShade) return;  // TODO: rectangles have zero shade
+    const bool sample = combiner_reads_texel();
+    if (!can_write_opaque() || (sample && !can_sample_texture(tile))) return;
 
     const unsigned x0 = field12(header, 12), y0 = field12(header, 0);
     const unsigned left = std::max(x0, field12(scissor_, 44));
@@ -280,7 +262,9 @@ void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
             // Texture coordinates keep the original rectangle origin after scissoring.
             const int dx_quarters = static_cast<int>(4 * x) - static_cast<int>(x0);
             const int s = s0 + ((dx_quarters * ds) >> 7);
-            write_opaque_pixel(x, y, textured_color(tile, s, t, *combiner), coverage, rdram);
+            // Rectangles carry no shade coefficients, so shade inputs read as zero.
+            const Rgba texel = sample ? sample_texel(tile, s, t) : Rgba{};
+            write_opaque_pixel(x, y, combine(texel, Rgba{}), Rgba{}, coverage, rdram);
         }
     }
 }

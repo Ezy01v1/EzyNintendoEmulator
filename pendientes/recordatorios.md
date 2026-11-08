@@ -72,11 +72,12 @@ Plan en 4 subproyectos (spec y plan en `docs/superpowers/`): 1 CPU+memoria+arran
   - [ ] Z: rangos DZ, bits ocultos y modos transparente/interpenetrante/decal; Z en rectángulos.
   - [x] Blender de un ciclo: lectura de memoria (`image_read`), `force_blend`, mezcla en bordes
         sin desbordar cobertura, P/A/M/B completos y destinos de cobertura clamp/wrap/zap/save.
-  - [ ] Blender: alfa del combinador con términos (A−B)·C y alfa de texel, `cvg_x_alpha`,
+  - [ ] Blender: `cvg_x_alpha`,
         `alpha_compare`, modo de dos ciclos. Los bits ocultos de cobertura en RGBA5551 se asumen en 1.
   - [x] Triángulos con sombreado y textura (`0x0E/0x0F`): TEXEL0 × SHADE en el combinador.
-  - [ ] Combinador general (A−B)·C+D en RGB y alfa (hoy solo casos fijos), shade × primitivo,
-        TEXEL0 × SHADE en rectángulos (shade cero) y modo de dos ciclos.
+  - [x] Combinador general de un ciclo: (A−B)·C+D en RGB y alfa con texel (incluido su alfa),
+        shade, primitivo, entorno y constantes; el blender usa el alfa combinado y selecciona P.
+  - [ ] Combinador: modo de dos ciclos, ruido, chroma key, K4/K5, fracciones de LOD y TEXEL1 real.
 
 ## Roadmap
 
@@ -136,3 +137,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   unitarias N64 145/145, n64-systemtest 2984/3721. Siguiente: shade con texturas.
 - 2026-11-07 — N64 subproyecto 3: triángulos con textura modulada por shade. Pruebas unitarias
   N64 146/146, n64-systemtest 2984/3721. Siguiente: combinador general.
+- 2026-11-07 — N64 subproyecto 3: combinador general de un ciclo en lugar de los casos fijos.
+  Pruebas unitarias N64 148/148, n64-systemtest 2984/3721. Siguiente: modo de dos ciclos.

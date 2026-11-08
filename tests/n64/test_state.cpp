@@ -595,6 +595,76 @@ TEST_CASE("RDP shaded textured triangle modulates texels by the interpolated sha
     }
 }
 
+TEST_CASE("RDP combiner evaluates (A - B) * C + D with shade alpha as the multiplier") {
+    const auto n64 = N64::create(counting_rom("RDP COMBINER LERP"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    const std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,   // RGBA8888, stride 4
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        0x2F0000C000000200ULL,   // one cycle, dither off, coverage zap
+        0x3C00006B05FC017EULL,   // RGB = (PRIM - ENV) * SHADE_ALPHA + ENV, alpha = 1
+        0x3A000000FF0000FFULL,   // red
+        0x3B0000000000FFFFULL,   // blue
+        rdp_triangle_header(true, 0, 0, 4) | (0x04ULL << 56),  // 0x0C, row 0
+        rdp_edge(4 * pixel, 0),
+        rdp_edge(0, 0),
+        rdp_edge(0, 0),
+        0, std::uint64_t{85} << 0, 0, 0,  // shade alpha += 85 per pixel
+        0, 0, 0, 0,
+        kSyncFull,
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 30; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        const int alpha = static_cast<int>(std::min(85U * x, 255U));
+        const auto red = static_cast<unsigned>((255 * alpha + 0x80) >> 8);
+        const auto blue = static_cast<unsigned>((-255 * alpha + (255 << 8) + 0x80) >> 8);
+        CHECK(bus.read32(0x4000 + 4 * x) == ((red << 24) | (blue << 8) | 0xE0U));
+    }
+}
+
+TEST_CASE("RDP combiner multiplies a texel by its own alpha") {
+    const auto n64 = N64::create(counting_rom("RDP COMBINER TEXEL ALPHA"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    constexpr std::uint32_t source = 0x2000;
+    bus.write64(source, 0xF801F800F801F800ULL);  // red texels, alpha bit set on even ones
+    const std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        kPointMode | (1U << 9),
+        0x3C0000280FFC01FEULL,   // RGB = TEXEL0 * TEXEL0_ALPHA, alpha = 1
+        0x3D10000300000000ULL | source,
+        rdp_tile(0, 2, 0, 1, 0),
+        rdp_rectangle(0x34, 0, 0, 3, 0),
+        rdp_triangle_header(true, 0, 0, 4) | (0x02ULL << 56),  // 0x0A, row 0
+        rdp_edge(4 * pixel, 0),
+        rdp_edge(0, 0),
+        rdp_edge(0, 0),
+        0, rdp_stw_halves(32, 0), 0, 0,  // S advances one texel per pixel
+        0, 0, 0, 0,
+        kSyncFull,
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 40; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read32(0x4000 + 4 * x) == (x % 2 == 0 ? 0xFE0000E0U : 0x000000E0U));
+    }
+}
+
 TEST_CASE("RDP force blend mixes a translucent primitive with framebuffer memory") {
     const auto n64 = N64::create(counting_rom("RDP BLEND"));
     REQUIRE(n64);
