@@ -73,7 +73,8 @@ private:
     using Rgba = std::array<unsigned, 4>;
     [[nodiscard]] unsigned texels_read() const;
     [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade) const;
-    void write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
+    void write_depth(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const;
+    bool write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
                             std::span<std::uint8_t> rdram) const;
     void load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram);
     void load_palette(std::uint64_t word, std::span<const std::uint8_t> rdram);

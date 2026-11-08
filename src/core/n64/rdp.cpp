@@ -428,10 +428,10 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                 coverage += samples[row].covers(sample);
                 coverage += samples[row].covers(sample + 4);
             }
+            std::uint32_t pixel_z = 0;
             if (coverage != 0 && use_depth) {
-                const std::uint32_t pixel_z = (solid_.modes & (1U << 2))
-                    ? ((prim_depth_ >> 16) & 0x7FFF) << 3
-                    : clamp_depth(start_z + std::int64_t{z.dx} * (x - texture_x));
+                pixel_z = (solid_.modes & (1U << 2)) ? ((prim_depth_ >> 16) & 0x7FFF) << 3
+                                                     : clamp_depth(start_z + std::int64_t{z.dx} * (x - texture_x));
                 if (!depth_test(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, rdram)) continue;
             }
             if (coverage != 0) {
@@ -447,8 +447,12 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
                 if (shaded) {
                     for (unsigned i = 0; i < shade.size(); ++i) shade_color[i] = clamp_shade(start_shade[i], shade[i], dx);
                 }
-                write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y), combine(texel0, texel1, shade_color),
-                                   shade_color, coverage, rdram);
+                // Z is only updated for pixels the blender actually writes (alpha compare can drop them).
+                if (write_opaque_pixel(static_cast<unsigned>(x), static_cast<unsigned>(y),
+                                       combine(texel0, texel1, shade_color), shade_color, coverage, rdram) &&
+                    use_depth) {
+                    write_depth(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, rdram);
+                }
             }
         }
     }
@@ -475,9 +479,9 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
 
 bool Rdp::can_write_opaque(bool depth) const {
     constexpr std::uint64_t unsupported = 1ULL << 40;  // chroma key
-    // Only opaque Z mode (0) is modeled, and only for primitives that carry a depth.
+    // Depth is only modeled for primitives that carry one.
     const bool depth_modes = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
-    if (depth_modes && (!depth || ((solid_.modes >> 10) & 3) != 0)) return false;
+    if (depth_modes && !depth) return false;
     if ((solid_.modes & 3) == 3) return false;  // Alpha compare against a random threshold.
     return cycle_type_ <= 1 && color_width_ != 0 && solid_.format == 0 && (pixel_size_ == 2 || pixel_size_ == 3) &&
            !(solid_.modes & unsupported) && ((solid_.modes >> 38) & 3) != 2;
@@ -584,26 +588,34 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
 bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const {
     const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
     if (address + 2 > rdram.size()) return false;
-    // Opaque mode without DZ: a pixel passes when nearer than the stored depth.
-    // TODO: DZ ranges, the hidden Z bits and the transparent/interpenetrating/decal modes.
-    if (solid_.modes & (1U << 4)) {
-        const unsigned stored = (unsigned{rdram[address]} << 8) | rdram[address + 1];
-        if (z >= decompress_depth(stored >> 2)) return false;
+    if (!(solid_.modes & (1U << 4))) return true;
+    // Without DZ ranges, "nearer" and "farther" collapse to plain comparisons.
+    // TODO: DZ ranges, the hidden Z bits and the interpenetrating coverage adjustment.
+    const unsigned stored = (unsigned{rdram[address]} << 8) | rdram[address + 1];
+    const std::uint32_t memory_z = decompress_depth(stored >> 2);
+    const bool max = memory_z == 0x3FFFF;
+    switch ((solid_.modes >> 10) & 3) {
+        case 2: return max || z < memory_z;       // transparent
+        case 3: return !max && z == memory_z;     // decal: coplanar with memory
+        default: return max || z < memory_z;      // opaque and interpenetrating
     }
-    if (solid_.modes & (1U << 5)) {
-        const unsigned packed = compress_depth(z) << 2;
-        rdram[address] = static_cast<std::uint8_t>(packed >> 8);
-        rdram[address + 1] = static_cast<std::uint8_t>(packed);
-    }
-    return true;
 }
 
-void Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
+void Rdp::write_depth(unsigned x, unsigned y, std::uint32_t z, std::span<std::uint8_t> rdram) const {
+    if (!(solid_.modes & (1U << 5))) return;
+    const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
+    if (address + 2 > rdram.size()) return;
+    const unsigned packed = compress_depth(z) << 2;
+    rdram[address] = static_cast<std::uint8_t>(packed >> 8);
+    rdram[address + 1] = static_cast<std::uint8_t>(packed);
+}
+
+bool Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
                              std::span<std::uint8_t> rdram) const {
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t address = (color_address_ & ~(bytes - 1)) +
         (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
-    if (address + bytes > rdram.size()) return;
+    if (address + bytes > rdram.size()) return false;
 
     // Coverage times alpha scales the 0-8 coverage count by the combined alpha; alpha
     // coverage select then replaces the pixel alpha with the (scaled) coverage.
@@ -614,8 +626,8 @@ void Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         alpha = (solid_.modes & (1U << 12)) ? std::min(255U, scaled >> 5) : std::min(255U, coverage << 5);
     }
     // Alpha compare drops pixels whose alpha is below the blend color alpha.
-    if ((solid_.modes & 1) && alpha < (solid_.blend & 255)) return;
-    if (coverage == 0) return;
+    if ((solid_.modes & 1) && alpha < (solid_.blend & 255)) return false;
+    if (coverage == 0) return false;
 
     // Memory color and coverage. Without image reads, memory coverage reads as full (7).
     // RGBA5551 keeps only the top coverage bit; the two hidden low bits are taken as set.
@@ -720,6 +732,7 @@ void Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         rdram[address + 2] = static_cast<std::uint8_t>(b);
         rdram[address + 3] = static_cast<std::uint8_t>(stored << 5);
     }
+    return true;
 }
 
 }  // namespace ezy::n64
