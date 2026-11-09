@@ -20,6 +20,9 @@ std::uint32_t read32(std::span<const std::uint8_t> rdram, std::uint32_t address)
 }  // namespace
 
 F3dex::Result F3dex::run_task(const OsTask& task, GfxUcode ucode, std::span<std::uint8_t> rdram, Rdp& rdp, Mi& mi) {
+    // The microcode reloads its data segment for every task, so nothing carries over (and
+    // nothing needs saving between tasks).
+    *this = F3dex{};
     ucode_ = ucode;
     segments_ = {};
     modelview_depth_ = 0;

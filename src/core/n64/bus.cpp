@@ -34,6 +34,11 @@ bool Bus::start_hle_task(std::uint64_t when) {
     if (task.type != kOsTaskGraphics) return false;
     const GfxUcode ucode = identify_gfx_ucode(task, rdram_);
     if (ucode == GfxUcode::Unknown) return false;
+    // One deferred Sync Full at a time: the previous task's is delivered before this one's.
+    if (scheduler_.pending(EventType::GfxHleRdpDone)) {
+        scheduler_.cancel(EventType::GfxHleRdpDone);
+        rdp_.finish_deferred_sync(mi_);
+    }
     const F3dex::Result result = f3dex_.run_task(task, ucode, rdram_, rdp_, mi_);
     // The RSP needs time for the task: finish it later, as the microcode's BREAK would.
     constexpr std::uint64_t kTaskOverheadCycles = 2000;

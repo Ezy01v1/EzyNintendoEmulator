@@ -729,3 +729,45 @@ TEST_CASE("A HLE task's Sync Full raises DP when the task ends, not when it star
     for (unsigned i = 0; i < 5000; ++i) n64->step();
     CHECK((bus.read32(kMiIntr) & (1U << 5)) != 0);
 }
+
+TEST_CASE("A new HLE task first delivers the previous task's pending Sync Full") {
+    const auto n64 = N64::create(counting_rom("HLE TWO TASKS"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    n64->set_hle_gfx(true);
+    write_ucode_data(bus, "F3DEX         0.95");
+    write_dl(bus, kDisplayList, {0xE900000000000000ULL, kEndDl});  // gDPFullSync
+    write_os_task(bus, graphics_task());
+    bus.write32(kMiMask, 2 | (2U << 10));
+    start_rsp(bus);
+    n64->step();
+    REQUIRE((bus.read32(kMiIntr) & (1U << 5)) == 0);
+    // The game starts the next task as soon as SP says done, before the first one's DP.
+    bus.write32(kSpStatus, 1 | 4 | 0x100);
+    n64->step();
+    CHECK((bus.read32(kMiIntr) & (1U << 5)) != 0);  // the first task's Sync Full was not lost
+}
+
+TEST_CASE("F3DEX state does not carry over from one task to the next") {
+    const auto n64 = N64::create(counting_rom("HLE STATELESS"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = triangle_scene(bus, 0);
+    dl.insert(dl.begin(), dl_cmd(0xBB000001, 0xFFFFFFFF));  // G_TEXTURE on
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    F3dex f3dex;
+    f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi());
+
+    // Second task: same scene without G_TEXTURE: the triangle must not be textured.
+    auto second = triangle_scene(bus, 0);
+    second.push_back(dl_cmd(0xBF000000, 0x00000204));
+    second.push_back(kEndDl);
+    write_dl(bus, kDisplayList, second);
+    std::vector<std::uint64_t> trace;
+    bus.rdp().set_trace(&trace);
+    f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi());
+    bus.rdp().set_trace(nullptr);
+    REQUIRE_FALSE(trace.empty());
+    CHECK((trace[0] >> 56) == 0xC8);  // not 0xCA
+}
