@@ -354,3 +354,143 @@ TEST_CASE("rsp_reciprocal is the VRCP result") {
     CHECK(rsp_reciprocal(1, false) == 0x7FFFC000U);
     CHECK(rsp_reciprocal(2, false) == 0x3FFFE000U);
 }
+
+namespace {
+
+// A GBI Vtx: position, flag, texture coordinates and color (or normal).
+void write_vtx(Bus& bus, std::uint32_t address, std::int16_t x, std::int16_t y, std::int16_t z, std::int16_t s = 0,
+               std::int16_t t = 0, std::uint32_t rgba = 0xFFFFFFFF) {
+    bus.write32(address, (static_cast<std::uint32_t>(static_cast<std::uint16_t>(x)) << 16) | static_cast<std::uint16_t>(y));
+    bus.write32(address + 4, static_cast<std::uint32_t>(static_cast<std::uint16_t>(z)) << 16);
+    bus.write32(address + 8, (static_cast<std::uint32_t>(static_cast<std::uint16_t>(s)) << 16) | static_cast<std::uint16_t>(t));
+    bus.write32(address + 12, rgba);
+}
+
+constexpr std::uint32_t kMatrix = 0x300000, kVertices = 0x301000, kViewport = 0x302000, kLights = 0x303000;
+
+// 320x240 viewport, the libultra way: scale and translation in quarter pixels.
+void write_viewport(Bus& bus) {
+    const std::int16_t vp[8] = {640, 480, 511, 0, 640, 480, 511, 0};
+    for (unsigned i = 0; i < 8; i += 2) {
+        bus.write32(kViewport + i * 2, (static_cast<std::uint32_t>(static_cast<std::uint16_t>(vp[i])) << 16) |
+                                           static_cast<std::uint16_t>(vp[i + 1]));
+    }
+}
+
+// Display list prologue: identity projection and modelview, the viewport.
+std::vector<std::uint64_t> camera_dl() {
+    return {
+        dl_cmd(0x01030040, kMatrix),  // G_MTX projection | load
+        dl_cmd(0x01020040, kMatrix),  // G_MTX modelview | load
+        dl_cmd(0x03800010, kViewport),  // G_MOVEMEM viewport
+    };
+}
+
+void write_dl(Bus& bus, std::uint32_t address, const std::vector<std::uint64_t>& commands) {
+    for (const auto command : commands) bus.write64(address, command), address += 8;
+}
+
+// G_VTX (F3DEX): first index * 2 in bits 23:16, count in bits 15:10, byte length - 1 below.
+constexpr std::uint64_t g_vtx(unsigned first, unsigned count, std::uint32_t address) {
+    return dl_cmd(0x04000000U | ((first * 2) << 16) | (count << 10) | (count * 16 - 1), address);
+}
+
+}  // namespace
+
+TEST_CASE("G_VTX transforms through modelview, projection and viewport") {
+    const auto n64 = N64::create(counting_rom("HLE VTX"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    write_mtx(bus, kMatrix, kIdentity);
+    write_viewport(bus);
+    write_vtx(bus, kVertices, 0, 0, 0);
+    write_vtx(bus, kVertices + 16, 0, 1, 0);   // top of the view volume
+    write_vtx(bus, kVertices + 32, -1, 0, 0);  // left edge
+    auto dl = camera_dl();
+    dl.push_back(g_vtx(0, 3, kVertices));
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    F3dex f3dex;
+    REQUIRE(f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi()).ok);
+    CHECK(f3dex.vertex(0).x == 160 * 4);
+    CHECK(f3dex.vertex(0).y == 120 * 4);
+    CHECK(f3dex.vertex(1).y == 0);       // screen Y grows downward
+    CHECK(f3dex.vertex(2).x == 0);
+    CHECK(f3dex.vertex(0).w == fx(1));
+}
+
+TEST_CASE("G_VTX lighting with one directional light and ambient") {
+    const auto n64 = N64::create(counting_rom("HLE LIGHT"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    write_mtx(bus, kMatrix, kIdentity);
+    write_viewport(bus);
+    // Light 1: color (0x80, 0x40, 0x20), direction +Z (s8 127). Ambient: (0x10, 0x10, 0x10).
+    bus.write32(kLights, 0x80402000), bus.write32(kLights + 4, 0x80402000);
+    bus.write32(kLights + 8, 0x00007F00), bus.write32(kLights + 12, 0);
+    bus.write32(kLights + 16, 0x10101000), bus.write32(kLights + 20, 0x10101000);
+    write_vtx(bus, kVertices, 0, 0, 0, 0, 0, 0x00007FFF);  // normal +Z, alpha 0xFF
+    write_vtx(bus, kVertices + 16, 0, 0, 0, 0, 0, 0x000081FF);  // normal -Z: ambient only
+    auto dl = camera_dl();
+    dl.push_back(dl_cmd(0xBC000002, 0x80000040));  // G_MW_NUMLIGHT: one light (NUML(1) = 2 * 32)
+    dl.push_back(dl_cmd(0x03860010, kLights));      // G_MV_L0
+    dl.push_back(dl_cmd(0x03880010, kLights + 16));  // G_MV_L1: the ambient for one light
+    dl.push_back(dl_cmd(0xB7000000, 0x00020000));    // G_SETGEOMETRYMODE G_LIGHTING
+    dl.push_back(g_vtx(0, 2, kVertices));
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    F3dex f3dex;
+    REQUIRE(f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi()).ok);
+    const auto& lit = f3dex.vertex(0);
+    CHECK(lit.r >= 0x8E);  // ambient + nearly all of the light (127/128)
+    CHECK(lit.r <= 0x90);
+    CHECK(lit.g >= 0x4E);
+    CHECK(lit.b >= 0x2E);
+    CHECK(lit.a == 0xFF);
+    const auto& dark = f3dex.vertex(1);
+    CHECK(dark.r == 0x10);
+    CHECK(dark.g == 0x10);
+    CHECK(dark.b == 0x10);
+}
+
+TEST_CASE("G_VTX sets clip flags outside the guard band and behind the camera") {
+    const auto n64 = N64::create(counting_rom("HLE CLIPFLAGS"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    std::array<std::int32_t, 16> projection = kIdentity;
+    projection[11] = fx(-1), projection[15] = 0, projection[14] = 0;  // w = -z: looking down -Z
+    write_mtx(bus, kMatrix, projection);
+    write_mtx(bus, kMatrix + 64, kIdentity);
+    write_viewport(bus);
+    write_vtx(bus, kVertices, 0, 0, -10);       // in front, centered
+    write_vtx(bus, kVertices + 16, 100, 0, -10);  // far to the right: x/w = 10 > clip ratio 2
+    write_vtx(bus, kVertices + 32, 0, 0, 10);     // behind the camera: w < 0
+    const std::vector<std::uint64_t> dl = {
+        dl_cmd(0x01030040, kMatrix), dl_cmd(0x01020040, kMatrix + 64), dl_cmd(0x03800010, kViewport),
+        dl_cmd(0xBC000004, 2),  // G_MW_CLIP ratio 2 (written to all four planes by gSPClipRatio)
+        g_vtx(0, 3, kVertices), kEndDl,
+    };
+    write_dl(bus, kDisplayList, dl);
+    F3dex f3dex;
+    REQUIRE(f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi()).ok);
+    CHECK(f3dex.vertex(0).clip == 0);
+    CHECK((f3dex.vertex(1).clip & F3dex::kClipPosX) != 0);
+    CHECK((f3dex.vertex(2).clip & F3dex::kClipNear) != 0);
+}
+
+TEST_CASE("G_VTX with W = 0 does not divide by zero") {
+    const auto n64 = N64::create(counting_rom("HLE W0"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    std::array<std::int32_t, 16> projection = kIdentity;
+    projection[15] = 0;  // w = 0 for every vertex
+    write_mtx(bus, kMatrix, projection);
+    write_mtx(bus, kMatrix + 64, kIdentity);
+    write_viewport(bus);
+    write_vtx(bus, kVertices, 5, 5, 5);
+    write_dl(bus, kDisplayList, {dl_cmd(0x01030040, kMatrix), dl_cmd(0x01020040, kMatrix + 64),
+                                 dl_cmd(0x03800010, kViewport), g_vtx(0, 1, kVertices), kEndDl});
+    F3dex f3dex;
+    CHECK(f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi()).ok);
+    CHECK((f3dex.vertex(0).clip & F3dex::kClipNear) != 0);
+}
