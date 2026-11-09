@@ -86,6 +86,7 @@ private:
     void execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram);
     [[nodiscard]] bool can_fill() const;
     void fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const;
+    void draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const;
     void draw_triangle(std::span<std::uint8_t> rdram) const;
     void fill_span(unsigned y, unsigned left, unsigned right, std::span<std::uint8_t> rdram) const;
     [[nodiscard]] bool field_matches(unsigned y) const;

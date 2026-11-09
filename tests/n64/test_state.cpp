@@ -970,6 +970,35 @@ TEST_CASE("RDP two-cycle TEXEL1 in cycle 1 is the next pixel's TEXEL0") {
     CHECK(bus.read32(0x4008) == 0xFFFFFFE0U);
 }
 
+TEST_CASE("RDP one-cycle fill rectangle goes through the combiner and blender") {
+    const auto n64 = N64::create(counting_rom("RDP FLAT RECT"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    for (std::uint32_t at = 0x4000; at < 0x4020; at += 4) bus.write32(at, 0xFFFFFFFF);  // white
+    const std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        rdp_rectangle(0x2D, 0, 0, 8, 4),
+        // P = COMBINED * combined alpha + MEMORY * (1 - A), image read, force blend.
+        (0x2FULL << 56) | (3ULL << 38) | 0x00504240ULL,
+        set_combine({15, 15, 31, 3, 7, 7, 7, 3}, {15, 15, 31, 3, 7, 7, 7, 3}),  // RGBA = PRIM
+        0x3A00000000000080ULL,                 // black at half alpha: a fade
+        rdp_rectangle(0x36, 4, 1, 0, 0),       // x 0..4, y 0..1, lower-right edge excluded
+        kSyncFull,
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 20; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    // A = 0x80 >> 3 = 16: half black, half white memory.
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read32(0x4000 + 4 * x) == 0x7F7F7FE0U);
+    }
+    CHECK(bus.read32(0x4010) == 0xFFFFFFFFU);  // x = 4 is outside
+}
+
 TEST_CASE("RDP combiner multiplies a texel by its own alpha") {
     const auto n64 = N64::create(counting_rom("RDP COMBINER TEXEL ALPHA"));
     REQUIRE(n64);

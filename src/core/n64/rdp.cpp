@@ -321,6 +321,10 @@ bool Rdp::can_fill() const {
 }
 
 void Rdp::fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const {
+    if (cycle_type_ <= 1) {
+        draw_flat_rectangle(word, rdram);
+        return;
+    }
     if (!can_fill()) return;
     // Fill includes the lower-right pixel, while the scissor limit is exclusive.
     const unsigned left = ceil_pixel(std::max(coordinate(word, 12), coordinate(scissor_, 44)));
@@ -329,6 +333,40 @@ void Rdp::fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) cons
     const unsigned bottom = std::min((coordinate(word, 32) >> 2) + 1, ceil_pixel(coordinate(scissor_, 0)));
     if (left >= right || top >= bottom) return;
     for (unsigned y = top; y < bottom; ++y) fill_span(y, left, right, rdram);
+}
+
+void Rdp::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const {
+    // In one- and two-cycle modes, Fill Rectangle goes through the combiner and blender like a
+    // rectangle with no texture or shade, excluding its lower-right edge. Depth, if enabled,
+    // can only come from the primitive depth.
+    const bool prim_depth = (solid_.modes & (1U << 2)) != 0;
+    if (!can_write_opaque(prim_depth)) return;
+    const unsigned left = std::max(coordinate(word, 12), coordinate(scissor_, 44));
+    const unsigned top = std::max(coordinate(word, 0), coordinate(scissor_, 32));
+    const unsigned right = std::min(coordinate(word, 44), coordinate(scissor_, 12));
+    const unsigned bottom = std::min(coordinate(word, 32), coordinate(scissor_, 0));
+    if (left >= right || top >= bottom) return;
+    const bool antialias = (solid_.modes & (1U << 3)) != 0;
+    const bool use_depth = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
+    const std::uint32_t z = ((prim_depth_ >> 16) & 0x7FFF) << 3;
+    const unsigned dz = highest_power_of_two(prim_depth_ & 0xFFFF);
+    const auto covers_x = [left, right](unsigned sample) { return left <= sample && sample < right; };
+    const Rgba color = combine(Rgba{}, Rgba{}, Rgba{});
+    for (unsigned y = top >> 2; 4 * y < bottom; ++y) {
+        if (!field_matches(y)) continue;
+        for (unsigned x = left >> 2; 4 * x < right; ++x) {
+            if (!antialias && (4 * y < top || !covers_x(4 * x))) continue;
+            unsigned coverage = 0;
+            for (unsigned sub = std::max(4 * y, top); sub < std::min(4 * y + 4, bottom); ++sub) {
+                const unsigned sample = 4 * x + (sub & 1);
+                coverage += covers_x(sample);
+                coverage += covers_x(sample + 2);
+            }
+            if (coverage == 0) continue;
+            if (use_depth && !depth_test(x, y, z, dz, coverage, rdram)) continue;
+            if (write_opaque_pixel(x, y, color, Rgba{}, coverage, rdram) && use_depth) write_depth(x, y, z, dz, rdram);
+        }
+    }
 }
 
 void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
