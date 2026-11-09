@@ -32,6 +32,7 @@ using ezy::frontend::System;
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 constexpr double kMaxCatchUpSeconds = 0.25;  // avoid a "spiral of death" after a stall
+constexpr int kMaxFramesPerRender = 2;
 
 std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
     std::ifstream file(path, std::ios::binary);
@@ -125,7 +126,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
         return 1;
     }
@@ -184,6 +185,16 @@ int main(int argc, char* argv[]) {
                         running = false;
                     }
                     system->handle_key(event.key.scancode, down);
+                } else if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
+                    // Opened gamepads stay open until SDL_Quit; SDL closes them then.
+                    if (SDL_Gamepad* pad = SDL_OpenGamepad(event.gdevice.which)) {
+                        std::cerr << "Gamepad connected: " << SDL_GetGamepadName(pad) << '\n';
+                    }
+                } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+                    system->handle_gamepad_button(static_cast<SDL_GamepadButton>(event.gbutton.button),
+                                                  event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+                } else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+                    system->handle_gamepad_axis(static_cast<SDL_GamepadAxis>(event.gaxis.axis), event.gaxis.value);
                 }
             }
 
@@ -203,10 +214,13 @@ int main(int argc, char* argv[]) {
                 run.step_instruction = run.step_frame = false;
                 accumulator = 0.0;
             } else {
-                while (accumulator >= frame_seconds) {
+                // At most a couple of frames per render: when the emulator is slower than real
+                // time, it slows the game down instead of showing one frame out of many.
+                for (int frames = 0; accumulator >= frame_seconds && frames < kMaxFramesPerRender; ++frames) {
                     system->run_frame();
                     accumulator -= frame_seconds;
                 }
+                if (accumulator >= frame_seconds) accumulator = 0.0;
             }
             if (own_audio) {
                 if (run.paused) {
