@@ -26,13 +26,17 @@ F3dex::Result F3dex::run_task(const OsTask& task, GfxUcode ucode, std::span<std:
     geometry_mode_ = 0;
     num_lights_ = 0;
     clip_ratio_ = 2;
+    // The defaults in F3DEX 0.95's data segment: one red light (the ambient while no
+    // directional light is set) and the texture-generation axes.
+    lights_ = {};
+    lights_[0].color = {0xFF, 0x00, 0x00};
+    lookat_ = {std::array<std::int8_t, 3>{0x7F, 0, 0}, std::array<std::int8_t, 3>{0, 0x7F, 0}};
     other_mode_h_ = kInitialOtherModeH;
     other_mode_l_ = 0;
     dl_depth_ = 0;
     ended_ = false;
     out_.clear();
     pc_ = task.data_ptr & 0xFFFFF8;
-
     bool ok = true;
     std::uint32_t done = 0;
     for (; done < kMaxCommands && !ended_; ++done) {

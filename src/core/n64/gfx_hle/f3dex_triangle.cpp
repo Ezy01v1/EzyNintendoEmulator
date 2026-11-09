@@ -46,15 +46,15 @@ void F3dex::draw_triangle(unsigned i0, unsigned i1, unsigned i2) {
 
     if ((v[0]->clip | v[1]->clip | v[2]->clip) & kClipNear) return;  // TEMPCLIP until Task 7
     // Winding in screen space (Y down): negative area is counter-clockwise in view, the front.
-    const double area = double(v[1]->x - v[0]->x) * (v[2]->y - v[0]->y) - double(v[2]->x - v[0]->x) * (v[1]->y - v[0]->y);
+    const double area = (v[1]->px - v[0]->px) * (v[2]->py - v[0]->py) - (v[2]->px - v[0]->px) * (v[1]->py - v[0]->py);
     if (area == 0) return;
     if ((geometry_mode_ & G_CULL_BACK) && area < 0) return;
     if ((geometry_mode_ & G_CULL_FRONT) && area > 0) return;
 
     // Top, middle, bottom by Y (stable for equal Y).
-    std::sort(std::begin(v), std::end(v), [](const ScreenVertex* a, const ScreenVertex* b) { return a->y < b->y; });
+    std::sort(std::begin(v), std::end(v), [](const ScreenVertex* a, const ScreenVertex* b) { return a->py < b->py; });
     const ScreenVertex &h = *v[0], &m = *v[1], &l = *v[2];
-    const double xh = h.x / 4.0, yh = h.y / 4.0, xm = m.x / 4.0, ym = m.y / 4.0, xl = l.x / 4.0, yl = l.y / 4.0;
+    const double xh = h.px, yh = h.py, xm = m.px, ym = m.py, xl = l.px, yl = l.py;
 
     const double dxhdy = yl != yh ? (xl - xh) / (yl - yh) : 0;
     const double dxmdy = ym != yh ? (xm - xh) / (ym - yh) : 0;
@@ -76,7 +76,7 @@ void F3dex::draw_triangle(unsigned i0, unsigned i1, unsigned i2) {
     emit((std::uint64_t{0xC0U | op} << 56) | (std::uint64_t{major_left} << 55) | (std::uint64_t{level} << 51) |
          (std::uint64_t{tile} << 48) | (static_cast<std::uint64_t>(l.y & 0x3FFF) << 32) |
          (static_cast<std::uint64_t>(m.y & 0x3FFF) << 16) | static_cast<std::uint64_t>(h.y & 0x3FFF));
-    emit(edge_word(xm, dxldy));
+    emit(edge_word(xm + dxldy * (m.y / 4.0 - ym), dxldy));  // XL at the header's (rounded) YM
     emit(edge_word(x_major, dxhdy));
     emit(edge_word(x_minor, dxmdy));
 
@@ -106,20 +106,22 @@ void F3dex::draw_triangle(unsigned i0, unsigned i1, unsigned i2) {
     if (shade) {
         const bool smooth = (geometry_mode_ & G_SHADING_SMOOTH) != 0;
         const ScreenVertex& flat = vertices_[i0 & 31];
+        // The microcode adds half a step so the RDP's truncation rounds the colors.
         const auto channel = [&](auto member) {
-            if (!smooth) return gradient(flat.*member, flat.*member, flat.*member);
-            return gradient(h.*member, m.*member, l.*member);
+            if (!smooth) return gradient(flat.*member + 0.5, flat.*member + 0.5, flat.*member + 0.5);
+            return gradient(h.*member + 0.5, m.*member + 0.5, l.*member + 0.5);
         };
         emit_block({channel(&ScreenVertex::r), channel(&ScreenVertex::g), channel(&ScreenVertex::b),
                     channel(&ScreenVertex::a)});
     }
     if (texture) {
-        // With perspective, the RDP gets S/W, T/W and 1/W (scaled so the nearest vertex is
-        // just under 1.0) and divides per pixel.
+        // With perspective, the RDP gets S/W, T/W and 1/W and divides per pixel. 1/W is scaled
+        // so the nearest vertex sits at 0x3FFF, half the range like the microcode, which leaves
+        // room for the value extrapolated to the start scanline.
         const bool perspective = (other_mode_h_ & kTexturePerspective) != 0;
         const auto inv = [](const ScreenVertex& p) { return p.w > 0 ? 65536.0 / p.w : 0.0; };
         const double max_inv = std::max({inv(h), inv(m), inv(l), 1e-9});
-        const auto w_of = [&](const ScreenVertex& p) { return perspective ? 0x7FFF * inv(p) / max_inv : 0x7FFF; };
+        const auto w_of = [&](const ScreenVertex& p) { return perspective ? 0x3FFF * inv(p) / max_inv : 0x7FFF; };
         const auto s_of = [&](const ScreenVertex& p) { return perspective ? p.s * w_of(p) / 0x8000 : p.s; };
         const auto t_of = [&](const ScreenVertex& p) { return perspective ? p.t * w_of(p) / 0x8000 : p.t; };
         const Gradient zero{};

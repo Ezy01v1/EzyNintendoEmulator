@@ -23,7 +23,7 @@ inline constexpr unsigned G_SPNOOP = 0x00, G_MTX = 0x01, G_MOVEMEM = 0x03, G_VTX
                           G_SETCIMG = 0xFF;
 inline constexpr unsigned G_MW_NUMLIGHT = 0x02, G_MW_CLIP = 0x04, G_MW_SEGMENT = 0x06, G_MW_FOG = 0x08,
                           G_MW_LIGHTCOL = 0x0A, G_MW_PERSPNORM = 0x0E;
-inline constexpr unsigned G_MV_VIEWPORT = 0x80, G_MV_L0 = 0x86, G_MV_L7 = 0x94;
+inline constexpr unsigned G_MV_VIEWPORT = 0x80, G_MV_LOOKATY = 0x82, G_MV_LOOKATX = 0x84, G_MV_L0 = 0x86, G_MV_L7 = 0x94;
 inline constexpr std::uint32_t G_MTX_PROJECTION = 0x01, G_MTX_LOAD = 0x02, G_MTX_PUSH = 0x04;
 inline constexpr std::uint32_t G_ZBUFFER = 0x1, G_SHADE = 0x4, G_SHADING_SMOOTH = 0x200, G_CULL_FRONT = 0x1000,
                                G_CULL_BACK = 0x2000, G_FOG = 0x10000, G_LIGHTING = 0x20000,
@@ -41,6 +41,7 @@ public:
     // A vertex after G_VTX: what triangle setup needs.
     struct ScreenVertex {
         std::int32_t x = 0, y = 0;  // screen position in quarter pixels (10.2)
+        double px = 0, py = 0;      // the same in pixels, unrounded (triangle setup uses these)
         std::int32_t z = 0;         // screen depth, s15.16
         std::int32_t w = 0;         // clip-space W, s15.16
         std::uint32_t inv_w = 0;    // VRCP of W
@@ -93,12 +94,15 @@ private:
     void load_matrix(std::uint32_t w0, std::uint32_t address, std::span<const std::uint8_t> rdram);
     void move_memory(unsigned index, std::uint32_t address, std::span<const std::uint8_t> rdram);
     [[nodiscard]] std::array<std::uint8_t, 3> light_vertex(std::array<std::int8_t, 3> normal) const;
+    // The normal in view space (modelview 3x3), normalized; for texture generation.
+    [[nodiscard]] std::array<double, 3> view_normal(std::array<std::int8_t, 3> normal) const;
 
     Mtx projection_{}, mvp_{};
     std::array<Mtx, kMatrixStackDepth> modelview_{};
     unsigned modelview_depth_ = 0;  // index of the current modelview
     std::array<std::int16_t, 4> viewport_scale_{}, viewport_translate_{};
     std::array<Light, 8> lights_{};
+    std::array<std::array<std::int8_t, 3>, 2> lookat_{};  // G_TEXTURE_GEN axes (X, Y)
     unsigned num_lights_ = 0;  // directional lights; the ambient follows them
     std::uint32_t geometry_mode_ = 0;
     std::uint16_t texture_scale_s_ = 0, texture_scale_t_ = 0;
