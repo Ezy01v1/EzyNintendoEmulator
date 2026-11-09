@@ -1,10 +1,11 @@
-#pragma once
+﻿#pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
-#include <map>
 #include <optional>
 #include <span>
+#include <vector>
 
 #include "n64/mi.hpp"
 #include "n64/scheduler.hpp"
@@ -49,22 +50,27 @@ public:
         if (version >= 10) ar(key_gb_), ar(key_r_), ar(noise_state_), ar(convert_), ar(prim_lod_);
         else key_gb_ = 0, key_r_ = 0, noise_state_ = 1, convert_ = 0, prim_lod_ = 0;
         if (version >= 11) {
-            auto count = static_cast<std::uint32_t>(hidden_.size());
+            // Saved sparse: the count of nonzero halfwords, then (index, bits) in index order.
+            auto count = static_cast<std::uint32_t>(
+                std::count_if(hidden_.begin(), hidden_.end(), [](std::uint8_t bits) { return bits != 0; }));
             ar(count);
             if constexpr (Ar::kLoading) {
-                hidden_.clear();
+                std::fill(hidden_.begin(), hidden_.end(), std::uint8_t{0});
                 for (std::uint32_t i = 0; i < count; ++i) {
                     std::uint32_t halfword = 0;
                     std::uint8_t bits = 0;
                     ar(halfword), ar(bits);
-                    if (bits > 3) ar.fail();
-                    else if (bits != 0) hidden_[halfword] = bits;
+                    if (bits > 3 || halfword >= hidden_.size()) ar.fail();
+                    else hidden_[halfword] = bits;
                 }
             } else {
-                for (auto [halfword, bits] : hidden_) ar(halfword), ar(bits);
+                for (std::uint32_t halfword = 0; halfword < hidden_.size(); ++halfword) {
+                    std::uint8_t bits = hidden_[halfword];
+                    if (bits != 0) ar(halfword), ar(bits);
+                }
             }
         } else {
-            hidden_.clear();
+            std::fill(hidden_.begin(), hidden_.end(), std::uint8_t{0});
         }
     }
 
@@ -162,9 +168,9 @@ private:
     std::uint64_t convert_ = 0;   // Set Convert: K0..K5, 9 bits each
     std::uint32_t prim_lod_ = 0;  // Set Primitive Color: min level and LOD fraction
     mutable std::uint32_t noise_state_ = 1;
-    // RDRAM hidden bits (two per halfword), kept sparse: only nonzero entries, keyed by
-    // halfword index. Only depth writes set them; fills clear them.
-    mutable std::map<std::uint32_t, std::uint8_t> hidden_;  // combiner noise generator, advanced per pixel
+    // RDRAM hidden bits (two per halfword of the 8 MB), one byte per halfword. Only depth
+    // writes set them; fills clear them.
+    mutable std::vector<std::uint8_t> hidden_ = std::vector<std::uint8_t>(4 * 1024 * 1024, 0);  // combiner noise generator, advanced per pixel
     SolidState solid_;
     TextureState texture_;
 };

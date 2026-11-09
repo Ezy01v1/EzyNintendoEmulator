@@ -577,8 +577,10 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
     // Fills clear the hidden bits they cover. Hardware copies each halfword's low bit into them;
     // only depth reads use them here, and depth clears (0xFFFC) have that bit clear.
     if (first < end) {
-        hidden_.erase(hidden_.lower_bound(static_cast<std::uint32_t>(first >> 1)),
-                      hidden_.lower_bound(static_cast<std::uint32_t>((end + 1) >> 1)));
+        const std::size_t from = std::min(first >> 1, hidden_.size());
+        const std::size_t to = std::min((end + 1) >> 1, hidden_.size());
+        std::fill(hidden_.begin() + static_cast<std::ptrdiff_t>(from), hidden_.begin() + static_cast<std::ptrdiff_t>(to),
+                  std::uint8_t{0});
     }
 }
 
@@ -819,14 +821,13 @@ bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsig
 }
 
 unsigned Rdp::hidden_bits(std::size_t address) const {
-    const auto found = hidden_.find(static_cast<std::uint32_t>(address >> 1));
-    return found == hidden_.end() ? 0 : found->second;
+    const std::size_t index = address >> 1;
+    return index < hidden_.size() ? hidden_[index] : 0;
 }
 
 void Rdp::set_hidden_bits(std::size_t address, unsigned bits) const {
-    const auto key = static_cast<std::uint32_t>(address >> 1);
-    if (bits & 3) hidden_[key] = static_cast<std::uint8_t>(bits & 3);
-    else hidden_.erase(key);
+    const std::size_t index = address >> 1;
+    if (index < hidden_.size()) hidden_[index] = static_cast<std::uint8_t>(bits & 3);
 }
 
 void Rdp::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const {
