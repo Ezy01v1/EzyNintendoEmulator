@@ -7,6 +7,7 @@ namespace ezy::n64 {
 namespace {
 
 constexpr int kConnectedPorts = 1;  // one standard controller in port 0, no pak
+constexpr int kEepromChannel = 4;
 
 }  // namespace
 
@@ -41,7 +42,9 @@ void Pif::run_commands() {
         if (resp + rx_len > 63) break;
         const std::uint8_t cmd = tx_len > 0 ? ram_[data] : 0xFF;
 
-        if (channel >= kConnectedPorts) {
+        if (channel == kEepromChannel) {
+            run_eeprom(cmd, data, tx_len, resp, rx_len, rx_byte);
+        } else if (channel >= kConnectedPorts) {
             rx_byte |= 0x80;  // no device
         } else if ((cmd == 0x00 || cmd == 0xFF) && rx_len >= 3) {  // status
             ram_[resp] = 0x05;      // standard controller
@@ -54,10 +57,27 @@ void Pif::run_commands() {
             ram_[resp + 2] = static_cast<std::uint8_t>(stick_[p * 2]);
             ram_[resp + 3] = static_cast<std::uint8_t>(stick_[p * 2 + 1]);
         } else {
-            rx_byte |= 0x80;  // pak, EEPROM, ... not emulated yet
+            rx_byte |= 0x80;  // controller paks are not emulated yet
         }
         i = resp + rx_len;
         ++channel;
+    }
+}
+
+void Pif::run_eeprom(std::uint8_t cmd, std::size_t data, std::size_t tx_len, std::size_t resp, std::size_t rx_len,
+                     std::uint8_t& rx_byte) {
+    constexpr std::size_t kBlocks = 64;  // 4 Kbit
+    if ((cmd == 0x00 || cmd == 0xFF) && rx_len >= 3) {  // status: 4 Kbit, idle
+        ram_[resp] = 0x00, ram_[resp + 1] = 0x80, ram_[resp + 2] = 0x00;
+    } else if (cmd == 0x04 && tx_len >= 2 && rx_len >= 8) {  // read a block
+        const std::size_t block = (ram_[data + 1] % kBlocks) * 8;
+        for (std::size_t k = 0; k < 8; ++k) ram_[resp + k] = eeprom_[block + k];
+    } else if (cmd == 0x05 && tx_len >= 10 && rx_len >= 1) {  // write a block
+        const std::size_t block = (ram_[data + 1] % kBlocks) * 8;
+        for (std::size_t k = 0; k < 8; ++k) eeprom_[block + k] = ram_[data + 2 + k];
+        ram_[resp] = 0x00;  // not busy
+    } else {
+        rx_byte |= 0x80;
     }
 }
 
