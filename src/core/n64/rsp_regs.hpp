@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 
@@ -21,6 +22,12 @@ public:
     void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
     void finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when);
     void step(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when);
+    // Called when SP_STATUS clears HALT; returning true means the task was taken over (the
+    // graphics HLE) and the RSP stays halted until finish_hle_task().
+    void set_task_hook(std::function<bool(std::uint64_t when)> hook) { task_hook_ = std::move(hook); }
+    // What the microcode does at the end of a task: SIG2 (task done), BREAK, and the SP
+    // interrupt if it is enabled on break.
+    void finish_hle_task(Mi& mi);
     // Steps from `when` while each next one is due and before every other event (see rsp_scalar.cpp).
     std::optional<std::uint64_t> run(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when, bool stop_on_line);
 
@@ -78,6 +85,7 @@ private:
     std::uint32_t next_pc_ = 4;  // a branch sets the PC after its delay slot
     bool short_step_ = false;   // alternate 2 and 1 CPU cycles per RSP cycle
     RspVector vector_;
+    std::function<bool(std::uint64_t)> task_hook_;  // wiring, not state
 };
 
 }  // namespace ezy::n64

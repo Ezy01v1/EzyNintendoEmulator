@@ -9,6 +9,7 @@
 #include "n64/ai.hpp"
 #include "n64/cartridge.hpp"
 #include "n64/cpu/cpu_bus.hpp"
+#include "n64/gfx_hle/f3dex.hpp"
 #include "n64/mi.hpp"
 #include "n64/pi.hpp"
 #include "n64/pif.hpp"
@@ -50,6 +51,7 @@ public:
     void handle_event(EventType type, std::uint64_t when);
     // The RspStep event, without the dispatch (the step loop's fast path).
     void rsp_step(std::uint64_t when) { rsp_.step(mi_, rdp_, scheduler_, when); }
+    void set_hle_gfx(bool enabled) { hle_gfx_ = enabled; }
     std::optional<std::uint64_t> rsp_run(std::uint64_t when, bool stop_on_line) {
         return rsp_.run(mi_, rdp_, scheduler_, when, stop_on_line);
     }
@@ -104,6 +106,10 @@ private:
     Pi pi_;
     RspRegs rsp_;
     Rdp rdp_;
+    F3dex f3dex_;
+    bool hle_gfx_ = false;  // a setting, not saved
+    // The RSP was just started: runs the task in C++ when it is a graphics task the HLE knows.
+    bool start_hle_task(std::uint64_t when);
     Vi vi_;
     Si si_;
     Pif pif_;

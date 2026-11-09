@@ -73,9 +73,19 @@ void RspRegs::write_status(std::uint32_t value, Mi& mi, Scheduler& scheduler, st
     if (sp_status_ & kHalt) {
         scheduler.cancel(EventType::RspStep);
     } else if (was_halted) {
+        if (task_hook_ && task_hook_(when)) {
+            sp_status_ |= kHalt;  // the HLE runs the task; the RSP itself stays stopped
+            return;
+        }
         short_step_ = true;
         scheduler.schedule(EventType::RspStep, when + 2);
     }
+}
+
+void RspRegs::finish_hle_task(Mi& mi) {
+    constexpr std::uint32_t kSignal2 = 1U << 9;  // libultra's SP_STATUS_TASKDONE
+    sp_status_ |= kHalt | kBroke | kSignal2;
+    if (sp_status_ & kInterruptOnBreak) mi.raise(MiInterrupt::Sp);
 }
 
 void RspRegs::start_dma(Scheduler& scheduler, std::uint64_t when) {

@@ -18,6 +18,7 @@ enum class EventType : std::uint8_t {
     SpDma,   // an SP DMA row finishes
     RspStep, // the RSP executes one instruction
     RdpWord, // the RDP consumes a word from its command stream
+    GfxHleDone,  // a graphics task run by the HLE finishes (state version 12+)
     Count,
 };
 
@@ -97,7 +98,8 @@ public:
         ar(now_);
         // Version 1 predates SP execution; versions 2 and 3 predate DP execution.
         const std::size_t count = version == 1 ? index(EventType::SpDma)
-                                  : version < 4 ? index(EventType::RdpWord) : slots_.size();
+                                  : version < 4 ? index(EventType::RdpWord)
+                                  : version < 12 ? index(EventType::GfxHleDone) : slots_.size();
         for (std::size_t i = 0; i < count; ++i) ar(slots_[i]);
         for (std::size_t i = count; i < slots_.size(); ++i) slots_[i] = {};
         next_ = 0;  // recomputed by the next pop_due

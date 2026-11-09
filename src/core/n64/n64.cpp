@@ -11,7 +11,7 @@ namespace ezy::n64 {
 namespace {
 
 constexpr std::uint32_t kStateMagic = 0x364E5A45;  // "EZN6"
-constexpr std::uint32_t kStateVersion = 11;          // bump whenever a serialize() changes
+constexpr std::uint32_t kStateVersion = 12;          // bump whenever a serialize() changes
 constexpr std::uint32_t kFirstStateVersion = 1;
 constexpr std::size_t kPifRomSize = 1984;
 // A field is at most this many instructions even if the VI is misprogrammed.

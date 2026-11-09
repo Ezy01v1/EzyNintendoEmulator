@@ -43,6 +43,8 @@ public:
     [[nodiscard]] std::uint64_t cycles() const { return scheduler_.now(); }
     // The RDP draws on its own thread (faster, but no longer cycle-exact: see Rdp).
     void set_threaded_rdp(bool threaded) { bus_.rdp().set_threaded(threaded); }
+    // F3DEX/F3DLX 0.95 graphics tasks run in C++ instead of on the RSP (faster; see gfx_hle/).
+    void set_hle_gfx(bool enabled) { bus_.set_hle_gfx(enabled); }
     // The picture once all submitted drawing has landed.
     [[nodiscard]] Vi::Image image() {
         bus_.rdp().sync();

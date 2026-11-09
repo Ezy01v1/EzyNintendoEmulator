@@ -25,6 +25,20 @@ Bus::Bus(Scheduler& scheduler, const Cartridge& cart) : scheduler_(scheduler), c
     ai_.set_region(cart.region());
     vi_.start(scheduler_);
     set_direct_ram(rdram_.data(), kRdramSize);
+    rsp_.set_task_hook([this](std::uint64_t when) { return start_hle_task(when); });
+}
+
+bool Bus::start_hle_task(std::uint64_t when) {
+    if (!hle_gfx_) return false;
+    const OsTask task = read_os_task(rsp_.dmem());
+    if (task.type != kOsTaskGraphics) return false;
+    const GfxUcode ucode = identify_gfx_ucode(task, rdram_);
+    if (ucode == GfxUcode::Unknown) return false;
+    const F3dex::Result result = f3dex_.run_task(task, ucode, rdram_, rdp_, mi_);
+    // The RSP needs time for the task: finish it later, as the microcode's BREAK would.
+    constexpr std::uint64_t kTaskOverheadCycles = 2000;
+    scheduler_.schedule(EventType::GfxHleDone, when + kTaskOverheadCycles + result.work);
+    return true;
 }
 
 std::uint8_t* Bus::memory(std::uint32_t paddr) {
@@ -176,6 +190,7 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         case EventType::SpDma: rsp_.finish_dma_row(scheduler_, rdram_, when); break;
         case EventType::RspStep: rsp_.step(mi_, rdp_, scheduler_, when); break;
         case EventType::RdpWord: rdp_.step(mi_, scheduler_, rdram_, rsp_.dmem(), when); break;
+        case EventType::GfxHleDone: rsp_.finish_hle_task(mi_); break;
         default: break;
     }
 }
