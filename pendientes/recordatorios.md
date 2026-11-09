@@ -160,6 +160,9 @@ decisiones importantes también están aquí). El usuario eligió **alta precisi
   Revisión final hecha (sin críticos; 2 importantes corregidos). Menores sin corregir: el gancho de tareas también
   salta si la CPU ejecuta el RSP paso a paso con un OSTask viejo; `G_LOAD_UCODE` no traduce el segmento de la
   dirección de datos; `DPC_STATUS` queda "ocupado" tras una lista HLE sin Sync Full.
+- **Al retomar:** el usuario probó MK64 en ezyemu (HLE + RDP en hilo) y "sigue sin verse bien". Preguntarle qué ve
+  (pantalla, momento) y comparar con `EZY` sin HLE. Sospechas: diferencias de la HLE (cielo/zonas blancas vistas en
+  la demo a dos jugadores), el Sync Full sin espera (tearing) o la imagen leída por el frontend sin `sync()`.
 - **EEPROM de 4 Kbit emulada en el PIF (canal 4)**: sin ella MK64 dejaba de leer el mando tras el arranque
   (las teclas no hacían nada en ningún modo; el error existía desde antes). Se guarda en los save states (v12),
   pero **todavía no en disco**: los récords se pierden al cerrar. Pendiente: archivo `.eep` junto a la ROM.
