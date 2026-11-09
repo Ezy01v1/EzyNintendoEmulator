@@ -39,7 +39,10 @@ public:
     }
 
     // Replaces any pending event of the same type.
-    void schedule(EventType type, std::uint64_t when) { slots_[index(type)] = {true, when}; }
+    void schedule(EventType type, std::uint64_t when) {
+        slots_[index(type)] = {true, when};
+        if (when < next_) next_ = when;
+    }
     void schedule_in(EventType type, std::uint64_t cycles) { schedule(type, now_ + cycles); }
     void cancel(EventType type) { slots_[index(type)].active = false; }
     [[nodiscard]] bool pending(EventType type) const { return slots_[index(type)].active; }
@@ -50,7 +53,11 @@ public:
     // Removes and returns the earliest event with when <= now(). Ties go to the lower
     // EventType, so the order is deterministic. Handlers should reschedule relative to
     // Due::when (not now()) so lateness never accumulates.
-    [[nodiscard]] std::optional<Due> pop_due();
+    // Called after every CPU instruction, so the common "nothing due" case is a single compare.
+    [[nodiscard]] std::optional<Due> pop_due() {
+        if (now_ < next_) return std::nullopt;
+        return pop_due_slow();
+    }
 
     // Save-state contents (state.hpp). The ROM, BIOS and wiring are not part of it.
     template <class Ar>
@@ -61,6 +68,7 @@ public:
                                   : version < 4 ? index(EventType::RdpWord) : slots_.size();
         for (std::size_t i = 0; i < count; ++i) ar(slots_[i]);
         for (std::size_t i = count; i < slots_.size(); ++i) slots_[i] = {};
+        next_ = 0;  // recomputed by the next pop_due
     }
 
 private:
@@ -73,8 +81,13 @@ private:
 
     static constexpr std::size_t index(EventType type) { return static_cast<std::size_t>(type); }
 
+    [[nodiscard]] std::optional<Due> pop_due_slow();
+
     std::uint64_t now_ = 0;
     std::array<Slot, kEventTypeCount> slots_{};
+    // A lower bound on the earliest active event (never later than it). schedule() lowers it;
+    // cancelling or rescheduling later may leave it early, which only costs one slow scan.
+    std::uint64_t next_ = 0;
 };
 
 }  // namespace ezy::n64

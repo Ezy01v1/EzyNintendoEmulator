@@ -16,6 +16,16 @@ else()
     target_compile_options(ezy_warnings INTERFACE -Wall -Wextra -Wpedantic -Wconversion)
 endif()
 
+# Release: link-time optimization, so small hot functions inline across files (the N64 CPU
+# loop calls into COP0, the scheduler and the bus every instruction).
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+
+# Release builds keep debug info (PDB) so profilers can name functions.
+if(MSVC)
+    add_compile_options($<$<CONFIG:Release>:/Zi>)
+    add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+endif()
+
 include(FetchContent)
 
 add_subdirectory(src/core/chip8)

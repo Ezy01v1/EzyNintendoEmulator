@@ -32,6 +32,7 @@ using ezy::frontend::System;
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 constexpr double kMaxCatchUpSeconds = 0.25;  // avoid a "spiral of death" after a stall
+constexpr int kMaxFramesPerRender = 2;
 
 std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
     std::ifstream file(path, std::ios::binary);
@@ -213,10 +214,13 @@ int main(int argc, char* argv[]) {
                 run.step_instruction = run.step_frame = false;
                 accumulator = 0.0;
             } else {
-                while (accumulator >= frame_seconds) {
+                // At most a couple of frames per render: when the emulator is slower than real
+                // time, it slows the game down instead of showing one frame out of many.
+                for (int frames = 0; accumulator >= frame_seconds && frames < kMaxFramesPerRender; ++frames) {
                     system->run_frame();
                     accumulator -= frame_seconds;
                 }
+                if (accumulator >= frame_seconds) accumulator = 0.0;
             }
             if (own_audio) {
                 if (run.paused) {

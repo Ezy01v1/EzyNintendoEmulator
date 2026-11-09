@@ -1,5 +1,7 @@
 #include "n64/scheduler.hpp"
 
+#include <algorithm>
+
 namespace ezy::n64 {
 
 std::optional<std::uint64_t> Scheduler::next_event_time() const {
@@ -10,15 +12,27 @@ std::optional<std::uint64_t> Scheduler::next_event_time() const {
     return earliest;
 }
 
-std::optional<Scheduler::Due> Scheduler::pop_due() {
+std::optional<Scheduler::Due> Scheduler::pop_due_slow() {
+    // One pass finds the earliest event (ties keep the lower type) and the earliest of the
+    // rest, which becomes the exact bound once the first is popped.
+    const auto due_time = [this](std::size_t i) { return slots_[i].when; };
     std::optional<std::size_t> best;
+    std::uint64_t second = ~std::uint64_t{0};
     for (std::size_t i = 0; i < slots_.size(); ++i) {
-        const Slot& slot = slots_[i];
-        if (!slot.active || slot.when > now_) continue;
-        if (!best || slot.when < slots_[*best].when) best = i;  // strict <: ties keep the lower type
+        if (!slots_[i].active) continue;
+        if (!best || due_time(i) < due_time(*best)) {
+            if (best) second = std::min(second, due_time(*best));
+            best = i;
+        } else {
+            second = std::min(second, due_time(i));
+        }
     }
-    if (!best) return std::nullopt;
+    if (!best || due_time(*best) > now_) {
+        next_ = best ? due_time(*best) : ~std::uint64_t{0};
+        return std::nullopt;
+    }
     slots_[*best].active = false;
+    next_ = second;
     return Due{static_cast<EventType>(*best), slots_[*best].when};
 }
 
