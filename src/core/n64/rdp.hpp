@@ -28,6 +28,13 @@ public:
     void set_threaded(bool threaded);
     // Waits until all submitted drawing is in RDRAM.
     void sync();
+    // Command words that skip DPC (the graphics HLE): same framing and Sync Full handling as
+    // words fetched from RDRAM or DMEM, without touching START/END/CURRENT.
+    void submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram);
+    // When set, every command word the RDP consumes is appended here (for comparing runs).
+    void set_trace(std::vector<std::uint64_t>* trace) { trace_ = trace; }
+    // How many 64-bit words the command with this opcode (bits 61:56) takes.
+    [[nodiscard]] static unsigned words_in_command(unsigned op);
 
     Rdp() = default;
     Rdp(Rdp&&) = default;
@@ -115,6 +122,7 @@ private:
     };
     void render(const RenderJob& job);
     void submit(const RenderJob& job);
+    void consume_word(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram);
     void execute(std::uint64_t word, std::span<std::uint8_t> rdram);
     [[nodiscard]] bool can_fill() const;
     void fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const;
@@ -202,6 +210,7 @@ private:
     // The draw command being rendered (draw_command_ is the one being fetched).
     std::array<std::uint64_t, 22> render_command_{};
     std::unique_ptr<RdpWorker<RenderJob>> worker_;
+    std::vector<std::uint64_t>* trace_ = nullptr;  // not saved: a debugging aid
 };
 
 }  // namespace ezy::n64

@@ -14,7 +14,9 @@
 //       Debugging: prints the CPU's PC and Cause after each frame (default 10 frames).
 // Options, anywhere after the ROM: --pif <file> (a real PIF ROM); --threaded-rdp (draw on a
 // second thread like ezyemu: faster, not cycle-exact); --time-from <frame> (with --screenshot:
-// prints the speed from that frame on, e.g. 1500 for MK64's demo race).
+// prints the speed from that frame on, e.g. 1500 for MK64's demo race); --rdp-trace <file>
+// [--trace-from <frame>] (with --screenshot: writes every RDP command word consumed from that
+// frame on, as little-endian uint64, for tools/rdp_trace_diff).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -139,10 +141,14 @@ int main(int raw_argc, char* raw_argv[]) {
     std::vector<std::uint8_t> pif;
     bool threaded_rdp = false;
     int time_from = -1;
+    const char* trace_path = nullptr;
+    int trace_from = 0;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--threaded-rdp") == 0) threaded_rdp = true;
         else if (std::strcmp(raw_argv[i], "--time-from") == 0 && i + 1 < raw_argc) time_from = std::atoi(raw_argv[++i]);
+        else if (std::strcmp(raw_argv[i], "--rdp-trace") == 0 && i + 1 < raw_argc) trace_path = raw_argv[++i];
+        else if (std::strcmp(raw_argv[i], "--trace-from") == 0 && i + 1 < raw_argc) trace_from = std::atoi(raw_argv[++i]);
         else args.push_back(raw_argv[i]);
     }
     const int argc = static_cast<int>(args.size());
@@ -165,9 +171,18 @@ int main(int raw_argc, char* raw_argv[]) {
     if (mode == "--screenshot" && argc >= 4) {
         const int frames = argc > 4 ? std::atoi(args[4]) : 120;
         auto timed_from = std::chrono::steady_clock::now();
+        std::vector<std::uint64_t> trace;
         for (int i = 0; i < frames; ++i) {
             if (i == time_from) timed_from = std::chrono::steady_clock::now();
+            if (trace_path && i == trace_from) n64->bus().rdp().set_trace(&trace);
             n64->run_frame();
+        }
+        if (trace_path) {
+            n64->bus().rdp().sync();
+            n64->bus().rdp().set_trace(nullptr);
+            std::ofstream(trace_path, std::ios::binary)
+                .write(reinterpret_cast<const char*>(trace.data()), static_cast<std::streamsize>(trace.size() * 8));
+            std::cout << "Traced " << trace.size() << " RDP words to " << trace_path << '\n';
         }
         if (time_from >= 0 && time_from < frames) {
             const std::chrono::duration<double> spent = std::chrono::steady_clock::now() - timed_from;

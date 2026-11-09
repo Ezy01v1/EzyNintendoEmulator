@@ -163,6 +163,8 @@ unsigned dither_channel(unsigned channel, unsigned threshold) {
 
 }  // namespace
 
+unsigned Rdp::words_in_command(unsigned op) { return command_words(op & 63); }
+
 unsigned Rdp::buffered_draw_words(unsigned op) {
     switch (op) {
         case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E: case 0x0F:
@@ -242,40 +244,52 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
                std::span<const std::uint8_t, 0x1000> dmem, std::uint64_t when) {
     if ((status_ & (kFreeze | kFlush)) || current_ >= end_) return;
     update_counters(when);
-    if (words_to_skip_) {
-        --words_to_skip_;
-    } else {
-        std::uint64_t word = 0;
-        const bool xbus = (status_ & kXbus) != 0;
-        const std::size_t address = xbus ? current_ & 0xFF8 : current_;
-        const std::span<const std::uint8_t> source = xbus ? std::span<const std::uint8_t>(dmem)
-                                                          : std::span<const std::uint8_t>(rdram);
-        if (address + 8 <= source.size()) {
-            for (unsigned i = 0; i < 8; ++i) word = (word << 8) | source[address + i];
-        }
-        const unsigned op = opcode(word);
-        if (draw_words_ != 0 || buffered_draw_words(op) != 0) {
-            draw_command_[draw_words_++] = word;
-            if (draw_words_ == buffered_draw_words(opcode(draw_command_[0]))) {
-                submit({true, 0, draw_command_, rdram});
-                draw_words_ = 0;
-            }
-        } else {
-            // Preserve packet framing for unsupported commands across END extensions.
-            words_to_skip_ = command_words(op) - 1;
-            if (words_to_skip_ == 0) {
-                if (op == 0x29) {  // Sync Full: writes are complete before the CPU sees the interrupt.
-                    sync();
-                    status_ &= ~(kStartClock | kPipeBusy);
-                    mi.raise(MiInterrupt::Dp);
-                } else {
-                    submit({false, word, {}, rdram});
-                }
-            }
-        }
+    std::uint64_t word = 0;
+    const bool xbus = (status_ & kXbus) != 0;
+    const std::size_t address = xbus ? current_ & 0xFF8 : current_;
+    const std::span<const std::uint8_t> source = xbus ? std::span<const std::uint8_t>(dmem)
+                                                      : std::span<const std::uint8_t>(rdram);
+    if (address + 8 <= source.size()) {
+        for (unsigned i = 0; i < 8; ++i) word = (word << 8) | source[address + i];
     }
+    consume_word(word, mi, rdram);
     current_ += 8;
     schedule_word(scheduler, when);
+}
+
+void Rdp::submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram) {
+    if (words.empty()) return;
+    status_ |= kStartClock | kPipeBusy;  // as if the words had come through DPC
+    for (const std::uint64_t word : words) consume_word(word, mi, rdram);
+}
+
+// One command-stream word, from DPC or from the graphics HLE: packet framing, buffered draw
+// commands, and Sync Full.
+void Rdp::consume_word(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
+    if (trace_) trace_->push_back(word);
+    if (words_to_skip_) {
+        --words_to_skip_;
+        return;
+    }
+    const unsigned op = opcode(word);
+    if (draw_words_ != 0 || buffered_draw_words(op) != 0) {
+        draw_command_[draw_words_++] = word;
+        if (draw_words_ == buffered_draw_words(opcode(draw_command_[0]))) {
+            submit({true, 0, draw_command_, rdram});
+            draw_words_ = 0;
+        }
+        return;
+    }
+    // Preserve packet framing for unsupported commands across END extensions.
+    words_to_skip_ = command_words(op) - 1;
+    if (words_to_skip_ != 0) return;
+    if (op == 0x29) {  // Sync Full: writes are complete before the CPU sees the interrupt.
+        sync();
+        status_ &= ~(kStartClock | kPipeBusy);
+        mi.raise(MiInterrupt::Dp);
+    } else {
+        submit({false, word, {}, rdram});
+    }
 }
 
 // Drawing and the commands that set its state run here: on the worker thread when there is
