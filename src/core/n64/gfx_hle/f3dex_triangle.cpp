@@ -43,6 +43,7 @@ std::uint64_t edge_word(double x, double slope) {
 
 void F3dex::draw_triangle(const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c) {
     const ScreenVertex* v[3] = {&a, &b, &c};
+    ++triangles_drawn_;
 
     // Winding in screen space (Y down): negative area is counter-clockwise in view, the front.
     const double area = (v[1]->px - v[0]->px) * (v[2]->py - v[0]->py) - (v[2]->px - v[0]->px) * (v[1]->py - v[0]->py);

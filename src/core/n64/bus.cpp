@@ -38,6 +38,8 @@ bool Bus::start_hle_task(std::uint64_t when) {
     // The RSP needs time for the task: finish it later, as the microcode's BREAK would.
     constexpr std::uint64_t kTaskOverheadCycles = 2000;
     scheduler_.schedule(EventType::GfxHleDone, when + kTaskOverheadCycles + result.work);
+    // The RDP draws on after the RSP is done; its Sync Full (if the list had one) lands then.
+    scheduler_.schedule(EventType::GfxHleRdpDone, when + kTaskOverheadCycles + result.work + result.drawing);
     return true;
 }
 
@@ -191,6 +193,7 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         case EventType::RspStep: rsp_.step(mi_, rdp_, scheduler_, when); break;
         case EventType::RdpWord: rdp_.step(mi_, scheduler_, rdram_, rsp_.dmem(), when); break;
         case EventType::GfxHleDone: rsp_.finish_hle_task(mi_); break;
+        case EventType::GfxHleRdpDone: rdp_.finish_deferred_sync(mi_); break;
         default: break;
     }
 }

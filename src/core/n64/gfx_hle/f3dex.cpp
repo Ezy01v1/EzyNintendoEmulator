@@ -36,6 +36,7 @@ F3dex::Result F3dex::run_task(const OsTask& task, GfxUcode ucode, std::span<std:
     dl_depth_ = 0;
     ended_ = false;
     out_.clear();
+    vertices_loaded_ = triangles_drawn_ = 0;
     pc_ = task.data_ptr & 0xFFFFF8;
     bool ok = true;
     std::uint32_t done = 0;
@@ -52,9 +53,14 @@ F3dex::Result F3dex::run_task(const OsTask& task, GfxUcode ucode, std::span<std:
         }
     }
     if (done == kMaxCommands) ok = false;
-    rdp.submit_words(out_, mi, rdram);
+    const std::size_t words_sent = out_.size();
+    rdp.submit_words(out_, mi, rdram, /*defer_sync_full=*/true);
     out_.clear();
-    return {done, ok};
+    // Rough costs in CPU cycles. RSP: list walking, vertex transform, triangle setup (about
+    // what the microcode takes on MK64). RDP: drawing what it was sent, which ends later.
+    const std::uint32_t work = 20 * done + 150 * vertices_loaded_ + 250 * triangles_drawn_;
+    const std::uint32_t drawing = 300 * triangles_drawn_ + 50 * static_cast<std::uint32_t>(words_sent);
+    return {work, ok, drawing};
 }
 
 bool F3dex::execute(std::uint32_t w0, std::uint32_t w1, std::span<std::uint8_t> rdram) {

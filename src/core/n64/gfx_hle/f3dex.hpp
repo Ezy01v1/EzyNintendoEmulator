@@ -54,6 +54,7 @@ public:
     struct Result {
         std::uint32_t work;  // an estimate of the RSP's effort, for the task's duration
         bool ok;             // false: the list ended on an error (bad address, depth, unknown ucode)
+        std::uint32_t drawing = 0;  // an estimate of the RDP's time to draw what it got
     };
 
     Result run_task(const OsTask& task, GfxUcode ucode, std::span<std::uint8_t> rdram, Rdp& rdp, Mi& mi);
@@ -98,6 +99,7 @@ private:
     static constexpr std::uint32_t kInitialOtherModeH = 0x080CFF;
     std::uint32_t other_mode_h_ = kInitialOtherModeH, other_mode_l_ = 0;
     std::vector<std::uint64_t> out_;  // RDP words not yet handed over
+    std::uint32_t vertices_loaded_ = 0, triangles_drawn_ = 0;  // this task's work, for its duration
 
     void load_matrix(std::uint32_t w0, std::uint32_t address, std::span<const std::uint8_t> rdram);
     void move_memory(unsigned index, std::uint32_t address, std::span<const std::uint8_t> rdram);

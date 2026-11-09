@@ -134,6 +134,7 @@ std::unique_ptr<N64System> N64System::create(std::span<const std::uint8_t> rom, 
     auto n64 = n64::N64::create(rom);
     if (!n64) return nullptr;
     n64->set_threaded_rdp(true);
+    n64->set_hle_gfx(true);
     return std::unique_ptr<N64System>(new N64System({rom.begin(), rom.end()}, std::move(n64), std::move(rom_path)));
 }
 
@@ -165,7 +166,10 @@ void N64System::collect_audio() {
 
 void N64System::reset() {
     n64_ = n64::N64::create(rom_);
-    if (n64_) n64_->set_threaded_rdp(true);
+    if (n64_) {
+        n64_->set_threaded_rdp(true);
+        n64_->set_hle_gfx(true);
+    }
     resample_phase_ = 0;
     update_controller();
 }

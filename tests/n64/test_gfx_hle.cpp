@@ -679,3 +679,53 @@ TEST_CASE("G_CULLDL skips the rest of the list when all vertices are off one pla
     write_dl(bus, kDisplayList, dl);
     CHECK(run_hle(*n64).trace.empty());
 }
+
+TEST_CASE("A save state taken while a HLE task is pending finishes it once after loading") {
+    const auto n64 = N64::create(counting_rom("HLE STATE"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    n64->set_hle_gfx(true);
+    write_ucode_data(bus, "F3DEX         0.95");
+    bus.write64(kDisplayList, kEndDl);
+    write_os_task(bus, graphics_task());
+    bus.write32(kMiMask, 2);  // unmask SP
+    start_rsp(bus);
+    n64->step();  // the task has started; its end is scheduled
+    REQUIRE((bus.read32(kMiIntr) & 1) == 0);
+    const auto state = n64->save_state();
+
+    for (unsigned i = 0; i < 3000; ++i) n64->step();
+    REQUIRE((bus.read32(kMiIntr) & 1) != 0);  // finished
+    bus.write32(kSpStatus, 1U << 3);          // acknowledge the SP interrupt
+
+    REQUIRE(n64->load_state(state));
+    for (unsigned i = 0; i < 3000; ++i) n64->step();
+    CHECK((bus.read32(kMiIntr) & 1) != 0);  // finished again after loading
+    CHECK((bus.read32(kSpStatus) & (kSpHalt | kSpBroke | kSpSignal2)) == (kSpHalt | kSpBroke | kSpSignal2));
+    bus.write32(kSpStatus, 1U << 3);
+    for (unsigned i = 0; i < 3000; ++i) n64->step();
+    CHECK((bus.read32(kMiIntr) & 1) == 0);  // and only once
+}
+
+TEST_CASE("A HLE task's Sync Full raises DP when the task ends, not when it starts") {
+    const auto n64 = N64::create(counting_rom("HLE SYNCFULL"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    n64->set_hle_gfx(true);
+    write_ucode_data(bus, "F3DEX         0.95");
+    write_dl(bus, kDisplayList, {0xE900000000000000ULL, kEndDl});  // gDPFullSync
+    write_os_task(bus, graphics_task());
+    bus.write32(kMiMask, 2 | (2U << 10));  // unmask SP and DP
+    start_rsp(bus);
+    n64->step();
+    CHECK((bus.read32(kMiIntr) & (1U << 5)) == 0);  // DP not yet
+    const auto state = n64->save_state();
+    for (unsigned i = 0; i < 5000; ++i) n64->step();
+    CHECK((bus.read32(kMiIntr) & (1U << 5)) != 0);
+    CHECK((bus.read32(kMiIntr) & 1) != 0);
+
+    REQUIRE(n64->load_state(state));  // the pending Sync Full survives a save state
+    CHECK((bus.read32(kMiIntr) & (1U << 5)) == 0);
+    for (unsigned i = 0; i < 5000; ++i) n64->step();
+    CHECK((bus.read32(kMiIntr) & (1U << 5)) != 0);
+}

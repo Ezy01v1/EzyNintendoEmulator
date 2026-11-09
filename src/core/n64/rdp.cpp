@@ -257,10 +257,24 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
     schedule_word(scheduler, when);
 }
 
-void Rdp::submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram) {
+void Rdp::submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram,
+                       bool defer_sync_full) {
     if (words.empty()) return;
     status_ |= kStartClock | kPipeBusy;  // as if the words had come through DPC
+    deferring_sync_full_ = defer_sync_full;
     for (const std::uint64_t word : words) consume_word(word, mi, rdram);
+    deferring_sync_full_ = false;
+}
+
+void Rdp::finish_deferred_sync(Mi& mi) {
+    if (!pending_sync_full_) return;
+    pending_sync_full_ = false;
+    // No wait for the drawing thread here, so the emulation runs on while it draws; only a
+    // backlog of several frames' work makes it wait, so the thread never falls far behind.
+    constexpr std::size_t kMaxBacklog = 20000;
+    if (worker_ && worker_->backlog() > kMaxBacklog) sync();
+    status_ &= ~(kStartClock | kPipeBusy);
+    mi.raise(MiInterrupt::Dp);
 }
 
 // One command-stream word, from DPC or from the graphics HLE: packet framing, buffered draw
@@ -284,6 +298,10 @@ void Rdp::consume_word(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram
     words_to_skip_ = command_words(op) - 1;
     if (words_to_skip_ != 0) return;
     if (op == 0x29) {  // Sync Full: writes are complete before the CPU sees the interrupt.
+        if (deferring_sync_full_) {
+            pending_sync_full_ = true;
+            return;
+        }
         sync();
         status_ &= ~(kStartClock | kPipeBusy);
         mi.raise(MiInterrupt::Dp);

@@ -19,6 +19,7 @@ enum class EventType : std::uint8_t {
     RspStep, // the RSP executes one instruction
     RdpWord, // the RDP consumes a word from its command stream
     GfxHleDone,  // a graphics task run by the HLE finishes (state version 12+)
+    GfxHleRdpDone,  // the RDP finishes drawing a HLE task's list: its deferred Sync Full
     Count,
 };
 

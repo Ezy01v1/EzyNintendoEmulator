@@ -147,11 +147,17 @@ decisiones importantes también están aquí). El usuario eligió **alta precisi
 - [x] Task 3: recorrido de la display list; las primeras 117 órdenes al RDP coinciden con el RSP real.
 - [x] Task 4: punto fijo (`gfx_hle/fixed.hpp`), `rsp_reciprocal` público.
 - [x] Task 5: matrices, viewport, luces, niebla, `G_VTX` (división por W exacta).
-- [ ] Task 6: triángulos. Hecho: `G_TRI1/TRI2` y **`G_QUAD` (0xB5), que MK64 usa para casi todo**, bordes,
-  shade, textura, Z, culling. MK64 con `--hle-gfx` ya muestra la escena reconocible pero falta: texturas
-  grises (revisar S/T, escala de W y `G_TEXTURE_GEN`), colores/luces (sale negro donde el RSP pone rojo),
-  confirmar el sentido del culling. Hay un descarte temporal `TEMPCLIP` en `f3dex_triangle.cpp` hasta Task 7.
-- [ ] Task 7: recorte. [ ] Task 8: tiempos, save states, interruptor en ezyemu y medición.
+- [x] Task 6: triángulos (`G_TRI1/TRI2` y **`G_QUAD` 0xB5, que MK64 usa para casi todo**), luces por defecto del
+  segmento de datos (luz roja como ambiente), +0,5 en el color, `G_TEXTURE_GEN`, X/Y de pantalla sin redondear.
+  El sentido del culling quedó fijado por prueba (área > 0 en pantalla = cara trasera).
+- [x] Task 7: recorte en espacio homogéneo (guard band y plano cercano; F3DLX sin plano cercano), `G_CULLDL`.
+- [x] Task 8: duración estimada de la tarea (`GfxHleDone`) y del dibujo (`GfxHleRdpDone`), save states v12,
+  HLE activa en ezyemu y `--hle-gfx` en el runner. El `Sync Full` de la HLE **no espera** al hilo del RDP
+  (solo si hay >20 000 trabajos pendientes): era lo que impedía ganar velocidad.
+  **MK64 en carrera (cuadros 1500–1900, RDP en hilo): ~21–28 → ~35–43 cuadros/s con `--hle-gfx`** (+55–70 %).
+  En modo exacto: 18,6 → 22,4. La imagen coincide visualmente con el RSP real (no bit a bit, por decisión).
+- Pendiente: probar MK64 jugando en ezyemu con la HLE (usuario); revisión final de la rama; PR.
+  Para 60 cuadros/s falta: HLE de audio (~1/3 del RSP) y acelerar el RDP (ahora es el límite).
 - Cómo comparar: `ezy_n64_runner <mk64> --screenshot x.bmp 120 --rdp-trace a.bin` (con y sin `--hle-gfx`, desde el
   arranque: con HLE el ritmo cambia y a partir de ~cuadro 1500 ya no son la misma escena) y `rdp_trace_diff a.bin b.bin`.
 
@@ -284,3 +290,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   (F3DEX) o JIT (CPU y luego RSP).
 - 2026-11-09 — Rama `n64/rdp-thread` con RDP en hilo + spec y plan de HLE (sin PR). Rama `n64/gfx-hle`: Tasks 1–5 de la
   HLE de F3DEX hechas y Task 6 a medias (ver sección "HLE de gráficos"). Usuario eligió HLE de alta precisión.
+- 2026-11-09 — HLE de gráficos completa (Tasks 1–8, rama `n64/gfx-hle`): MK64 se ve como con el RSP real y la carrera
+  sube a ~35–43 cuadros/s (antes ~21–28). 195/195 pruebas N64, n64-systemtest 2984/3721, modo exacto idéntico.

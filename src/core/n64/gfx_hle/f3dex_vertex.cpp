@@ -111,6 +111,7 @@ void F3dex::load_vertices(std::uint32_t address, unsigned first, unsigned count,
         const std::uint32_t at = address + i * 16;
         if (at + 16 > rdram.size()) return;
         ScreenVertex& v = vertices_[first + i];
+        ++vertices_loaded_;
         const std::int16_t x = read16(rdram, at), y = read16(rdram, at + 2), z = read16(rdram, at + 4);
         const auto clip = transform(mvp_, x, y, z);
         v.clip_pos = clip;

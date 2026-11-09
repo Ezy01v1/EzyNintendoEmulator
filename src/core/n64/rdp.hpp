@@ -30,7 +30,12 @@ public:
     void sync();
     // Command words that skip DPC (the graphics HLE): same framing and Sync Full handling as
     // words fetched from RDRAM or DMEM, without touching START/END/CURRENT.
-    void submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram);
+    // With defer_sync_full (the graphics HLE), a Sync Full among them raises DP later, at
+    // finish_deferred_sync(), and without waiting for the drawing thread: the CPU keeps
+    // running while it draws (it waits only behind a backlog of several frames).
+    void submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram,
+                      bool defer_sync_full = false);
+    void finish_deferred_sync(Mi& mi);
     // When set, every command word the RDP consumes is appended here (for comparing runs).
     void set_trace(std::vector<std::uint64_t>* trace) { trace_ = trace; }
     // How many 64-bit words the command with this opcode (bits 61:56) takes.
@@ -71,6 +76,8 @@ public:
         else mask_address_ = prim_depth_ = 0;
         if (version >= 10) ar(key_gb_), ar(key_r_), ar(noise_state_), ar(convert_), ar(prim_lod_);
         else key_gb_ = 0, key_r_ = 0, noise_state_ = 1, convert_ = 0, prim_lod_ = 0;
+        if (version >= 12) ar(pending_sync_full_);
+        else pending_sync_full_ = false;
         if (version >= 11) {
             // Saved sparse: the count of nonzero halfwords, then (index, bits) in index order.
             auto count = static_cast<std::uint32_t>(
@@ -211,6 +218,8 @@ private:
     std::array<std::uint64_t, 22> render_command_{};
     std::unique_ptr<RdpWorker<RenderJob>> worker_;
     std::vector<std::uint64_t>* trace_ = nullptr;  // not saved: a debugging aid
+    bool deferring_sync_full_ = false;  // inside a deferred submit_words
+    bool pending_sync_full_ = false;    // a deferred Sync Full not finished yet
 };
 
 }  // namespace ezy::n64

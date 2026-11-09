@@ -34,6 +34,12 @@ public:
         if (batch_.size() >= kBatch) hand_over();
     }
 
+    // Jobs pushed but not run yet (an upper bound: the worker may be running some).
+    [[nodiscard]] std::size_t backlog() {
+        std::lock_guard lock(mutex_);
+        return queue_.size() + batch_.size() + in_flight_;
+    }
+
     void drain() {
         hand_over();
         std::unique_lock lock(mutex_);
@@ -63,10 +69,15 @@ private:
                 wake_.wait(lock, [this] { return stop_ || !queue_.empty(); });
                 if (queue_.empty()) return;  // stop_ with nothing left
                 work.swap(queue_);
+                in_flight_ = work.size();
                 busy_ = true;
             }
             for (const Job& job : work) run_(job);
             work.clear();
+            {
+                std::lock_guard lock(mutex_);
+                in_flight_ = 0;
+            }
         }
     }
 
@@ -76,6 +87,7 @@ private:
     std::condition_variable wake_, done_;
     std::vector<Job> queue_;
     bool busy_ = false, stop_ = false;
+    std::size_t in_flight_ = 0;  // jobs taken from the queue and being run
     std::thread thread_;  // last: starts after everything above exists
 };
 
