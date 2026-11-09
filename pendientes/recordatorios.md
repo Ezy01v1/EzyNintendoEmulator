@@ -4,7 +4,10 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-07_
+_Última actualización: 2026-11-08_
+
+> **Para retomar:** la próxima tarea es la **Etapa 1 de velocidad N64** (sección
+> "Subproyecto 4: velocidad N64" más abajo). Todo lo anterior está mergeado en `main` (PR #14).
 
 ## Estado actual
 
@@ -13,6 +16,9 @@ _Última actualización: 2026-11-07_
 - **Precisión GB**: PPU pixel-FIFO, OAM DMA, retraso de TIMA, timing de interrupciones (PR #3, mergeado). Mooneye 54 → 80 por modelo.
 - Specs y planes de diseño: `docs/superpowers/specs` y `docs/superpowers/plans`.
 - `roms/pokemon-silver.gbc` arranca y llega a la intro de Oak.
+- **N64**: CPU, RSP y RDP completos en `main` (PRs #6–#14). n64-systemtest 2984/3721.
+  **Mario Kart 64 llega a la pantalla de título** y se puede abrir en `ezyemu` con teclado o gamepad,
+  pero va a ~22 % de la velocidad real (~13 cuadros de video por segundo de 60). Falta velocidad.
 
 ## Pendientes (en este orden, antes de empezar N64)
 
@@ -45,7 +51,7 @@ Plan en 4 subproyectos (spec y plan en `docs/superpowers/`): 1 CPU+memoria+arran
         `n64-systemtest` (base 2824/3721). El timing de ejecución y DMA es aproximado.
   - [x] Unidad vectorial (COP2, acumulador de 48 bits por carril, banderas, recíproco y accesos
         vectoriales). Pasan todos los casos vectoriales de la ROM base (2977/3721 en total).
-- [ ] **Subproyecto 3: RDP**.
+- [x] **Subproyecto 3: RDP** (PRs #7–#13, mergeados).
   - [x] Interfaz DPC y listas desde RDRAM o DMEM, relleno de rectángulos con recorte e
         interrupción de `Sync Full`. Pasan los siete casos básicos del RDP en `n64-systemtest`
         (2984/3721 en total).
@@ -69,18 +75,45 @@ Plan en 4 subproyectos (spec y plan en `docs/superpowers/`): 1 CPU+memoria+arran
         con saturación de 9 bits, cuando el combinador elige shade como color.
   - [x] Z-buffer en triángulos (`0x09/0x0B/0x0D/0x0F`) y profundidad primitiva: modo opaco,
         Z de 18 bits comprimido a 14. Estados guardados versión 9.
-  - [ ] Z: rangos DZ, bits ocultos y modos transparente/interpenetrante/decal; Z en rectángulos.
+  - [x] Z: rangos DZ, bits ocultos de DZ y modos transparente/interpenetrante/decal.
   - [x] Blender de un ciclo: lectura de memoria (`image_read`), `force_blend`, mezcla en bordes
         sin desbordar cobertura, P/A/M/B completos y destinos de cobertura clamp/wrap/zap/save.
-  - [ ] Blender: `cvg_x_alpha`,
-        `alpha_compare`. Los bits ocultos de cobertura en RGBA5551 se asumen en 1.
+  - [x] Blender: `cvg_x_alpha`, `alpha_cvg_sel` y `alpha_compare` (umbral fijo y aleatorio).
   - [x] Triángulos con sombreado y textura (`0x0E/0x0F`): TEXEL0 × SHADE en el combinador.
   - [x] Combinador general de un ciclo: (A−B)·C+D en RGB y alfa con texel (incluido su alfa),
         shade, primitivo, entorno y constantes; el blender usa el alfa combinado y selecciona P.
   - [x] Modo de dos ciclos: el ciclo 0 del combinador alimenta COMBINED, TEXEL1 lee el tile siguiente
         y el blender mezcla dos veces (el primer ciclo sin dividir, p. ej. niebla).
-  - [ ] Combinador: ruido, chroma key, K4/K5, fracciones de LOD (sin LOD) y el TEXEL1 del ciclo 1
-        (debería ser el TEXEL0 del pixel siguiente; hoy usa el del pixel actual).
+  - [x] Combinador: ruido, chroma key, K4/K5, fracciones de LOD y TEXEL1 del ciclo 1 (pixel siguiente).
+  - [x] Mipmapping (LOD) en triángulos y rectángulos, con texturas sharpen y detail.
+  - [x] `Fill Rectangle` en modos de 1 y 2 ciclos pasa por combinador y blender (fundidos de MK64).
+  - [ ] Detalles menores del RDP: shift del blender en modo interpenetrante, bits ocultos de
+        cobertura en RGBA5551 (se asumen en 3) y de escrituras de la CPU, K0–K3 (YUV).
+
+## Subproyecto 4: velocidad N64 (siguiente)
+
+Medido con Mario Kart 64 (Release, `ezy_n64_runner --screenshot ... 300`): **~23 s para 300 cuadros**
+(a velocidad real serían 5 s). Perfil por función (muestreador temporal, ya quitado):
+CPU ~40 % (incluye el trabajo fijo por instrucción en `Vr4300::step`), RSP ~22 %, RDP ~12 %,
+planificador ~12 %. Ya hecho (PR #14): LTO + PDB en Release, próximo evento en caché, frontend con
+máx. 2 cuadros por dibujo. Probado y **descartado**: correr el RSP por lotes con retraso
+(no aceleró y colgó una prueba).
+
+Meta: 60 cuadros de video por segundo (100 % de velocidad); MK64 se vería a sus 30 fps originales.
+Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
+
+- [ ] **Etapa 1: afinar el intérprete** (meta ~25–30 cuadros/s):
+  - [ ] CPU: instrucciones decodificadas en caché por página (invalidar al escribir RDRAM),
+        menos trabajo fijo por paso (`interrupt_line`, `tick_random`, `Cop0::advance`).
+  - [ ] RSP: unidad vectorial con SIMD (SSE2/SSE4.1) en `RspVector` (multiply, alu, acumulador).
+  - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
+        (cuidar `Sync Full`, lecturas de RDRAM y save states).
+- [ ] **Etapa 2: decidir según lo medido**:
+  - Dynarec (JIT) MIPS → x86-64 para la CPU (y luego el RSP): la ganancia grande (5–20×), y la
+    misma técnica que exigirán GameCube y Wii.
+  - O RSP en alto nivel (HLE) de los microcódigos gráficos (F3DEX etc.) si el RSP sigue pesando.
+- [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
+- Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
 ## Roadmap
 
@@ -97,7 +130,12 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - Compilar solo con presets: `cmake --preset default` → `build/default`,
   `cmake --build --preset debug`, `ctest --preset debug`.
   Si CMake se queja de rutas, borrar `build/default` y reconfigurar.
-- Runners para probar ROMs: `ezy_gb_runner --screenshot`, `ezy_gba_runner --screenshot`.
+- Runners para probar ROMs: `ezy_gb_runner --screenshot`, `ezy_gba_runner --screenshot`,
+  `ezy_n64_runner <rom> --screenshot out.bmp <cuadros>` (usar el de `Release` para medir velocidad).
+- Mario Kart 64 del usuario: `E:\Rom nintendo\Mario Kart 64 (USA).z64` (fuera del repo, no subir).
+  Abrirlo: `build\default\src\frontend\Release\ezyemu.exe "E:\Rom nintendo\Mario Kart 64 (USA).z64"`
+  (después de `cmake --build --preset release`). Controles N64: Enter=Start, Z=A, X=B, Q=Z,
+  A/S=L/R, IJKL=stick, flechas=cruceta, T/G/F/H=botones C; también gamepad.
 - Las ROMs van en `roms/` y no se suben al repo.
 
 ## Bitácora
@@ -186,3 +224,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Release con LTO y PDB, próximo evento del planificador en caché, frontend con máx. 2 frames por dibujo.
   300 frames de MK64: 29 s -> 23 s (sigue ~4x más lento que tiempo real). Probé dejar que el RSP corra por lotes
   con retraso: no aceleró y colgó una prueba; descartado. Siguiente: decodificación en caché de la CPU, SIMD en el RSP.
+- 2026-11-08 — PR #14 mergeado (gamepad + velocidad). Recordatorios al día: RDP marcado como terminado y plan
+  de velocidad N64 en etapas (Subproyecto 4). Próxima sesión: Etapa 1 (intérprete en caché, SIMD en RSP, RDP en hilo).
