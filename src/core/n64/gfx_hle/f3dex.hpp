@@ -15,7 +15,7 @@ namespace ezy::n64 {
 // GBI 1 / F3DEX 0.95 display-list opcodes (the high byte of w0).
 namespace gbi {
 inline constexpr unsigned G_SPNOOP = 0x00, G_MTX = 0x01, G_MOVEMEM = 0x03, G_VTX = 0x04, G_DL = 0x06,
-                          G_LOAD_UCODE = 0xAF, G_TRI2 = 0xB1, G_RDPHALF_2 = 0xB3, G_RDPHALF_1 = 0xB4,
+                          G_LOAD_UCODE = 0xAF, G_TRI2 = 0xB1, G_RDPHALF_2 = 0xB3, G_QUAD = 0xB5, G_RDPHALF_1 = 0xB4,
                           G_CLEARGEOMETRYMODE = 0xB6, G_SETGEOMETRYMODE = 0xB7, G_ENDDL = 0xB8,
                           G_SETOTHERMODE_L = 0xB9, G_SETOTHERMODE_H = 0xBA, G_TEXTURE = 0xBB,
                           G_MOVEWORD = 0xBC, G_POPMTX = 0xBD, G_CULLDL = 0xBE, G_TRI1 = 0xBF,
@@ -76,6 +76,7 @@ private:
     // One display-list command; false ends the task with an error.
     bool execute(std::uint32_t w0, std::uint32_t w1, std::span<std::uint8_t> rdram);
     void emit(std::uint64_t word) { out_.push_back(word); }
+    void draw_triangle(unsigned i0, unsigned i1, unsigned i2);
 
     GfxUcode ucode_ = GfxUcode::Unknown;
     std::array<std::uint32_t, 16> segments_{};

@@ -494,3 +494,81 @@ TEST_CASE("G_VTX with W = 0 does not divide by zero") {
     CHECK(f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi()).ok);
     CHECK((f3dex.vertex(0).clip & F3dex::kClipNear) != 0);
 }
+
+namespace {
+
+// Identity camera with three vertices at screen (160, 0), (0, 240) and (320, 240) pixels.
+std::vector<std::uint64_t> triangle_scene(Bus& bus, std::uint32_t geometry_mode) {
+    write_mtx(bus, kMatrix, kIdentity);
+    write_viewport(bus);
+    write_vtx(bus, kVertices, 0, 1, 0, 0, 0, 0xFF000080);
+    write_vtx(bus, kVertices + 16, -1, -1, 0, 0, 0, 0x00FF0080);
+    write_vtx(bus, kVertices + 32, 1, -1, 0, 0, 0, 0x0000FF80);
+    auto dl = camera_dl();
+    dl.push_back(dl_cmd(0xB7000000, geometry_mode));
+    dl.push_back(g_vtx(0, 3, kVertices));
+    return dl;
+}
+
+}  // namespace
+
+TEST_CASE("F3DEX triangle edge coefficients for a known triangle") {
+    const auto n64 = N64::create(counting_rom("HLE TRI"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = triangle_scene(bus, 0);
+    dl.push_back(dl_cmd(0xBF000000, 0x00000204));  // G_TRI1 v0, v1, v2 (indices x 2)
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    const HleRun run = run_hle(*n64);
+    REQUIRE(run.trace.size() == 4);
+    CHECK(run.trace[0] == ((0xC8ULL << 56) | (960ULL << 32) | (960ULL << 16) | 0));  // right major, YL, YM, YH
+    CHECK(run.trace[1] == 0);                                // XL = 0 at YM, flat bottom: no slope
+    CHECK(run.trace[2] == ((0x00A00000ULL << 32) | 0xAAAA));  // XH = 160, DxHDy = 2/3
+    CHECK(run.trace[3] == ((0x00A00000ULL << 32) | 0xFFFF5556));  // XM = 160, DxMDy = -2/3
+}
+
+TEST_CASE("F3DEX culls back faces when G_CULL_BACK is set") {
+    const auto n64 = N64::create(counting_rom("HLE CULL"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = triangle_scene(bus, 0x2000);       // G_CULL_BACK
+    dl.push_back(dl_cmd(0xBF000000, 0x00000204));  // counter-clockwise on screen: front
+    dl.push_back(dl_cmd(0xBF000000, 0x00000402));  // the same triangle wound the other way: back
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    CHECK(run_hle(*n64).trace.size() == 4);  // one triangle
+}
+
+TEST_CASE("G_TRI2 emits two triangles in order") {
+    const auto n64 = N64::create(counting_rom("HLE TRI2"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = triangle_scene(bus, 0x4);           // G_SHADE: 4 edge words + 8 shade words each
+    dl.push_back(dl_cmd(0xB1000204, 0x00000204));  // G_TRI2: the same triangle twice
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    const HleRun run = run_hle(*n64);
+    REQUIRE(run.trace.size() == 24);
+    CHECK((run.trace[0] >> 56) == 0xCC);
+    CHECK((run.trace[12] >> 56) == 0xCC);
+    CHECK((run.trace[4] >> 48) == 0x00FF);  // shade R at the top vertex = 0xFF
+}
+
+TEST_CASE("G_QUAD draws (v0, v1, v2) and (v0, v2, v3)") {
+    const auto n64 = N64::create(counting_rom("HLE QUAD"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = triangle_scene(bus, 0);
+    write_vtx(bus, kVertices + 48, 0, -1, 0);  // v3, bottom middle
+    dl.back() = g_vtx(0, 4, kVertices);
+    dl.push_back(dl_cmd(0xB5000000, 0x00020406));  // G_QUAD v0, v1, v2, v3
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    const HleRun run = run_hle(*n64);
+    REQUIRE(run.trace.size() == 8);
+    // First triangle: v0 (160, 0) to v1 (0, 240) and v2 (320, 240), as in the G_TRI1 test.
+    CHECK(run.trace[0] == ((0xC8ULL << 56) | (960ULL << 32) | (960ULL << 16) | 0));
+    // Second: v0, v2 and v3 (160, 240): the right half.
+    CHECK(((run.trace[4] >> 16) & 0x3FFF) == 960);
+}

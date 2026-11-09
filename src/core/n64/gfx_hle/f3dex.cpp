@@ -109,6 +109,17 @@ bool F3dex::execute(std::uint32_t w0, std::uint32_t w1, std::span<std::uint8_t> 
             return true;
         case G_SETGEOMETRYMODE: geometry_mode_ |= w1; return true;
         case G_CLEARGEOMETRYMODE: geometry_mode_ &= ~w1; return true;
+        case G_TRI1: draw_triangle((w1 >> 16 & 0xFF) / 2, (w1 >> 8 & 0xFF) / 2, (w1 & 0xFF) / 2); return true;
+        case G_QUAD: {  // two triangles: (v0, v1, v2) and (v0, v2, v3)
+            const unsigned v0 = (w1 >> 24) / 2, v1 = (w1 >> 16 & 0xFF) / 2, v2 = (w1 >> 8 & 0xFF) / 2, v3 = (w1 & 0xFF) / 2;
+            draw_triangle(v0, v1, v2);
+            draw_triangle(v0, v2, v3);
+            return true;
+        }
+        case G_TRI2:
+            draw_triangle((w0 >> 16 & 0xFF) / 2, (w0 >> 8 & 0xFF) / 2, (w0 & 0xFF) / 2);
+            draw_triangle((w1 >> 16 & 0xFF) / 2, (w1 >> 8 & 0xFF) / 2, (w1 & 0xFF) / 2);
+            return true;
         case G_RDPHALF_1: rdp_half_1_ = w1; return true;
         case G_RDPHALF_2: rdp_half_2_ = w1; return true;
         case G_LOAD_UCODE: {

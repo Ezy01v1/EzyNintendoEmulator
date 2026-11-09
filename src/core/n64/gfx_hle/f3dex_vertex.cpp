@@ -92,12 +92,14 @@ void F3dex::load_vertices(std::uint32_t address, unsigned first, unsigned count,
         if (clip[1] < -guard) v.clip |= kClipNegY;
         if (v.w <= 0 || clip[2] < -v.w) v.clip |= kClipNear;
 
-        // Perspective divide with the RSP's reciprocal (about 2^31 / W), then the viewport.
+        // Perspective divide at full precision (the HLE does not reproduce the microcode's
+        // reciprocal rounding), then the viewport. Vertices at or behind the camera get
+        // clipped before they are drawn; they only need finite values here.
         v.inv_w = rsp_reciprocal(v.w, false);
-        const auto inv = static_cast<std::int64_t>(static_cast<std::int32_t>(v.inv_w));
-        const std::int64_t ndc_x = (std::int64_t{clip[0]} * inv) >> 15;  // s15.16
-        const std::int64_t ndc_y = (std::int64_t{clip[1]} * inv) >> 15;
-        const std::int64_t ndc_z = (std::int64_t{clip[2]} * inv) >> 15;
+        const std::int64_t w = v.w > 0 ? v.w : 1;
+        const std::int64_t ndc_x = (std::int64_t{clip[0]} * 65536) / w;  // s15.16
+        const std::int64_t ndc_y = (std::int64_t{clip[1]} * 65536) / w;
+        const std::int64_t ndc_z = (std::int64_t{clip[2]} * 65536) / w;
         v.x = static_cast<std::int32_t>(viewport_translate_[0] + ((ndc_x * viewport_scale_[0]) >> 16));
         v.y = static_cast<std::int32_t>(viewport_translate_[1] + ((-ndc_y * viewport_scale_[1]) >> 16));
         v.z = clamp_s15_16(std::int64_t{viewport_translate_[2]} * 65536 + ndc_z * viewport_scale_[2]);
