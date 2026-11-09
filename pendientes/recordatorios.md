@@ -175,3 +175,7 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   save state v11; los fills los borran) y ajuste de cobertura del modo Z interpenetrante. Pruebas unitarias en verde,
   n64-systemtest 2984/3721. ROM para probar: Mario Kart 64 en E:\Rom nintendo (fuera del repo).
   Pendiente RDP: shift del blender en interpenetrante, bits ocultos de color 5551 y de escrituras de CPU.
+- 2026-11-08 — PR #12 mergeado. Mario Kart 64 llega a la pantalla de título (runner sin ventana, Release ~0,1 s/frame).
+  Fill Rectangle en 1 y 2 ciclos ahora pasa por combinador y blender (los fundidos a negro de MK64 se descartaban).
+  Las estelas del logo giratorio parecen un efecto del juego (sin confirmar contra hardware).
+  Siguiente: ventana con imagen y control para N64, y velocidad.
