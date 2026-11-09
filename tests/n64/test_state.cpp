@@ -254,6 +254,10 @@ TEST_CASE("N64 save state preserves the RSP vector registers and pending recipro
 TEST_CASE("RDP runs a frozen RDRAM list on resume and the VI displays the clipped fill") {
     const auto n64 = N64::create(counting_rom("RDP FILL"));
     REQUIRE(n64);
+    bool threaded = false;
+    SUBCASE("drawing in place") {}
+    SUBCASE("drawing on the RDP thread") { threaded = true; }
+    n64->set_threaded_rdp(threaded);
     auto& bus = n64->bus();
     const std::uint64_t commands[] = {
         0x3F10000400004000ULL,             // 16-bit color image at 0x4000, stride 5
@@ -308,6 +312,14 @@ TEST_CASE("RDP runs a frozen RDRAM list on resume and the VI displays the clippe
         0xFF000000, 0xFFFF0000, 0xFF00FF00, 0xFFFF0000, 0xFF000000,
         0xFF000000, 0xFF00FF00, 0xFFFF0000, 0xFF00FF00, 0xFF000000,
     });
+
+    // A save state taken and loaded with the thread running gives the same picture.
+    const std::vector<std::uint8_t> state = n64->save_state();
+    bus.write32(0x4000 + 10 * 1 + 2, 0);  // scribble over a filled pixel
+    REQUIRE(n64->load_state(state));
+    CHECK(n64->image().argb == image.argb);
+    n64->set_threaded_rdp(!threaded);  // switching modes keeps working
+    CHECK(n64->image().argb == image.argb);
 }
 
 TEST_CASE("RSP submits an RDP list through COP0 and XBUS wraps inside DMEM") {

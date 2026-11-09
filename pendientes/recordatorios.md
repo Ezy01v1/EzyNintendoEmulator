@@ -117,8 +117,12 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         `switch` por carril. MK64 ~9 s → ~7,9 s. Cada op pesa ahora ~1,5 %: SSE a mano no vale la pena.
   - [x] RSP con reloj local (`RspRegs::run`): corre tramos sin pasar por el planificador en cada
         instrucción; relee `others_bound()` porque el propio RSP agenda DMA/RDP. MK64 ~7,9 s → ~7,3 s.
-  - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
-        (cuidar `Sync Full`, lecturas de RDRAM y save states).
+  - [x] RDP en otro hilo (rama `n64/rdp-thread`): la interfaz de comandos (DPC, contadores,
+        `Sync Full`) sigue en el hilo principal; el dibujo y los comandos de estado van a un
+        `RdpWorker`. Se espera al hilo en `Sync Full`, save states e `image()`. **Solo en `ezyemu`**
+        (y con `--threaded-rdp` en el runner): ya no es exacto al ciclo, así que pruebas y runners
+        siguen en modo exacto por defecto. MK64 ~7,3 s → **~5,3 s** (≈56 cuadros/s).
+        Bits ocultos de RDRAM en arreglo plano en lugar de `std::map`.
 - [ ] **Etapa 2: decidir según lo medido**:
   - Dynarec (JIT) MIPS → x86-64 para la CPU (y luego el RSP): la ganancia grande (5–20×), y la
     misma técnica que exigirán GameCube y Wii.
@@ -247,3 +251,6 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   154/154 pruebas, n64-systemtest 2984/3721. Siguiente: RSP escalar con reloj local, o RDP en otro hilo.
 - 2026-11-09 — RSP con reloj local: MK64 300 cuadros ~7,3 s (≈41 cuadros/s; empezó el día en 20,1 s), imagen idéntica,
   154/154 pruebas, n64-systemtest 2984/3721. Siguiente: abrir PR de `n64/cpu-decode-cache`; luego RDP en otro hilo o JIT.
+- 2026-11-09 — PR #15 mergeado. RDP en otro hilo (solo ezyemu / `--threaded-rdp`, sincroniza en Sync Full): MK64 300
+  cuadros ~5,3 s (≈56 cuadros/s), imagen igual a la exacta en esa escena. 154/154 pruebas, n64-systemtest 2984/3721
+  en ambos modos. Pendiente: abrir PR de `n64/rdp-thread` y probar MK64 jugando en ezyemu (usuario).

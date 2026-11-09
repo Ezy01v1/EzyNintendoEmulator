@@ -1,4 +1,4 @@
-// Headless N64 runner, for test ROMs.
+﻿// Headless N64 runner, for test ROMs.
 //
 //   ezy_n64_runner <rom> --screenshot <out.bmp> [frames]
 //       Runs `frames` frames (default 120) and saves the VI image as a 24-bit BMP.
@@ -12,7 +12,8 @@
 //       summary says no base test failed.
 //   ezy_n64_runner <rom> --pc [frames]
 //       Debugging: prints the CPU's PC and Cause after each frame (default 10 frames).
-// Option, anywhere after the ROM: --pif <file> (a real PIF ROM).
+// Options, anywhere after the ROM: --pif <file> (a real PIF ROM); --threaded-rdp (draw on a
+// second thread like ezyemu: faster, not cycle-exact).
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -134,8 +135,10 @@ int run_isviewer(N64& n64, double seconds) {
 int main(int raw_argc, char* raw_argv[]) {
     std::vector<char*> args;
     std::vector<std::uint8_t> pif;
+    bool threaded_rdp = false;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
+        else if (std::strcmp(raw_argv[i], "--threaded-rdp") == 0) threaded_rdp = true;
         else args.push_back(raw_argv[i]);
     }
     const int argc = static_cast<int>(args.size());
@@ -143,7 +146,7 @@ int main(int raw_argc, char* raw_argv[]) {
         std::cerr << "Usage: ezy_n64_runner <rom> --screenshot <out.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --compare <reference.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --isviewer [seconds]\n"
-                     "Option: --pif <pif rom>\n";
+                     "Options: --pif <pif rom>, --threaded-rdp\n";
         return 2;
     }
     const std::vector<std::uint8_t> rom = read_file(args[1]);
@@ -152,6 +155,7 @@ int main(int raw_argc, char* raw_argv[]) {
         std::cerr << "Not an N64 ROM: " << args[1] << '\n';
         return 2;
     }
+    n64->set_threaded_rdp(threaded_rdp);
     std::cout << "Title: " << n64->cartridge().title() << '\n';
     const std::string mode = args[2];
     if (mode == "--screenshot" && argc >= 4) {

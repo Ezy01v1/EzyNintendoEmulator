@@ -63,6 +63,7 @@ public:
     [[nodiscard]] Pif& pif() { return pif_; }
     // An optional real PIF ROM (1984 bytes) mapped at 0x1FC00000.
     void set_pif_rom(std::span<const std::uint8_t> rom);
+    [[nodiscard]] Rdp& rdp() { return rdp_; }
     [[nodiscard]] const Vi& vi() const { return vi_; }
     [[nodiscard]] std::span<std::uint8_t> rdram() { return rdram_; }
     [[nodiscard]] std::span<const std::uint8_t> rdram() const { return rdram_; }

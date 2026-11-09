@@ -1,4 +1,4 @@
-#include "n64/rdp.hpp"
+﻿#include "n64/rdp.hpp"
 
 #include <algorithm>
 
@@ -230,7 +230,7 @@ Rdp::Rgba Rdp::sample_texel(const Tile& tile, int s, int t) const {
 
 void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
     if (solid_.modes & kTexturePerspective) return;  // Rectangles do not supply W.
-    const auto header = draw_command_[0], coefficients = draw_command_[1];
+    const auto header = render_command_[0], coefficients = render_command_[1];
     const unsigned base_tile = static_cast<unsigned>(header >> 24) & 7;
     const unsigned texels = texels_read();
     const int ds_coefficient = static_cast<std::int16_t>(coefficients >> 16);
@@ -289,7 +289,7 @@ void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
 }
 
 void Rdp::copy_rectangle(std::span<std::uint8_t> rdram) const {
-    const std::uint64_t header = draw_command_[0], coefficients = draw_command_[1];
+    const std::uint64_t header = render_command_[0], coefficients = render_command_[1];
     const auto& tile = texture_.tiles[(header >> 24) & 7];
     const bool indexed = (solid_.modes & (1ULL << 47)) != 0;
     if (pixel_size_ != 2 || solid_.format != 0 || color_width_ == 0 ||

@@ -1,4 +1,4 @@
-#include "n64/rdp.hpp"
+﻿#include "n64/rdp.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -256,29 +256,59 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
         const unsigned op = opcode(word);
         if (draw_words_ != 0 || buffered_draw_words(op) != 0) {
             draw_command_[draw_words_++] = word;
-            const unsigned draw_op = opcode(draw_command_[0]);
-            if (draw_words_ == buffered_draw_words(draw_op)) {
-                if (draw_op != 0x24) draw_triangle(rdram);
-                else if (cycle_type_ == 2) copy_rectangle(rdram);
-                else draw_textured_rectangle(rdram);
+            if (draw_words_ == buffered_draw_words(opcode(draw_command_[0]))) {
+                submit({true, 0, draw_command_, rdram});
                 draw_words_ = 0;
             }
         } else {
             // Preserve packet framing for unsupported commands across END extensions.
             words_to_skip_ = command_words(op) - 1;
-            if (words_to_skip_ == 0) execute(word, mi, rdram);
+            if (words_to_skip_ == 0) {
+                if (op == 0x29) {  // Sync Full: writes are complete before the CPU sees the interrupt.
+                    sync();
+                    status_ &= ~(kStartClock | kPipeBusy);
+                    mi.raise(MiInterrupt::Dp);
+                } else {
+                    submit({false, word, {}, rdram});
+                }
+            }
         }
     }
     current_ += 8;
     schedule_word(scheduler, when);
 }
 
-void Rdp::execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
+// Drawing and the commands that set its state run here: on the worker thread when there is
+// one, otherwise right away. Nothing here touches the command interface (status, counters).
+void Rdp::render(const RenderJob& job) {
+    if (!job.draw) {
+        execute(job.word, job.rdram);
+        return;
+    }
+    render_command_ = job.command;
+    const unsigned op = opcode(render_command_[0]);
+    if (op != 0x24) draw_triangle(job.rdram);
+    else if (cycle_type_ == 2) copy_rectangle(job.rdram);
+    else draw_textured_rectangle(job.rdram);
+}
+
+void Rdp::submit(const RenderJob& job) {
+    if (worker_) worker_->push(job);
+    else render(job);
+}
+
+void Rdp::sync() {
+    if (worker_) worker_->drain();
+}
+
+void Rdp::set_threaded(bool threaded) {
+    if (threaded == (worker_ != nullptr)) return;
+    if (threaded) worker_ = std::make_unique<RdpWorker<RenderJob>>([this](const RenderJob& job) { render(job); });
+    else worker_.reset();  // drains first
+}
+
+void Rdp::execute(std::uint64_t word, std::span<std::uint8_t> rdram) {
     switch (opcode(word)) {
-        case 0x29:  // Sync Full: writes are complete before the CPU sees the interrupt.
-            status_ &= ~(kStartClock | kPipeBusy);
-            mi.raise(MiInterrupt::Dp);
-            break;
         case 0x2D: scissor_ = word; break;  // Set Scissor
         case 0x2E: prim_depth_ = static_cast<std::uint32_t>(word); break;  // Set Prim Depth
         case 0x2A: key_gb_ = word & 0xFFFFFFFFFFFFFFULL; break;  // Set Key GB
@@ -370,7 +400,7 @@ void Rdp::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram)
 }
 
 void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
-    const std::uint64_t header = draw_command_[0];
+    const std::uint64_t header = render_command_[0];
     const unsigned op = opcode(header);
     const bool textured = (op & 2) != 0, shaded = (op & 4) != 0;
     // Primitive depth also lets triangles without Z coefficients use the depth buffer.
@@ -404,19 +434,19 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     if (top >= bottom || clip_left >= clip_right) return;
 
     const bool major_left = (header & (1ULL << 55)) != 0;
-    const TriangleEdge major(draw_command_[2], yh & ~3);
-    const TriangleEdge upper(draw_command_[3], yh & ~3);
-    const TriangleEdge lower(draw_command_[1], ym);
+    const TriangleEdge major(render_command_[2], yh & ~3);
+    const TriangleEdge upper(render_command_[3], yh & ~3);
+    const TriangleEdge lower(render_command_[1], ym);
     const bool perspective = sample && textured && (solid_.modes & kTexturePerspective);
     TextureGradient s, t, w;
     if (sample && textured) {
         // STW integer and fractional halves are stored in separate words.
         const auto gradient = [&](unsigned shift) -> TextureGradient {
             const unsigned i = texture_at;
-            return {texture_coefficient(draw_command_[i], draw_command_[i + 2], shift),
-                    texture_coefficient(draw_command_[i + 1], draw_command_[i + 3], shift),
-                    texture_coefficient(draw_command_[i + 4], draw_command_[i + 6], shift),
-                    texture_coefficient(draw_command_[i + 5], draw_command_[i + 7], shift)};
+            return {texture_coefficient(render_command_[i], render_command_[i + 2], shift),
+                    texture_coefficient(render_command_[i + 1], render_command_[i + 3], shift),
+                    texture_coefficient(render_command_[i + 4], render_command_[i + 6], shift),
+                    texture_coefficient(render_command_[i + 5], render_command_[i + 7], shift)};
         };
         s = gradient(48);
         t = gradient(32);
@@ -427,17 +457,17 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         // RGBA coefficients share the STW layout: integers and fractions in separate words.
         for (unsigned i = 0; i < shade.size(); ++i) {
             const unsigned at = 48 - 16 * i;
-            shade[i] = {texture_coefficient(draw_command_[4], draw_command_[6], at),
-                        texture_coefficient(draw_command_[5], draw_command_[7], at),
-                        texture_coefficient(draw_command_[8], draw_command_[10], at),
-                        texture_coefficient(draw_command_[9], draw_command_[11], at)};
+            shade[i] = {texture_coefficient(render_command_[4], render_command_[6], at),
+                        texture_coefficient(render_command_[5], render_command_[7], at),
+                        texture_coefficient(render_command_[8], render_command_[10], at),
+                        texture_coefficient(render_command_[9], render_command_[11], at)};
         }
     }
     TextureGradient z;
     const bool use_depth = !fill && (solid_.modes & ((1U << 4) | (1U << 5)));
     if (use_depth && (op & 1)) {
         const auto word = [this](unsigned i, unsigned shift) {
-            return static_cast<std::int32_t>(draw_command_[i] >> shift);
+            return static_cast<std::int32_t>(render_command_[i] >> shift);
         };
         z = {word(depth_at, 32), word(depth_at, 0), word(depth_at + 1, 32), word(depth_at + 1, 0)};
     }

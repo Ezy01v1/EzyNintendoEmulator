@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
 
 #include "n64/mi.hpp"
+#include "n64/rdp_worker.hpp"
 #include "n64/scheduler.hpp"
 
 namespace ezy::n64 {
@@ -20,8 +22,21 @@ public:
     void step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
               std::span<const std::uint8_t, 0x1000> dmem, std::uint64_t when);
 
+    // Drawing on a background thread (off by default: everything then happens at its exact
+    // cycle). The emulation waits for it at Sync Full, and before a save state or a read of
+    // the picture; in between, the CPU and RSP may see RDRAM before the drawing reaches it.
+    void set_threaded(bool threaded);
+    // Waits until all submitted drawing is in RDRAM.
+    void sync();
+
+    Rdp() = default;
+    Rdp(Rdp&&) = default;
+    Rdp& operator=(Rdp&&) = default;
+    ~Rdp() { worker_.reset(); }  // stop the thread before the state it draws with goes away
+
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {
+        sync();
         ar(start_), ar(end_), ar(current_), ar(status_), ar(words_to_skip_);
         ar(clock_origin_), ar(last_update_), ar(command_cycles_), ar(pipe_cycles_);
         ar(color_address_), ar(color_width_), ar(pixel_size_), ar(fill_color_), ar(cycle_type_), ar(scissor_);
@@ -78,7 +93,10 @@ public:
     void load_legacy(Ar& ar) {
         std::array<std::uint32_t, 8> registers{};
         ar(registers);
+        const bool threaded = worker_ != nullptr;
+        set_threaded(false);
         *this = {};
+        set_threaded(threaded);
         start_ = registers[0] & 0xFFFFF8;
         end_ = registers[1] & 0xFFFFF8;
         current_ = registers[2] & 0xFFFFF8;
@@ -89,7 +107,15 @@ private:
     static unsigned buffered_draw_words(unsigned op);
     void update_counters(std::uint64_t when);
     void schedule_word(Scheduler& scheduler, std::uint64_t when);
-    void execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram);
+    struct RenderJob {
+        bool draw;           // a buffered draw command, else a one-word command
+        std::uint64_t word;  // the one-word command
+        std::array<std::uint64_t, 22> command;
+        std::span<std::uint8_t> rdram;
+    };
+    void render(const RenderJob& job);
+    void submit(const RenderJob& job);
+    void execute(std::uint64_t word, std::span<std::uint8_t> rdram);
     [[nodiscard]] bool can_fill() const;
     void fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const;
     void draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const;
@@ -167,12 +193,15 @@ private:
     std::uint32_t key_r_ = 0;   // Set Key R
     std::uint64_t convert_ = 0;   // Set Convert: K0..K5, 9 bits each
     std::uint32_t prim_lod_ = 0;  // Set Primitive Color: min level and LOD fraction
-    mutable std::uint32_t noise_state_ = 1;
+    mutable std::uint32_t noise_state_ = 1;  // combiner noise generator, advanced per pixel
     // RDRAM hidden bits (two per halfword of the 8 MB), one byte per halfword. Only depth
     // writes set them; fills clear them.
-    mutable std::vector<std::uint8_t> hidden_ = std::vector<std::uint8_t>(4 * 1024 * 1024, 0);  // combiner noise generator, advanced per pixel
+    mutable std::vector<std::uint8_t> hidden_ = std::vector<std::uint8_t>(4 * 1024 * 1024, 0);
     SolidState solid_;
     TextureState texture_;
+    // The draw command being rendered (draw_command_ is the one being fetched).
+    std::array<std::uint64_t, 22> render_command_{};
+    std::unique_ptr<RdpWorker<RenderJob>> worker_;
 };
 
 }  // namespace ezy::n64

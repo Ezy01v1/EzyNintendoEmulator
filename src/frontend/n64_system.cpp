@@ -1,4 +1,4 @@
-#include "n64_system.hpp"
+﻿#include "n64_system.hpp"
 
 #include <imgui.h>
 
@@ -133,6 +133,7 @@ std::string disassemble(std::uint32_t w) {
 std::unique_ptr<N64System> N64System::create(std::span<const std::uint8_t> rom, std::filesystem::path rom_path) {
     auto n64 = n64::N64::create(rom);
     if (!n64) return nullptr;
+    n64->set_threaded_rdp(true);
     return std::unique_ptr<N64System>(new N64System({rom.begin(), rom.end()}, std::move(n64), std::move(rom_path)));
 }
 
@@ -164,6 +165,7 @@ void N64System::collect_audio() {
 
 void N64System::reset() {
     n64_ = n64::N64::create(rom_);
+    if (n64_) n64_->set_threaded_rdp(true);
     resample_phase_ = 0;
     update_controller();
 }

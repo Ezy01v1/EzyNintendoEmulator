@@ -41,6 +41,13 @@ public:
     [[nodiscard]] const Bus& bus() const { return bus_; }
     [[nodiscard]] const Cartridge& cartridge() const { return cart_; }
     [[nodiscard]] std::uint64_t cycles() const { return scheduler_.now(); }
+    // The RDP draws on its own thread (faster, but no longer cycle-exact: see Rdp).
+    void set_threaded_rdp(bool threaded) { bus_.rdp().set_threaded(threaded); }
+    // The picture once all submitted drawing has landed.
+    [[nodiscard]] Vi::Image image() {
+        bus_.rdp().sync();
+        return bus_.vi().image(bus_.rdram());
+    }
     [[nodiscard]] Vi::Image image() const { return bus_.vi().image(bus_.rdram()); }
 
     // Save states: the whole machine as bytes. load_state() refuses a state of another
