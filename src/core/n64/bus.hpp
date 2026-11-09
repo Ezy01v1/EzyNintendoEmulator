@@ -81,7 +81,7 @@ public:
         rsp_.serialize(ar, version, rdp_);
         vi_.serialize(ar);
         si_.serialize(ar);
-        pif_.serialize(ar);
+        pif_.serialize(ar, version);
         ai_.serialize(ar);
         if (version >= 4) rdp_.serialize(ar, version);
     }

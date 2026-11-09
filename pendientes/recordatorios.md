@@ -160,6 +160,9 @@ decisiones importantes también están aquí). El usuario eligió **alta precisi
   Revisión final hecha (sin críticos; 2 importantes corregidos). Menores sin corregir: el gancho de tareas también
   salta si la CPU ejecuta el RSP paso a paso con un OSTask viejo; `G_LOAD_UCODE` no traduce el segmento de la
   dirección de datos; `DPC_STATUS` queda "ocupado" tras una lista HLE sin Sync Full.
+- **EEPROM de 4 Kbit emulada en el PIF (canal 4)**: sin ella MK64 dejaba de leer el mando tras el arranque
+  (las teclas no hacían nada en ningún modo; el error existía desde antes). Se guarda en los save states (v12),
+  pero **todavía no en disco**: los récords se pierden al cerrar. Pendiente: archivo `.eep` junto a la ROM.
 - **Fallo intermitente a investigar:** ezyemu Release se cerró 3 veces al arrancar con corrupción de heap
   (0xc0000374, visor de eventos) el 2026-11-09; luego 0 de 16 arranques fallaron y la versión Debug no falla.
   Sospecha: condición de carrera con el hilo del RDP. Si vuelve a pasar: compilar con `/fsanitize=address`.
@@ -298,3 +301,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   HLE de F3DEX hechas y Task 6 a medias (ver sección "HLE de gráficos"). Usuario eligió HLE de alta precisión.
 - 2026-11-09 — HLE de gráficos completa (Tasks 1–8, rama `n64/gfx-hle`): MK64 se ve como con el RSP real y la carrera
   sube a ~35–43 cuadros/s (antes ~21–28). 195/195 pruebas N64, n64-systemtest 2984/3721, modo exacto idéntico.
+- 2026-11-09 — EEPROM 4 Kbit en el PIF: MK64 vuelve a leer el mando (antes las teclas no respondían).

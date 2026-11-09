@@ -125,3 +125,30 @@ TEST_CASE("HLE boot loads the PI domain 1 timing from the ROM header") {
     CHECK(bus.read32(0x0460001C) == 0x07);
     CHECK(bus.read32(0x04600020) == 0x03);
 }
+
+// Channel 4 is the cartridge's EEPROM: skip the four controller channels to reach it.
+TEST_CASE("EEPROM status reports a 4 Kbit EEPROM on channel 4") {
+    Pif pif;
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x00, 0xFF, 0xFF, 0xFF, 0xFE});
+    pif.run_commands();
+    CHECK((pif.ram()[5] & 0x80) == 0);  // device present
+    CHECK(pif.ram()[7] == 0x00);
+    CHECK(pif.ram()[8] == 0x80);
+    CHECK(pif.ram()[9] == 0x00);
+}
+
+TEST_CASE("EEPROM blocks written are read back, and 4 Kbit has 64 blocks") {
+    Pif pif;
+    // Write block 3: tx = 10 (command, block, 8 bytes), rx = 1.
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x0A, 0x01, 0x05, 0x03, 1, 2, 3, 4, 5, 6, 7, 8, 0xFF, 0xFE});
+    pif.run_commands();
+    // Read block 3, and block 67 (wraps to 3 on a 4 Kbit part): tx = 2, rx = 8.
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x04, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE});
+    pif.run_commands();
+    CHECK(std::vector<std::uint8_t>(pif.ram().begin() + 8, pif.ram().begin() + 16) ==
+          std::vector<std::uint8_t>{1, 2, 3, 4, 5, 6, 7, 8});
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x04, 67, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE});
+    pif.run_commands();
+    CHECK(pif.ram()[8] == 1);
+    CHECK(pif.eeprom()[3 * 8 + 7] == 8);
+}
