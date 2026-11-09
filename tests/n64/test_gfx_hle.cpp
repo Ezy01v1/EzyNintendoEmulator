@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "n64/gfx_hle/f3dex.hpp"
+#include "n64/gfx_hle/fixed.hpp"
 #include "n64/gfx_hle/task.hpp"
 #include "n64/n64.hpp"
 #include "n64_test_helpers.hpp"
@@ -286,4 +287,70 @@ TEST_CASE("G_SETOTHERMODE_H and _L update the mode and send Set Other Modes") {
     const HleRun run = run_hle(*n64);
     CHECK(run.trace == std::vector<std::uint64_t>{0xEF880CFF00000000ULL, 0xEF880CFF0F0A4000ULL,
                                                    0xEF882CFF0F0A4000ULL});
+}
+
+namespace {
+
+constexpr std::int32_t fx(double value) { return static_cast<std::int32_t>(value * 65536.0); }
+
+// A GBI Mtx in RDRAM: the 16 integer halves, then the 16 fractional halves, row by row.
+void write_mtx(Bus& bus, std::uint32_t address, const std::array<std::int32_t, 16>& m) {
+    for (unsigned i = 0; i < 16; ++i) {
+        const auto value = static_cast<std::uint32_t>(m[i]);
+        bus.write8(address + i * 2, static_cast<std::uint8_t>(value >> 24));
+        bus.write8(address + i * 2 + 1, static_cast<std::uint8_t>(value >> 16));
+        bus.write8(address + 32 + i * 2, static_cast<std::uint8_t>(value >> 8));
+        bus.write8(address + 32 + i * 2 + 1, static_cast<std::uint8_t>(value));
+    }
+}
+
+constexpr std::array<std::int32_t, 16> kIdentity = {fx(1), 0, 0, 0, 0, fx(1), 0, 0, 0, 0, fx(1), 0, 0, 0, 0, fx(1)};
+
+}  // namespace
+
+TEST_CASE("load_mtx reads integer halves then fractional halves") {
+    const auto n64 = N64::create(counting_rom("HLE MTX"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    std::array<std::int32_t, 16> m{};
+    for (unsigned i = 0; i < 16; ++i) m[i] = fx(i * 1.25 - 7.5);
+    write_mtx(bus, 0x300000, m);
+    CHECK(load_mtx(bus.rdram(), 0x300000).m == m);
+}
+
+TEST_CASE("mul_mtx follows the RSP's VMUDL/VMADM/VMADN/VMADH products") {
+    Mtx a{kIdentity}, b{};
+    for (unsigned i = 0; i < 16; ++i) b.m[i] = fx(i * 0.5 - 3.25);
+    CHECK(mul_mtx(a, b).m == b.m);  // identity
+    CHECK(mul_mtx(b, a).m == b.m);
+
+    Mtx c{}, d{};
+    c.m[0] = fx(1.5), d.m[0] = fx(2.25);  // exact: 3.375
+    c.m[5] = fx(-1.5), d.m[5] = fx(0.5);  // exact: -0.75
+    c.m[10] = 1, d.m[10] = 1;             // 2^-16 * 2^-16: VMUDL drops it
+    c.m[15] = 0x00018001, d.m[15] = 0x00008001;  // 1.50002 * 0.50002, low bits of frac*frac dropped
+    const Mtx e = mul_mtx(c, d);
+    CHECK(e.m[0] == fx(3.375));
+    CHECK(e.m[5] == fx(-0.75));
+    CHECK(e.m[10] == 0);
+    // (0x8001 * 0x8001) >> 16 = 0x4001; 1 * 0x8001 = 0x8001; 0x8001 * 0 (int part of d) = 0
+    CHECK(e.m[15] == 0x4001 + 0x8001);
+}
+
+TEST_CASE("transform multiplies an integer vertex by a matrix exactly") {
+    Mtx m{kIdentity};
+    m.m[12] = fx(10.5), m.m[13] = fx(-2), m.m[14] = fx(0.25);  // translation row
+    m.m[0] = fx(2);                                             // scale X
+    const auto out = transform(m, 3, -4, 5);
+    CHECK(out[0] == fx(16.5));
+    CHECK(out[1] == fx(-6));
+    CHECK(out[2] == fx(5.25));
+    CHECK(out[3] == fx(1));
+}
+
+TEST_CASE("rsp_reciprocal is the VRCP result") {
+    CHECK(rsp_reciprocal(0, false) == 0x7FFFFFFFU);
+    CHECK(rsp_reciprocal(-32768, false) == 0xFFFF0000U);
+    CHECK(rsp_reciprocal(1, false) == 0x7FFFC000U);
+    CHECK(rsp_reciprocal(2, false) == 0x3FFFE000U);
 }

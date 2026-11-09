@@ -7,6 +7,9 @@
 
 namespace ezy::n64 {
 
+// The RSP's reciprocal (VRCP/VRCPL) or reciprocal square root (VRSQ/VRSQL) of a 32-bit input.
+[[nodiscard]] std::uint32_t rsp_reciprocal(std::int32_t input, bool square_root);
+
 class RspVector {
 public:
     void execute(std::uint32_t word, std::uint32_t& scalar);

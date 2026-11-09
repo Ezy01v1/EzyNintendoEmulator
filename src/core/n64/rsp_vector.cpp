@@ -67,7 +67,10 @@ constexpr auto square_root_rom() {
     return result;
 }
 
-std::uint32_t reciprocal(std::int32_t input, bool square_root) {
+}  // namespace
+
+// The VRCP/VRSQ result for a 32-bit input (the high half comes from VRCPH/VRSQH).
+std::uint32_t rsp_reciprocal(std::int32_t input, bool square_root) {
     if (input == 0) return 0x7FFFFFFF;
     if (input == -32768) return 0xFFFF0000;
     const std::uint32_t sign = input < 0 ? 0xFFFFFFFF : 0;
@@ -82,7 +85,6 @@ std::uint32_t reciprocal(std::int32_t input, bool square_root) {
     return (((0x10000 | fraction) << 14) >> shift) ^ sign;
 }
 
-}  // namespace
 
 std::uint8_t RspVector::byte(const Vector& vector, unsigned index) {
     return static_cast<std::uint8_t>(vector[(index & 15) / 2] >> ((index & 1) ? 0 : 8));
@@ -332,7 +334,7 @@ void RspVector::divide(unsigned op, Vector& dest, unsigned lane, std::uint16_t i
     if (div_high_pending_ && (op == VRCPL || op == VRSQL)) {
         operand = static_cast<std::int32_t>((std::uint32_t{div_input_} << 16) | input);
     }
-    const auto result = reciprocal(operand, op == VRSQ || op == VRSQL);
+    const auto result = rsp_reciprocal(operand, op == VRSQ || op == VRSQL);
     div_high_pending_ = false;
     div_output_ = static_cast<std::uint16_t>(result >> 16);
     dest[lane] = static_cast<std::uint16_t>(result);
