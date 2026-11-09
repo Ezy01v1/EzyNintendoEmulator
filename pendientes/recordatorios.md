@@ -156,7 +156,13 @@ decisiones importantes también están aquí). El usuario eligió **alta precisi
   (solo si hay >20 000 trabajos pendientes): era lo que impedía ganar velocidad.
   **MK64 en carrera (cuadros 1500–1900, RDP en hilo): ~21–28 → ~35–43 cuadros/s con `--hle-gfx`** (+55–70 %).
   En modo exacto: 18,6 → 22,4. La imagen coincide visualmente con el RSP real (no bit a bit, por decisión).
-- Pendiente: probar MK64 jugando en ezyemu con la HLE (usuario); revisión final de la rama; PR.
+- Pendiente: probar MK64 jugando en ezyemu con la HLE (usuario); PR (primero `n64/rdp-thread`, luego `n64/gfx-hle`).
+  Revisión final hecha (sin críticos; 2 importantes corregidos). Menores sin corregir: el gancho de tareas también
+  salta si la CPU ejecuta el RSP paso a paso con un OSTask viejo; `G_LOAD_UCODE` no traduce el segmento de la
+  dirección de datos; `DPC_STATUS` queda "ocupado" tras una lista HLE sin Sync Full.
+- **Fallo intermitente a investigar:** ezyemu Release se cerró 3 veces al arrancar con corrupción de heap
+  (0xc0000374, visor de eventos) el 2026-11-09; luego 0 de 16 arranques fallaron y la versión Debug no falla.
+  Sospecha: condición de carrera con el hilo del RDP. Si vuelve a pasar: compilar con `/fsanitize=address`.
   Para 60 cuadros/s falta: HLE de audio (~1/3 del RSP) y acelerar el RDP (ahora es el límite).
 - Cómo comparar: `ezy_n64_runner <mk64> --screenshot x.bmp 120 --rdp-trace a.bin` (con y sin `--hle-gfx`, desde el
   arranque: con HLE el ritmo cambia y a partir de ~cuadro 1500 ya no son la misma escena) y `rdp_trace_diff a.bin b.bin`.
