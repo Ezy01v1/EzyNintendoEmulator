@@ -108,9 +108,10 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         Compare, exacto al ciclo. Además: RDRAM directo en load/store, vía rápida del RSP en el
         planificador, COP0 en línea. MK64 300 cuadros: 20,1 s → ~15,5 s, imagen idéntica.
         Una caché de decodificación **no** sirve: decodificar MIPS es barato (medido).
-  - [ ] Bucle ocioso mientras el RSP trabaja: hoy la CPU sigue a paso de 1 ciclo porque el RSP
-        tiene un evento cada 1–2 ciclos. Habría que correr el RSP en lote durante la espera y
-        cortar en cuanto suba la línea de interrupción (cuidar en qué instrucción del bucle cae).
+  - [x] Bucle ocioso mientras el RSP trabaja: RSP, RDP y DMA de SP corren en lote durante la
+        espera (sus manejadores no leen `now()`; AI sí, por eso corta el lote). Se corta en el primer
+        evento que deja una interrupción pendiente y la CPU retoma en ese ciclo con la paridad
+        correcta (salto o `nop`). MK64 300 cuadros: ~15,5 s → **~9 s** (2,2× desde 20,1), imagen idéntica.
   - Perfilador: `prof.cpp` (muestrea el RIP cada 1 ms y resuelve con el PDB); no está en el repo.
   - [ ] RSP: unidad vectorial con SIMD (SSE2/SSE4.1) en `RspVector` (multiply, alu, acumulador).
   - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
@@ -236,3 +237,6 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-09 — Velocidad N64, CPU (rama `n64/cpu-decode-cache`): salto del bucle ocioso exacto al ciclo, RDRAM directo,
   vía rápida del RSP en el planificador. MK64 300 cuadros 20,1 s → ~15,5 s con imagen idéntica. 154/154 pruebas,
   n64-systemtest 2984/3721. Siguiente: RSP en lote durante el bucle ocioso, luego SIMD en el RSP.
+- 2026-11-09 — RSP/RDP en lote durante el bucle ocioso de la CPU, cortando exacto en la interrupción. MK64 300 cuadros
+  ~9 s (antes 20,1 s), imagen idéntica, 154/154 pruebas, n64-systemtest 2984/3721. Ahora pesa el RSP
+  (vector multiply/alu) y el RDP. Siguiente: SIMD en `RspVector`.

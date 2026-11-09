@@ -23,10 +23,7 @@ int Vr4300::idle_loop_cycles() const {
     if (pc_ - 0xFFFFFFFF80000000ULL >= 0x20000000ULL) return 0;  // kseg0 only (cached)
     const auto paddr = static_cast<std::uint32_t>(pc_ & 0x1FFFFFFF);
     if (paddr + 8 > bus_.direct_ram_size()) return 0;
-    // An interrupt that the next step would take ends the idling.
-    const std::uint32_t cause =
-        (cop0_.cause() & ~Cop0::kIP2) | (bus_.interrupt_line() ? Cop0::kIP2 : 0);
-    if ((status & Cop0::kIE) && !(status & (Cop0::kEXL | Cop0::kERL)) && (cause & status & 0xFF00)) return 0;
+    if (interrupt_pending()) return 0;  // the next step leaves the loop
     const std::uint8_t* m = bus_.direct_ram() + paddr;
     const std::uint32_t branch = (std::uint32_t{m[0]} << 24) | (m[1] << 16) | (m[2] << 8) | m[3];
     const std::uint32_t slot = (std::uint32_t{m[4]} << 24) | (m[5] << 16) | (m[6] << 8) | m[7];
@@ -37,7 +34,23 @@ int Vr4300::idle_loop_cycles() const {
     return beq_self || j_self ? 2 : 0;
 }
 
-void Vr4300::skip_idle_loop(std::uint64_t iterations) { cop0_.retire_many(iterations * 2, iterations * 2); }
+bool Vr4300::interrupt_pending() const {
+    const std::uint32_t status = cop0_.status();
+    const std::uint32_t cause = (cop0_.cause() & ~Cop0::kIP2) | (bus_.interrupt_line() ? Cop0::kIP2 : 0);
+    return (status & Cop0::kIE) && !(status & (Cop0::kEXL | Cop0::kERL)) && (cause & status & 0xFF00);
+}
+
+// Each cycle is one instruction of the loop. An odd count ends after the branch, with the
+// NOP in its delay slot next.
+void Vr4300::skip_idle_cycles(std::uint64_t cycles) {
+    cop0_.retire_many(cycles, cycles);
+    if (cycles & 1) {
+        current_pc_ = pc_;
+        pc_ = next_pc_;
+        next_pc_ = current_pc_;
+        branch_taken_ = true;
+    }
+}
 
 int Vr4300::step() {
     cycles_ = 1;

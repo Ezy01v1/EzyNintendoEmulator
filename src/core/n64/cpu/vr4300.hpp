@@ -27,9 +27,12 @@ public:
     int step();
 
     // Cycles of one iteration if the CPU sits at the start of an idle loop that no pending
-    // interrupt would leave, else 0. skip_idle_loop() then runs whole iterations at once.
+    // interrupt would leave, else 0. skip_idle_cycles() then runs that many of its
+    // one-cycle instructions at once.
     [[nodiscard]] int idle_loop_cycles() const;
-    void skip_idle_loop(std::uint64_t iterations);
+    void skip_idle_cycles(std::uint64_t cycles);
+    // The next step() would take an interrupt.
+    [[nodiscard]] bool interrupt_pending() const;
     // CPU cycles until Count reaches Compare (and sets Cause.IP7).
     [[nodiscard]] std::uint64_t cycles_until_compare() const { return cop0_.cycles_until_compare(); }
 

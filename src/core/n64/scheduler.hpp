@@ -64,6 +64,19 @@ public:
     void cancel(EventType type) { slots_[index(type)].active = false; }
     [[nodiscard]] bool pending(EventType type) const { return slots_[index(type)].active; }
 
+    // Earliest time among the pending events whose type is not in `mask` (bit per type).
+    [[nodiscard]] std::uint64_t earliest_except(std::uint32_t mask) const {
+        std::uint64_t earliest = ~std::uint64_t{0};
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            if (slots_[i].active && !(mask & (1U << i)) && slots_[i].when < earliest) earliest = slots_[i].when;
+        }
+        return earliest;
+    }
+    // Moves time back, for the idle loop when an event it ran early raised an interrupt.
+    // Only the handlers that ignore now() may have run past the new time.
+    void rewind_to(std::uint64_t cycle) { now_ = cycle; }
+    [[nodiscard]] static constexpr std::uint32_t bit(EventType type) { return 1U << index(type); }
+
     // Earliest pending event time, or nullopt if nothing is scheduled.
     [[nodiscard]] std::optional<std::uint64_t> next_event_time() const;
 
