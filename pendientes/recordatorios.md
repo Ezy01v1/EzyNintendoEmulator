@@ -136,6 +136,25 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
+## HLE de gráficos (en curso, rama `n64/gfx-hle`)
+
+Spec `docs/superpowers/specs/2026-11-09-n64-gfx-hle-design.md`, plan `docs/superpowers/plans/2026-11-09-n64-gfx-hle.md`.
+Registro de avance y decisiones: `.superpowers/sdd/2026-11-09-n64-gfx-hle/progress.md` (no está en git; las
+decisiones importantes también están aquí). El usuario eligió **alta precisión, no bit a bit**.
+
+- [x] Task 1: `Rdp::submit_words`, traza `--rdp-trace/--trace-from` y `tools/rdp_trace_diff`.
+- [x] Task 2: detección de `OSTask` + F3DEX/F3DLX 0.95, evento `GfxHleDone`, estado v12, `--hle-gfx`.
+- [x] Task 3: recorrido de la display list; las primeras 117 órdenes al RDP coinciden con el RSP real.
+- [x] Task 4: punto fijo (`gfx_hle/fixed.hpp`), `rsp_reciprocal` público.
+- [x] Task 5: matrices, viewport, luces, niebla, `G_VTX` (división por W exacta).
+- [ ] Task 6: triángulos. Hecho: `G_TRI1/TRI2` y **`G_QUAD` (0xB5), que MK64 usa para casi todo**, bordes,
+  shade, textura, Z, culling. MK64 con `--hle-gfx` ya muestra la escena reconocible pero falta: texturas
+  grises (revisar S/T, escala de W y `G_TEXTURE_GEN`), colores/luces (sale negro donde el RSP pone rojo),
+  confirmar el sentido del culling. Hay un descarte temporal `TEMPCLIP` en `f3dex_triangle.cpp` hasta Task 7.
+- [ ] Task 7: recorte. [ ] Task 8: tiempos, save states, interruptor en ezyemu y medición.
+- Cómo comparar: `ezy_n64_runner <mk64> --screenshot x.bmp 120 --rdp-trace a.bin` (con y sin `--hle-gfx`, desde el
+  arranque: con HLE el ritmo cambia y a partir de ~cuadro 1500 ya no son la misma escena) y `rdp_trace_diff a.bin b.bin`.
+
 ## Roadmap
 
 GBA (terminar pendientes) → **N64** → Nintendo DS → GameCube → Wii.
@@ -263,3 +282,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-09 — Medido en carrera (demo, cuadros 1500–1900): ~25 cuadros/s con RDP en hilo. Afinar el intérprete del
   RSP no da más (inline y predecodificación descartados). Runner con `--time-from`. Siguiente: decidir HLE de gráficos
   (F3DEX) o JIT (CPU y luego RSP).
+- 2026-11-09 — Rama `n64/rdp-thread` con RDP en hilo + spec y plan de HLE (sin PR). Rama `n64/gfx-hle`: Tasks 1–5 de la
+  HLE de F3DEX hechas y Task 6 a medias (ver sección "HLE de gráficos"). Usuario eligió HLE de alta precisión.
