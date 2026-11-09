@@ -179,3 +179,6 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Fill Rectangle en 1 y 2 ciclos ahora pasa por combinador y blender (los fundidos a negro de MK64 se descartaban).
   Las estelas del logo giratorio parecen un efecto del juego (sin confirmar contra hardware).
   Siguiente: ventana con imagen y control para N64, y velocidad.
+- 2026-11-08 — Frontend: soporte de gamepad (SDL3) en la interfaz System y mapeo al mando de N64 (stick izquierdo,
+  C con stick derecho, LT=Z, RB/RT=R, LB=L). La ventana y el teclado de N64 ya existían. Pendiente: probar MK64 jugando
+  (va lento, ~1/6 de tiempo real) y acelerar la emulación.

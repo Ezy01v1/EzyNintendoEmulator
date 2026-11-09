@@ -2,8 +2,10 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -42,7 +44,33 @@ constexpr std::array<KeyBinding, 14> kKeymap = {{
 
 // I/J/K/L move the analog stick to +-80 (about what a real stick reaches).
 constexpr std::array<SDL_Scancode, 4> kStickKeys = {SDL_SCANCODE_I, SDL_SCANCODE_K, SDL_SCANCODE_J, SDL_SCANCODE_L};
-constexpr std::int8_t kStickRange = 80;
+constexpr int kStickRange = 80;
+
+// Gamepad (SDL layout, Xbox names): left stick = analog stick, right stick = C buttons,
+// LT = Z, RT and RB = R, LB = L. B and Y also give C-Down and C-Left, as many N64 games
+// use those as extra action buttons.
+struct PadBinding {
+    SDL_GamepadButton button;
+    std::uint16_t bit;
+};
+
+constexpr std::array<PadBinding, 11> kPadMap = {{
+    {SDL_GAMEPAD_BUTTON_SOUTH, 0x8000},           // A
+    {SDL_GAMEPAD_BUTTON_WEST, 0x4000},            // B
+    {SDL_GAMEPAD_BUTTON_START, 0x1000},           // Start
+    {SDL_GAMEPAD_BUTTON_DPAD_UP, 0x0800},
+    {SDL_GAMEPAD_BUTTON_DPAD_DOWN, 0x0400},
+    {SDL_GAMEPAD_BUTTON_DPAD_LEFT, 0x0200},
+    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, 0x0100},
+    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, 0x0020},   // L
+    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 0x0010},  // R
+    {SDL_GAMEPAD_BUTTON_EAST, 0x0004},            // C-Down
+    {SDL_GAMEPAD_BUTTON_NORTH, 0x0002},           // C-Left
+}};
+
+constexpr int kPadDeadZone = 8000;
+constexpr int kTriggerThreshold = 12000;
+constexpr int kCStickThreshold = 16000;
 
 const char* const kGprNames[32] = {"r0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2",
                                    "t3", "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
@@ -143,7 +171,47 @@ void N64System::reset() {
 void N64System::update_controller() {
     stick_x_ = static_cast<std::int8_t>(((stick_keys_ & 8) ? kStickRange : 0) - ((stick_keys_ & 4) ? kStickRange : 0));
     stick_y_ = static_cast<std::int8_t>(((stick_keys_ & 1) ? kStickRange : 0) - ((stick_keys_ & 2) ? kStickRange : 0));
-    n64_->bus().pif().set_buttons(0, buttons_, stick_x_, stick_y_);
+    // The gamepad's left stick wins over the keys whenever it is outside its dead zone.
+    const auto analog = [](std::int16_t value) -> int {
+        if (std::abs(value) < kPadDeadZone) return 0;
+        return value * kStickRange / 32767;
+    };
+    const int pad_x = analog(pad_x_), pad_y = -analog(pad_y_);  // SDL Y grows downward
+    if (pad_x != 0 || pad_y != 0) {
+        stick_x_ = static_cast<std::int8_t>(std::clamp(pad_x, -kStickRange, +kStickRange));
+        stick_y_ = static_cast<std::int8_t>(std::clamp(pad_y, -kStickRange, +kStickRange));
+    }
+    const auto all = static_cast<std::uint16_t>(buttons_ | pad_buttons_ | pad_axis_buttons_);
+    n64_->bus().pif().set_buttons(0, all, stick_x_, stick_y_);
+}
+
+void N64System::handle_gamepad_button(SDL_GamepadButton button, bool pressed) {
+    for (const auto& [pad_button, bit] : kPadMap) {
+        if (pad_button == button) pad_buttons_ = static_cast<std::uint16_t>(pressed ? pad_buttons_ | bit : pad_buttons_ & ~bit);
+    }
+    update_controller();
+}
+
+void N64System::handle_gamepad_axis(SDL_GamepadAxis axis, std::int16_t value) {
+    const auto set = [&](std::uint16_t bit, bool on) {
+        pad_axis_buttons_ = static_cast<std::uint16_t>(on ? pad_axis_buttons_ | bit : pad_axis_buttons_ & ~bit);
+    };
+    switch (axis) {
+        case SDL_GAMEPAD_AXIS_LEFTX: pad_x_ = value; break;
+        case SDL_GAMEPAD_AXIS_LEFTY: pad_y_ = value; break;
+        case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: set(0x2000, value > kTriggerThreshold); break;   // Z
+        case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: set(0x0010, value > kTriggerThreshold); break;  // R
+        case SDL_GAMEPAD_AXIS_RIGHTX:  // C-Left / C-Right
+            set(0x0002, value < -kCStickThreshold);
+            set(0x0001, value > kCStickThreshold);
+            break;
+        case SDL_GAMEPAD_AXIS_RIGHTY:  // C-Up / C-Down
+            set(0x0008, value < -kCStickThreshold);
+            set(0x0004, value > kCStickThreshold);
+            break;
+        default: break;
+    }
+    update_controller();
 }
 
 void N64System::handle_key(SDL_Scancode scancode, bool pressed) {

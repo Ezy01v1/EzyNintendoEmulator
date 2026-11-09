@@ -125,7 +125,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
         return 1;
     }
@@ -184,6 +184,16 @@ int main(int argc, char* argv[]) {
                         running = false;
                     }
                     system->handle_key(event.key.scancode, down);
+                } else if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
+                    // Opened gamepads stay open until SDL_Quit; SDL closes them then.
+                    if (SDL_Gamepad* pad = SDL_OpenGamepad(event.gdevice.which)) {
+                        std::cerr << "Gamepad connected: " << SDL_GetGamepadName(pad) << '\n';
+                    }
+                } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+                    system->handle_gamepad_button(static_cast<SDL_GamepadButton>(event.gbutton.button),
+                                                  event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+                } else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+                    system->handle_gamepad_axis(static_cast<SDL_GamepadAxis>(event.gaxis.axis), event.gaxis.value);
                 }
             }
 

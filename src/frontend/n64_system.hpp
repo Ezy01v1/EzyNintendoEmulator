@@ -31,6 +31,8 @@ public:
     void reset() override;
 
     void handle_key(SDL_Scancode scancode, bool pressed) override;
+    void handle_gamepad_button(SDL_GamepadButton button, bool pressed) override;
+    void handle_gamepad_axis(SDL_GamepadAxis axis, std::int16_t value) override;
     void render(std::span<std::uint32_t> argb_pixels) const override;
     [[nodiscard]] bool sound_active() const override { return false; }
     [[nodiscard]] int audio_sample_rate() const override { return kAudioRate; }
@@ -55,6 +57,9 @@ private:
     std::uint16_t buttons_ = 0;
     std::int8_t stick_x_ = 0, stick_y_ = 0;
     std::uint8_t stick_keys_ = 0;  // up, down, left, right held
+    std::uint16_t pad_buttons_ = 0;     // from gamepad buttons
+    std::uint16_t pad_axis_buttons_ = 0;  // from triggers and the right stick (Z, R, C buttons)
+    std::int16_t pad_x_ = 0, pad_y_ = 0;  // left stick, SDL range
     std::vector<float> audio_;
     double resample_phase_ = 0;
 };

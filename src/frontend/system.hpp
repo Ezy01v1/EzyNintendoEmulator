@@ -25,6 +25,9 @@ public:
     virtual void reset() = 0;
 
     virtual void handle_key(SDL_Scancode scancode, bool pressed) = 0;
+    // Game controllers (SDL gamepad layout). Systems without gamepad support ignore them.
+    virtual void handle_gamepad_button(SDL_GamepadButton /*button*/, bool /*pressed*/) {}
+    virtual void handle_gamepad_axis(SDL_GamepadAxis /*axis*/, std::int16_t /*value*/) {}
     virtual void render(std::span<std::uint32_t> argb_pixels) const = 0;
     [[nodiscard]] virtual bool sound_active() const = 0;  // for the shared beeper
 
