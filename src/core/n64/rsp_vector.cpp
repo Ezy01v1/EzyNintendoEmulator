@@ -1,7 +1,13 @@
-#include "n64/rsp_vector.hpp"
+﻿#include "n64/rsp_vector.hpp"
 
 #include <algorithm>
 #include <bit>
+#include <utility>
+
+#ifdef _MSC_VER
+// The lane functions are instantiated per opcode, so their op tests are constant on purpose.
+#pragma warning(disable : 4127)
+#endif
 
 namespace ezy::n64 {
 
@@ -149,16 +155,30 @@ void RspVector::execute_alu(std::uint32_t word) {
         return;
     }
 
-    for (unsigned lane = 0; lane < dest.size(); ++lane) {
-        if (op <= VMADH) dest[lane] = multiply(op, source, lane, vs[lane], selected[lane]);
-        else dest[lane] = alu_lane(op, lane, vs[lane], selected[lane]);
-    }
-    if (op == VADD || op == VSUB || (op >= VLT && op <= VMRG && op != VCH)) vco_ = 0;
-    if (op >= VLT && op <= VGE) vcc_ &= 0xFF;
-    if (op == VCL || op == VCR) vce_ = 0;
+    (this->*kLaneOps[op])(dest, vs, selected, source);
 }
 
-std::uint16_t RspVector::multiply(unsigned op, unsigned source, unsigned lane, std::uint16_t lhs, std::uint16_t rhs) {
+// One instantiation per opcode: the per-lane switch folds away, leaving a plain 8-lane loop.
+template <unsigned op>
+void RspVector::run_lanes(Vector& dest, const Vector& vs, const Vector& selected, unsigned source) {
+    for (unsigned lane = 0; lane < 8; ++lane) {
+        if constexpr (op <= VMADH) dest[lane] = multiply<op>(source, lane, vs[lane], selected[lane]);
+        else dest[lane] = alu_lane<op>(lane, vs[lane], selected[lane]);
+    }
+    if constexpr (op == VADD || op == VSUB || (op >= VLT && op <= VMRG && op != VCH)) vco_ = 0;
+    if constexpr (op >= VLT && op <= VGE) vcc_ &= 0xFF;
+    if constexpr (op == VCL || op == VCR) vce_ = 0;
+}
+
+template <std::size_t... ops>
+constexpr std::array<RspVector::LaneOp, 64> RspVector::lane_ops(std::index_sequence<ops...>) {
+    return {&RspVector::run_lanes<static_cast<unsigned>(ops)>...};
+}
+
+const std::array<RspVector::LaneOp, 64> RspVector::kLaneOps = RspVector::lane_ops(std::make_index_sequence<64>{});
+
+template <unsigned op>
+std::uint16_t RspVector::multiply(unsigned source, unsigned lane, std::uint16_t lhs, std::uint16_t rhs) {
     const std::int64_t a = static_cast<std::int16_t>(lhs), b = static_cast<std::int16_t>(rhs);
     auto& acc = accumulator_[lane];
     switch (op) {
@@ -212,7 +232,8 @@ std::uint16_t RspVector::multiply(unsigned op, unsigned source, unsigned lane, s
     return static_cast<std::uint16_t>(acc);
 }
 
-std::uint16_t RspVector::alu_lane(unsigned op, unsigned lane, std::uint16_t lhs, std::uint16_t rhs) {
+template <unsigned op>
+std::uint16_t RspVector::alu_lane(unsigned lane, std::uint16_t lhs, std::uint16_t rhs) {
     const std::int32_t a = static_cast<std::int16_t>(lhs), b = static_cast<std::int16_t>(rhs);
     const bool carry = (vco_ >> lane) & 1, unequal = (vco_ >> (lane + 8)) & 1;
     std::uint16_t result = 0, low = 0;

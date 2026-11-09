@@ -113,7 +113,11 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         evento que deja una interrupción pendiente y la CPU retoma en ese ciclo con la paridad
         correcta (salto o `nop`). MK64 300 cuadros: ~15,5 s → **~9 s** (2,2× desde 20,1), imagen idéntica.
   - Perfilador: `prof.cpp` (muestrea el RIP cada 1 ms y resuelve con el PDB); no está en el repo.
-  - [ ] RSP: unidad vectorial con SIMD (SSE2/SSE4.1) en `RspVector` (multiply, alu, acumulador).
+  - [x] RSP vectorial: cada opcode es una plantilla (`run_lanes<op>`) despachada por tabla; sin
+        `switch` por carril. MK64 ~9 s → ~7,9 s. Cada op pesa ahora ~1,5 %: SSE a mano no vale la pena.
+  - [ ] RSP escalar: lo que más pesa ahora (~20 %) es reprogramar cada instrucción como evento
+        (`schedule` en `RspRegs::step`). Idea: que el RSP corra un tramo con su propio reloj local
+        y solo toque el planificador al parar (cuidar MTC0 a SP_STATUS, DMA y RDP desde el RSP).
   - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
         (cuidar `Sync Full`, lecturas de RDRAM y save states).
 - [ ] **Etapa 2: decidir según lo medido**:
@@ -240,3 +244,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-09 — RSP/RDP en lote durante el bucle ocioso de la CPU, cortando exacto en la interrupción. MK64 300 cuadros
   ~9 s (antes 20,1 s), imagen idéntica, 154/154 pruebas, n64-systemtest 2984/3721. Ahora pesa el RSP
   (vector multiply/alu) y el RDP. Siguiente: SIMD en `RspVector`.
+- 2026-11-09 — RSP vectorial por plantillas de opcode: MK64 300 cuadros ~7,9 s (≈38 cuadros/s), imagen idéntica,
+  154/154 pruebas, n64-systemtest 2984/3721. Siguiente: RSP escalar con reloj local, o RDP en otro hilo.
