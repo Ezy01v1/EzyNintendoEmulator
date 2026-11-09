@@ -55,6 +55,8 @@ public:
         when = rsp.when;
         return true;
     }
+    // The lower bound on every event but RspStep (RspRegs::run keeps the RSP's time itself).
+    [[nodiscard]] std::uint64_t others_bound() const { return others_next_; }
     // After a run of take_rsp_step: the exact bound again, so pop_due stays a single compare.
     void settle_rsp() {
         const Slot& rsp = slots_[index(EventType::RspStep)];

@@ -33,6 +33,11 @@ public:
     void skip_idle_cycles(std::uint64_t cycles);
     // The next step() would take an interrupt.
     [[nodiscard]] bool interrupt_pending() const;
+    // A high RCP interrupt line (Cause.IP2) would be taken: enabled and not masked.
+    [[nodiscard]] bool takes_ip2() const {
+        const std::uint32_t status = cop0_.status();
+        return (status & Cop0::kIE) && !(status & (Cop0::kEXL | Cop0::kERL)) && (status & Cop0::kIP2);
+    }
     // CPU cycles until Count reaches Compare (and sets Cause.IP7).
     [[nodiscard]] std::uint64_t cycles_until_compare() const { return cop0_.cycles_until_compare(); }
 

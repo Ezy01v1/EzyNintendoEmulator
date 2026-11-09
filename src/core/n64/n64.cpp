@@ -67,13 +67,11 @@ std::optional<std::uint64_t> N64::run_due_events(bool watch_interrupt) {
     for (;;) {
         std::uint64_t when = 0;
         if (scheduler_.take_rsp_step(when)) {
-            bool interrupted = false;
-            do {
-                bus_.rsp_step(when);
-                interrupted = watch_interrupt && cpu_.interrupt_pending();
-            } while (!interrupted && scheduler_.take_rsp_step(when));
+            // Only the MI line can change while the RSP runs, so the CPU would take the
+            // interrupt as soon as it rises if IP2 is enabled.
+            const auto interrupted = bus_.rsp_run(when, watch_interrupt && cpu_.takes_ip2());
             scheduler_.settle_rsp();
-            if (interrupted) return when;
+            if (interrupted) return interrupted;
         }
         const auto due = scheduler_.pop_due();
         if (!due) return std::nullopt;

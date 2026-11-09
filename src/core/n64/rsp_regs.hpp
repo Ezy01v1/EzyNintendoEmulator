@@ -1,7 +1,8 @@
-#pragma once
+﻿#pragma once
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 #include "n64/mi.hpp"
@@ -20,6 +21,8 @@ public:
     void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
     void finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when);
     void step(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when);
+    // Steps from `when` while each next one is due and before every other event (see rsp_scalar.cpp).
+    std::optional<std::uint64_t> run(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when, bool stop_on_line);
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version, Rdp& rdp) {

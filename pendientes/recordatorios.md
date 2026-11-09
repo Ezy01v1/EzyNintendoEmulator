@@ -115,9 +115,8 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
   - Perfilador: `prof.cpp` (muestrea el RIP cada 1 ms y resuelve con el PDB); no está en el repo.
   - [x] RSP vectorial: cada opcode es una plantilla (`run_lanes<op>`) despachada por tabla; sin
         `switch` por carril. MK64 ~9 s → ~7,9 s. Cada op pesa ahora ~1,5 %: SSE a mano no vale la pena.
-  - [ ] RSP escalar: lo que más pesa ahora (~20 %) es reprogramar cada instrucción como evento
-        (`schedule` en `RspRegs::step`). Idea: que el RSP corra un tramo con su propio reloj local
-        y solo toque el planificador al parar (cuidar MTC0 a SP_STATUS, DMA y RDP desde el RSP).
+  - [x] RSP con reloj local (`RspRegs::run`): corre tramos sin pasar por el planificador en cada
+        instrucción; relee `others_bound()` porque el propio RSP agenda DMA/RDP. MK64 ~7,9 s → ~7,3 s.
   - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
         (cuidar `Sync Full`, lecturas de RDRAM y save states).
 - [ ] **Etapa 2: decidir según lo medido**:
@@ -246,3 +245,5 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   (vector multiply/alu) y el RDP. Siguiente: SIMD en `RspVector`.
 - 2026-11-09 — RSP vectorial por plantillas de opcode: MK64 300 cuadros ~7,9 s (≈38 cuadros/s), imagen idéntica,
   154/154 pruebas, n64-systemtest 2984/3721. Siguiente: RSP escalar con reloj local, o RDP en otro hilo.
+- 2026-11-09 — RSP con reloj local: MK64 300 cuadros ~7,3 s (≈41 cuadros/s; empezó el día en 20,1 s), imagen idéntica,
+  154/154 pruebas, n64-systemtest 2984/3721. Siguiente: abrir PR de `n64/cpu-decode-cache`; luego RDP en otro hilo o JIT.
