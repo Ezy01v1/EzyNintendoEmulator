@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <utility>
 
 namespace ezy::n64 {
 
@@ -29,8 +30,16 @@ private:
     static void set_byte(Vector& vector, unsigned index, std::uint8_t value);
     void set_accumulator_low(unsigned lane, std::uint16_t value);
     void execute_alu(std::uint32_t word);
-    std::uint16_t multiply(unsigned op, unsigned source, unsigned lane, std::uint16_t lhs, std::uint16_t rhs);
-    std::uint16_t alu_lane(unsigned op, unsigned lane, std::uint16_t lhs, std::uint16_t rhs);
+    template <unsigned op>
+    std::uint16_t multiply(unsigned source, unsigned lane, std::uint16_t lhs, std::uint16_t rhs);
+    template <unsigned op>
+    std::uint16_t alu_lane(unsigned lane, std::uint16_t lhs, std::uint16_t rhs);
+    template <unsigned op>
+    void run_lanes(Vector& dest, const Vector& vs, const Vector& selected, unsigned source);
+    using LaneOp = void (RspVector::*)(Vector&, const Vector&, const Vector&, unsigned);
+    template <std::size_t... ops>
+    static constexpr std::array<LaneOp, 64> lane_ops(std::index_sequence<ops...>);
+    static const std::array<LaneOp, 64> kLaneOps;
     std::uint16_t clip_lane(unsigned op, unsigned lane, std::uint16_t lhs, std::uint16_t rhs);
     void divide(unsigned op, Vector& dest, unsigned lane, std::uint16_t input);
 

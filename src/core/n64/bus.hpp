@@ -48,6 +48,11 @@ public:
     [[nodiscard]] bool interrupt_line() const override { return mi_.line(); }
 
     void handle_event(EventType type, std::uint64_t when);
+    // The RspStep event, without the dispatch (the step loop's fast path).
+    void rsp_step(std::uint64_t when) { rsp_.step(mi_, rdp_, scheduler_, when); }
+    std::optional<std::uint64_t> rsp_run(std::uint64_t when, bool stop_on_line) {
+        return rsp_.run(mi_, rdp_, scheduler_, when, stop_on_line);
+    }
 
     [[nodiscard]] Mi& mi() { return mi_; }
     [[nodiscard]] Pi& pi() { return pi_; }
@@ -67,6 +72,7 @@ public:
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {
         ar(rdram_), ar(rdram_regs_), ar(ri_), ar(isviewer_);
+        set_direct_ram(rdram_.data(), static_cast<std::uint32_t>(rdram_.size()));
         mi_.serialize(ar);
         pi_.serialize(ar);
         rsp_.serialize(ar, version, rdp_);

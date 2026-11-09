@@ -103,9 +103,20 @@ Meta: 60 cuadros de video por segundo (100 % de velocidad); MK64 se vería a sus
 Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
 
 - [ ] **Etapa 1: afinar el intérprete** (meta ~25–30 cuadros/s):
-  - [ ] CPU: instrucciones decodificadas en caché por página (invalidar al escribir RDRAM),
-        menos trabajo fijo por paso (`interrupt_line`, `tick_random`, `Cop0::advance`).
-  - [ ] RSP: unidad vectorial con SIMD (SSE2/SSE4.1) en `RspVector` (multiply, alu, acumulador).
+  - [x] CPU (rama `n64/cpu-decode-cache`): **el 91 % de las instrucciones de MK64 eran el bucle
+        ocioso de libultra** (`b .` + `nop` en 0x5B8). Ahora se salta hasta el próximo evento o
+        Compare, exacto al ciclo. Además: RDRAM directo en load/store, vía rápida del RSP en el
+        planificador, COP0 en línea. MK64 300 cuadros: 20,1 s → ~15,5 s, imagen idéntica.
+        Una caché de decodificación **no** sirve: decodificar MIPS es barato (medido).
+  - [x] Bucle ocioso mientras el RSP trabaja: RSP, RDP y DMA de SP corren en lote durante la
+        espera (sus manejadores no leen `now()`; AI sí, por eso corta el lote). Se corta en el primer
+        evento que deja una interrupción pendiente y la CPU retoma en ese ciclo con la paridad
+        correcta (salto o `nop`). MK64 300 cuadros: ~15,5 s → **~9 s** (2,2× desde 20,1), imagen idéntica.
+  - Perfilador: `prof.cpp` (muestrea el RIP cada 1 ms y resuelve con el PDB); no está en el repo.
+  - [x] RSP vectorial: cada opcode es una plantilla (`run_lanes<op>`) despachada por tabla; sin
+        `switch` por carril. MK64 ~9 s → ~7,9 s. Cada op pesa ahora ~1,5 %: SSE a mano no vale la pena.
+  - [x] RSP con reloj local (`RspRegs::run`): corre tramos sin pasar por el planificador en cada
+        instrucción; relee `others_bound()` porque el propio RSP agenda DMA/RDP. MK64 ~7,9 s → ~7,3 s.
   - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
         (cuidar `Sync Full`, lecturas de RDRAM y save states).
 - [ ] **Etapa 2: decidir según lo medido**:
@@ -226,3 +237,13 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   con retraso: no aceleró y colgó una prueba; descartado. Siguiente: decodificación en caché de la CPU, SIMD en el RSP.
 - 2026-11-08 — PR #14 mergeado (gamepad + velocidad). Recordatorios al día: RDP marcado como terminado y plan
   de velocidad N64 en etapas (Subproyecto 4). Próxima sesión: Etapa 1 (intérprete en caché, SIMD en RSP, RDP en hilo).
+- 2026-11-09 — Velocidad N64, CPU (rama `n64/cpu-decode-cache`): salto del bucle ocioso exacto al ciclo, RDRAM directo,
+  vía rápida del RSP en el planificador. MK64 300 cuadros 20,1 s → ~15,5 s con imagen idéntica. 154/154 pruebas,
+  n64-systemtest 2984/3721. Siguiente: RSP en lote durante el bucle ocioso, luego SIMD en el RSP.
+- 2026-11-09 — RSP/RDP en lote durante el bucle ocioso de la CPU, cortando exacto en la interrupción. MK64 300 cuadros
+  ~9 s (antes 20,1 s), imagen idéntica, 154/154 pruebas, n64-systemtest 2984/3721. Ahora pesa el RSP
+  (vector multiply/alu) y el RDP. Siguiente: SIMD en `RspVector`.
+- 2026-11-09 — RSP vectorial por plantillas de opcode: MK64 300 cuadros ~7,9 s (≈38 cuadros/s), imagen idéntica,
+  154/154 pruebas, n64-systemtest 2984/3721. Siguiente: RSP escalar con reloj local, o RDP en otro hilo.
+- 2026-11-09 — RSP con reloj local: MK64 300 cuadros ~7,3 s (≈41 cuadros/s; empezó el día en 20,1 s), imagen idéntica,
+  154/154 pruebas, n64-systemtest 2984/3721. Siguiente: abrir PR de `n64/cpu-decode-cache`; luego RDP en otro hilo o JIT.

@@ -11,6 +11,47 @@ constexpr std::uint64_t sext32(std::uint32_t v) { return static_cast<std::uint64
 
 }  // namespace
 
+// An idle loop is a branch to itself with a NOP in its delay slot, in cached kseg0 RDRAM:
+// libultra's idle thread ("b ." / "j .") spins there until an interrupt. Each iteration
+// is two one-cycle instructions that change nothing but the time, Count and Random.
+int Vr4300::idle_loop_cycles() const {
+    if (pc_ != idle_candidate_) return 0;  // only after a branch that jumped to itself
+    if (branch_taken_ || next_pc_ != pc_ + 4) return 0;  // must be at the branch itself
+    const std::uint32_t status = cop0_.status();
+    const std::uint32_t ksu = (status >> 3) & 3;
+    if (!(ksu == 0 || ksu == 3 || (status & 6) != 0)) return 0;  // kernel mode
+    if (pc_ - 0xFFFFFFFF80000000ULL >= 0x20000000ULL) return 0;  // kseg0 only (cached)
+    const auto paddr = static_cast<std::uint32_t>(pc_ & 0x1FFFFFFF);
+    if (paddr + 8 > bus_.direct_ram_size()) return 0;
+    if (interrupt_pending()) return 0;  // the next step leaves the loop
+    const std::uint8_t* m = bus_.direct_ram() + paddr;
+    const std::uint32_t branch = (std::uint32_t{m[0]} << 24) | (m[1] << 16) | (m[2] << 8) | m[3];
+    const std::uint32_t slot = (std::uint32_t{m[4]} << 24) | (m[5] << 16) | (m[6] << 8) | m[7];
+    if (slot != 0) return 0;
+    const bool beq_self = branch == 0x1000FFFF;  // BEQ $0, $0, -1
+    const bool j_self = (branch >> 26) == 2 &&
+                        (((pc_ + 4) & ~std::uint64_t{0x0FFFFFFF}) | ((branch & 0x3FFFFFF) << 2)) == pc_;
+    return beq_self || j_self ? 2 : 0;
+}
+
+bool Vr4300::interrupt_pending() const {
+    const std::uint32_t status = cop0_.status();
+    const std::uint32_t cause = (cop0_.cause() & ~Cop0::kIP2) | (bus_.interrupt_line() ? Cop0::kIP2 : 0);
+    return (status & Cop0::kIE) && !(status & (Cop0::kEXL | Cop0::kERL)) && (cause & status & 0xFF00);
+}
+
+// Each cycle is one instruction of the loop. An odd count ends after the branch, with the
+// NOP in its delay slot next.
+void Vr4300::skip_idle_cycles(std::uint64_t cycles) {
+    cop0_.retire_many(cycles, cycles);
+    if (cycles & 1) {
+        current_pc_ = pc_;
+        pc_ = next_pc_;
+        next_pc_ = current_pc_;
+        branch_taken_ = true;
+    }
+}
+
 int Vr4300::step() {
     cycles_ = 1;
     exception_ = false;
@@ -31,8 +72,7 @@ int Vr4300::step() {
         }
     }
     gpr_[0] = 0;
-    cop0_.advance(cycles_);
-    cop0_.tick_random();
+    cop0_.retire(cycles_);
     return cycles_;
 }
 
@@ -126,7 +166,10 @@ void Vr4300::execute_cop0(std::uint32_t instr) {
 //   kseg1 0xFFFFFFFFA0000000-BFFFFFFF  physical = vaddr & 0x1FFFFFFF, uncached
 // Only kernel mode may use them. Everything else goes through the TLB.
 bool Vr4300::translate(std::uint64_t vaddr, bool write, Translation& out) {
-    if (vaddr >= 0xFFFFFFFF80000000ULL && vaddr < 0xFFFFFFFFC0000000ULL && mode() == Mode::Kernel) {
+    // Kernel mode: KSU = 0, or EXL/ERL set.
+    const std::uint32_t status = cop0_.status();
+    const std::uint32_t ksu = (status >> 3) & 3;  // 0 and 3 are kernel, like mode()
+    if (vaddr - 0xFFFFFFFF80000000ULL < 0x40000000ULL && (ksu == 0 || ksu == 3 || (status & 6) != 0)) {
         out.paddr = static_cast<std::uint32_t>(vaddr & 0x1FFFFFFF);
         out.cached = vaddr < 0xFFFFFFFFA0000000ULL;
         return true;
@@ -247,6 +290,13 @@ bool Vr4300::load(std::uint64_t vaddr, T& value, bool for_store) {
     if (!translate(vaddr, for_store, t)) return false;
     last_paddr_ = t.paddr;
     if (!t.cached) cycles_ += static_cast<int>(bus_.uncached_cycles(t.paddr));
+    if (t.paddr < bus_.direct_ram_size()) {  // RDRAM: read it in place (big-endian)
+        const std::uint8_t* m = bus_.direct_ram() + t.paddr;
+        std::uint64_t v = 0;
+        for (std::size_t i = 0; i < sizeof(T); ++i) v = (v << 8) | m[i];
+        value = static_cast<T>(v);
+        return true;
+    }
     if constexpr (sizeof(T) == 1) value = bus_.read8(t.paddr);
     else if constexpr (sizeof(T) == 2) value = bus_.read16(t.paddr);
     else if constexpr (sizeof(T) == 4) value = bus_.read32(t.paddr);
@@ -263,6 +313,11 @@ bool Vr4300::store(std::uint64_t vaddr, T value) {
     Translation t{};
     if (!translate(vaddr, true, t)) return false;
     if (!t.cached) cycles_ += static_cast<int>(bus_.uncached_cycles(t.paddr));
+    if (t.paddr < bus_.direct_ram_size()) {
+        std::uint8_t* m = bus_.direct_ram() + t.paddr;
+        for (std::size_t i = 0; i < sizeof(T); ++i) m[i] = static_cast<std::uint8_t>(static_cast<std::uint64_t>(value) >> (8 * (sizeof(T) - 1 - i)));
+        return true;
+    }
     if constexpr (sizeof(T) == 1) bus_.write8(t.paddr, value);
     else if constexpr (sizeof(T) == 2) bus_.write16(t.paddr, value);
     else if constexpr (sizeof(T) == 4) bus_.write32(t.paddr, value);

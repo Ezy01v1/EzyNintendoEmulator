@@ -1,5 +1,6 @@
-#include "n64/n64.hpp"
+﻿#include "n64/n64.hpp"
 
+#include <algorithm>
 #include <array>
 
 #include "common/state.hpp"
@@ -34,8 +35,49 @@ std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<co
 }
 
 void N64::step() {
+    // Idle loop: jump over whole iterations up to just before the next event or Compare, so
+    // everything happens at the same cycle as when stepping one instruction at a time.
+    //
+    // The RSP, RDP and SP DMA keep running meanwhile: their handlers only use the event
+    // time, never now(), so they run in order up to that point; the first one that makes
+    // the CPU take an interrupt stops the run, and the CPU continues from that cycle.
+    if (cpu_.idle_loop_cycles()) {
+        constexpr std::uint32_t kBatchable = Scheduler::bit(EventType::RspStep) | Scheduler::bit(EventType::RdpWord) |
+                                             Scheduler::bit(EventType::SpDma);
+        const std::uint64_t start = scheduler_.now();
+        const std::uint64_t limit = std::min(start + cpu_.cycles_until_compare(), scheduler_.earliest_except(kBatchable));
+        if (limit > start + 1) {
+            std::uint64_t stop = limit - 1;  // the last cycle reached before the limit's step
+            scheduler_.advance_to(stop);
+            if (const auto interrupted = run_due_events(true)) {
+                stop = std::max(*interrupted, start);
+                scheduler_.rewind_to(stop);
+                run_due_events(false);  // the rest due at that cycle still runs before the CPU's step
+            }
+            cpu_.skip_idle_cycles(stop - start);
+        }
+    }
     scheduler_.advance(static_cast<std::uint64_t>(cpu_.step()));
-    while (const auto due = scheduler_.pop_due()) bus_.handle_event(due->type, due->when);
+    run_due_events(false);
+}
+
+// Runs every due event in order. With watch_interrupt, stops right after the first one
+// that makes the CPU take an interrupt and returns its time.
+std::optional<std::uint64_t> N64::run_due_events(bool watch_interrupt) {
+    for (;;) {
+        std::uint64_t when = 0;
+        if (scheduler_.take_rsp_step(when)) {
+            // Only the MI line can change while the RSP runs, so the CPU would take the
+            // interrupt as soon as it rises if IP2 is enabled.
+            const auto interrupted = bus_.rsp_run(when, watch_interrupt && cpu_.takes_ip2());
+            scheduler_.settle_rsp();
+            if (interrupted) return interrupted;
+        }
+        const auto due = scheduler_.pop_due();
+        if (!due) return std::nullopt;
+        bus_.handle_event(due->type, due->when);
+        if (watch_interrupt && cpu_.interrupt_pending()) return due->when;
+    }
 }
 
 void N64::run_frame() {

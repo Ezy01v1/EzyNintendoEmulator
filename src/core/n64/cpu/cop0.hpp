@@ -56,7 +56,28 @@ public:
     void advance(int cycles);
     // One instruction retired: Random counts down from 31 to Wired, then wraps.
     void tick_random();
-    void set_ip2(bool level);
+    // Both of the above for one retired instruction, inline for the step loop.
+    void retire(int cycles) {
+        const auto before = static_cast<std::uint32_t>(half_cycles_ >> 1);
+        half_cycles_ += static_cast<std::uint64_t>(cycles);
+        const auto after = static_cast<std::uint32_t>(half_cycles_ >> 1);
+        const auto compare = static_cast<std::uint32_t>(regs_[kCompare]);
+        if (after != before && static_cast<std::uint32_t>(compare - before - 1) < after - before) regs_[kCause] |= kIP7;
+        std::uint64_t& random = regs_[kRandom];
+        random = random == (regs_[kWired] & 63) ? 31 : (random - 1) & 63;
+    }
+    // Many instructions at once, for idle loops. The caller makes sure Count doesn't reach
+    // Compare on the way (cycles < cycles_until_compare()).
+    void retire_many(std::uint64_t cycles, std::uint64_t instructions);
+    [[nodiscard]] std::uint64_t cycles_until_compare() const {
+        const auto count = static_cast<std::uint32_t>(half_cycles_ >> 1);
+        std::uint64_t ticks = static_cast<std::uint32_t>(static_cast<std::uint32_t>(regs_[kCompare]) - count);
+        if (ticks == 0) ticks = std::uint64_t{1} << 32;
+        return ((((half_cycles_ >> 1) + ticks) << 1) - half_cycles_);
+    }
+    void set_ip2(bool level) {
+        regs_[kCause] = (regs_[kCause] & ~std::uint64_t{kIP2}) | (level ? kIP2 : 0);
+    }
 
     template <class Ar>
     void serialize(Ar& ar) {

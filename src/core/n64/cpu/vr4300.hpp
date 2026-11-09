@@ -26,6 +26,21 @@ public:
 
     int step();
 
+    // Cycles of one iteration if the CPU sits at the start of an idle loop that no pending
+    // interrupt would leave, else 0. skip_idle_cycles() then runs that many of its
+    // one-cycle instructions at once.
+    [[nodiscard]] int idle_loop_cycles() const;
+    void skip_idle_cycles(std::uint64_t cycles);
+    // The next step() would take an interrupt.
+    [[nodiscard]] bool interrupt_pending() const;
+    // A high RCP interrupt line (Cause.IP2) would be taken: enabled and not masked.
+    [[nodiscard]] bool takes_ip2() const {
+        const std::uint32_t status = cop0_.status();
+        return (status & Cop0::kIE) && !(status & (Cop0::kEXL | Cop0::kERL)) && (status & Cop0::kIP2);
+    }
+    // CPU cycles until Count reaches Compare (and sets Cause.IP7).
+    [[nodiscard]] std::uint64_t cycles_until_compare() const { return cop0_.cycles_until_compare(); }
+
     [[nodiscard]] std::uint64_t gpr(int index) const { return gpr_[static_cast<std::size_t>(index)]; }
     void set_gpr(int index, std::uint64_t value) {
         if (index != 0) gpr_[static_cast<std::size_t>(index)] = value;
@@ -110,6 +125,9 @@ private:
     std::uint32_t last_paddr_ = 0;  // physical address of the last load (LL sets LLAddr from it)
     int cycles_ = 0;                // cycles of the instruction being executed
     bool exception_ = false;        // the instruction being executed raised an exception
+    // Target of the last taken branch that jumped to its own address (not saved: it only
+    // speeds up idle_loop_cycles()).
+    std::uint64_t idle_candidate_ = 1;
 };
 
 }  // namespace ezy::n64

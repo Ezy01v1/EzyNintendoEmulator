@@ -1,6 +1,7 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
+#include <optional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -29,6 +30,9 @@ public:
     N64& operator=(const N64&) = delete;
 
     void step();
+
+    // Runs the due events; see n64.cpp.
+    std::optional<std::uint64_t> run_due_events(bool watch_interrupt);
     void run_frame();  // until the VI finishes a field
 
     [[nodiscard]] Vr4300& cpu() { return cpu_; }

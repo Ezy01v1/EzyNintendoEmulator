@@ -21,6 +21,39 @@ void RspRegs::step(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when) {
     }
 }
 
+// The same as step() followed by take_rsp_step() for as long as it succeeds, but with the
+// RSP's time kept here instead of a round trip through the scheduler per instruction. The
+// bound on the other events is re-read every time, since the RSP itself can schedule some
+// (SP DMA, RDP commands). Stops after the first step that raises the interrupt line if
+// stop_on_line, returning that step's time.
+std::optional<std::uint64_t> RspRegs::run(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when,
+                                          bool stop_on_line) {
+    for (;;) {
+        if (sp_status_ & kHalt) return std::nullopt;
+        const std::uint32_t pc = sp_pc_ & kPcMask;
+        const std::uint8_t* imem = mem_.data() + 0x1000 + pc;
+        const std::uint32_t word = (std::uint32_t{imem[0]} << 24) | (imem[1] << 16) | (imem[2] << 8) | imem[3];
+        sp_pc_ = next_pc_ & kPcMask;
+        next_pc_ = (sp_pc_ + 4) & kPcMask;
+        execute_scalar(word, pc, mi, rdp, scheduler, when);
+        gpr_[0] = 0;
+
+        if (sp_status_ & kSingleStep) sp_status_ |= kHalt;
+        if (sp_status_ & kHalt) return stop_on_line && mi.line() ? std::optional{when} : std::nullopt;
+        const std::uint64_t next = when + (short_step_ ? 1 : 2);
+        short_step_ = !short_step_;
+        if (stop_on_line && mi.line()) {
+            scheduler.schedule(EventType::RspStep, next);
+            return when;
+        }
+        if (next > scheduler.now() || next >= scheduler.others_bound()) {
+            scheduler.schedule(EventType::RspStep, next);
+            return std::nullopt;
+        }
+        when = next;
+    }
+}
+
 std::uint32_t RspRegs::load_dmem(std::uint32_t address, unsigned width) const {
     std::uint32_t value = 0;
     for (unsigned i = 0; i < width; ++i) value = (value << 8) | mem_[(address + i) & 0xFFF];
