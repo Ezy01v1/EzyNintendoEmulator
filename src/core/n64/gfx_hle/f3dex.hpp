@@ -77,7 +77,15 @@ private:
     // One display-list command; false ends the task with an error.
     bool execute(std::uint32_t w0, std::uint32_t w1, std::span<std::uint8_t> rdram);
     void emit(std::uint64_t word) { out_.push_back(word); }
-    void draw_triangle(unsigned i0, unsigned i1, unsigned i2);
+    void end_display_list() {
+        if (dl_depth_ == 0) ended_ = true;
+        else pc_ = dl_stack_[--dl_depth_];
+    }
+    // Rejects, clips (guard band, and the near plane for F3DEX) and draws a triangle of the buffer.
+    void clip_and_draw(unsigned i0, unsigned i1, unsigned i2);
+    void draw_triangle(const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c);
+    // Screen position and depth from clip_pos (viewport after the perspective divide).
+    void project(ScreenVertex& v) const;
 
     GfxUcode ucode_ = GfxUcode::Unknown;
     std::array<std::uint32_t, 16> segments_{};

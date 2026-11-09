@@ -71,9 +71,16 @@ bool F3dex::execute(std::uint32_t w0, std::uint32_t w1, std::span<std::uint8_t> 
             return true;
         }
         case G_ENDDL:
-            if (dl_depth_ == 0) ended_ = true;
-            else pc_ = dl_stack_[--dl_depth_];
+            end_display_list();
             return true;
+        case G_CULLDL: {
+            // Ends this display list when every vertex in the range is off the same plane.
+            const unsigned first = (w0 & 0xFFFF) / 2 & 31, last = (w1 & 0xFFFF) / 2 & 31;
+            std::uint16_t common = 0xFFFF;
+            for (unsigned i = first; i <= last; ++i) common &= vertices_[i].clip;
+            if (common != 0 && first <= last) end_display_list();
+            return true;
+        }
         case G_MOVEWORD:
             switch (w0 & 0xFF) {
                 case G_MW_SEGMENT: segments_[((w0 >> 8) & 0xFFFF) / 4 & 15] = w1 & 0xFFFFFF; break;
@@ -113,16 +120,16 @@ bool F3dex::execute(std::uint32_t w0, std::uint32_t w1, std::span<std::uint8_t> 
             return true;
         case G_SETGEOMETRYMODE: geometry_mode_ |= w1; return true;
         case G_CLEARGEOMETRYMODE: geometry_mode_ &= ~w1; return true;
-        case G_TRI1: draw_triangle((w1 >> 16 & 0xFF) / 2, (w1 >> 8 & 0xFF) / 2, (w1 & 0xFF) / 2); return true;
+        case G_TRI1: clip_and_draw((w1 >> 16 & 0xFF) / 2, (w1 >> 8 & 0xFF) / 2, (w1 & 0xFF) / 2); return true;
         case G_QUAD: {  // two triangles: (v0, v1, v2) and (v0, v2, v3)
             const unsigned v0 = (w1 >> 24) / 2, v1 = (w1 >> 16 & 0xFF) / 2, v2 = (w1 >> 8 & 0xFF) / 2, v3 = (w1 & 0xFF) / 2;
-            draw_triangle(v0, v1, v2);
-            draw_triangle(v0, v2, v3);
+            clip_and_draw(v0, v1, v2);
+            clip_and_draw(v0, v2, v3);
             return true;
         }
         case G_TRI2:
-            draw_triangle((w0 >> 16 & 0xFF) / 2, (w0 >> 8 & 0xFF) / 2, (w0 & 0xFF) / 2);
-            draw_triangle((w1 >> 16 & 0xFF) / 2, (w1 >> 8 & 0xFF) / 2, (w1 & 0xFF) / 2);
+            clip_and_draw((w0 >> 16 & 0xFF) / 2, (w0 >> 8 & 0xFF) / 2, (w0 & 0xFF) / 2);
+            clip_and_draw((w1 >> 16 & 0xFF) / 2, (w1 >> 8 & 0xFF) / 2, (w1 & 0xFF) / 2);
             return true;
         case G_RDPHALF_1: rdp_half_1_ = w1; return true;
         case G_RDPHALF_2: rdp_half_2_ = w1; return true;

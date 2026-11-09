@@ -88,6 +88,24 @@ std::array<double, 3> F3dex::view_normal(std::array<std::int8_t, 3> normal) cons
     return out;
 }
 
+void F3dex::project(ScreenVertex& v) const {
+    const auto& clip = v.clip_pos;
+    // Perspective divide at full precision (the HLE does not reproduce the microcode's
+    // reciprocal rounding), then the viewport. Vertices at or behind the camera get
+    // clipped before they are drawn; they only need finite values here.
+    v.inv_w = rsp_reciprocal(v.w, false);
+    const std::int64_t w = v.w > 0 ? v.w : 1;
+    const std::int64_t ndc_x = (std::int64_t{clip[0]} * 65536) / w;  // s15.16
+    const std::int64_t ndc_y = (std::int64_t{clip[1]} * 65536) / w;
+    const std::int64_t ndc_z = (std::int64_t{clip[2]} * 65536) / w;
+    v.x = static_cast<std::int32_t>(viewport_translate_[0] + ((ndc_x * viewport_scale_[0]) >> 16));
+    v.y = static_cast<std::int32_t>(viewport_translate_[1] + ((-ndc_y * viewport_scale_[1]) >> 16));
+    const double w_real = v.w > 0 ? v.w : 1.0;
+    v.px = (viewport_translate_[0] + clip[0] / w_real * viewport_scale_[0]) / 4.0;
+    v.py = (viewport_translate_[1] - clip[1] / w_real * viewport_scale_[1]) / 4.0;
+    v.z = clamp_s15_16(std::int64_t{viewport_translate_[2]} * 65536 + ndc_z * viewport_scale_[2]);
+}
+
 void F3dex::load_vertices(std::uint32_t address, unsigned first, unsigned count, std::span<const std::uint8_t> rdram) {
     for (unsigned i = 0; i < count && first + i < vertices_.size(); ++i) {
         const std::uint32_t at = address + i * 16;
@@ -106,20 +124,8 @@ void F3dex::load_vertices(std::uint32_t address, unsigned first, unsigned count,
         if (clip[1] < -guard) v.clip |= kClipNegY;
         if (v.w <= 0 || clip[2] < -v.w) v.clip |= kClipNear;
 
-        // Perspective divide at full precision (the HLE does not reproduce the microcode's
-        // reciprocal rounding), then the viewport. Vertices at or behind the camera get
-        // clipped before they are drawn; they only need finite values here.
-        v.inv_w = rsp_reciprocal(v.w, false);
-        const std::int64_t w = v.w > 0 ? v.w : 1;
-        const std::int64_t ndc_x = (std::int64_t{clip[0]} * 65536) / w;  // s15.16
-        const std::int64_t ndc_y = (std::int64_t{clip[1]} * 65536) / w;
-        const std::int64_t ndc_z = (std::int64_t{clip[2]} * 65536) / w;
-        v.x = static_cast<std::int32_t>(viewport_translate_[0] + ((ndc_x * viewport_scale_[0]) >> 16));
-        v.y = static_cast<std::int32_t>(viewport_translate_[1] + ((-ndc_y * viewport_scale_[1]) >> 16));
-        const double w_real = v.w > 0 ? v.w : 1.0;
-        v.px = (viewport_translate_[0] + clip[0] / w_real * viewport_scale_[0]) / 4.0;
-        v.py = (viewport_translate_[1] - clip[1] / w_real * viewport_scale_[1]) / 4.0;
-        v.z = clamp_s15_16(std::int64_t{viewport_translate_[2]} * 65536 + ndc_z * viewport_scale_[2]);
+        project(v);
+        const std::int64_t ndc_z = v.w > 0 ? (std::int64_t{clip[2]} * 65536) / v.w : 0;  // for fog
 
         std::int32_t s = read16(rdram, at + 8), t = read16(rdram, at + 10);
         if (geometry_mode_ & G_TEXTURE_GEN) {

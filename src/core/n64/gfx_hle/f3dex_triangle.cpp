@@ -41,15 +41,14 @@ std::uint64_t edge_word(double x, double slope) {
 
 }  // namespace
 
-void F3dex::draw_triangle(unsigned i0, unsigned i1, unsigned i2) {
-    const ScreenVertex* v[3] = {&vertices_[i0 & 31], &vertices_[i1 & 31], &vertices_[i2 & 31]};
+void F3dex::draw_triangle(const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c) {
+    const ScreenVertex* v[3] = {&a, &b, &c};
 
-    if ((v[0]->clip | v[1]->clip | v[2]->clip) & kClipNear) return;  // TEMPCLIP until Task 7
     // Winding in screen space (Y down): negative area is counter-clockwise in view, the front.
     const double area = (v[1]->px - v[0]->px) * (v[2]->py - v[0]->py) - (v[2]->px - v[0]->px) * (v[1]->py - v[0]->py);
     if (area == 0) return;
-    if ((geometry_mode_ & G_CULL_BACK) && area < 0) return;
-    if ((geometry_mode_ & G_CULL_FRONT) && area > 0) return;
+    if ((geometry_mode_ & G_CULL_BACK) && area > 0) return;
+    if ((geometry_mode_ & G_CULL_FRONT) && area < 0) return;
 
     // Top, middle, bottom by Y (stable for equal Y).
     std::sort(std::begin(v), std::end(v), [](const ScreenVertex* a, const ScreenVertex* b) { return a->py < b->py; });
@@ -105,7 +104,7 @@ void F3dex::draw_triangle(unsigned i0, unsigned i1, unsigned i2) {
 
     if (shade) {
         const bool smooth = (geometry_mode_ & G_SHADING_SMOOTH) != 0;
-        const ScreenVertex& flat = vertices_[i0 & 31];
+        const ScreenVertex& flat = a;  // flat shading takes the first vertex's color
         // The microcode adds half a step so the RDP's truncation rounds the colors.
         const auto channel = [&](auto member) {
             if (!smooth) return gradient(flat.*member + 0.5, flat.*member + 0.5, flat.*member + 0.5);

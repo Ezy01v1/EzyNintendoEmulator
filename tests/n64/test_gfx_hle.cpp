@@ -537,7 +537,13 @@ TEST_CASE("F3DEX culls back faces when G_CULL_BACK is set") {
     dl.push_back(dl_cmd(0xBF000000, 0x00000402));  // the same triangle wound the other way: back
     dl.push_back(kEndDl);
     write_dl(bus, kDisplayList, dl);
-    CHECK(run_hle(*n64).trace.size() == 4);  // one triangle
+    const HleRun both = run_hle(*n64);
+    // Only the front one is drawn: the same words as drawing it alone without culling.
+    auto alone = triangle_scene(bus, 0);
+    alone.push_back(dl_cmd(0xBF000000, 0x00000204));
+    alone.push_back(kEndDl);
+    write_dl(bus, kDisplayList, alone);
+    CHECK(both.trace == run_hle(*n64).trace);
 }
 
 TEST_CASE("G_TRI2 emits two triangles in order") {
@@ -571,4 +577,105 @@ TEST_CASE("G_QUAD draws (v0, v1, v2) and (v0, v2, v3)") {
     CHECK(run.trace[0] == ((0xC8ULL << 56) | (960ULL << 32) | (960ULL << 16) | 0));
     // Second: v0, v2 and v3 (160, 240): the right half.
     CHECK(((run.trace[4] >> 16) & 0x3FFF) == 960);
+}
+
+namespace {
+
+// Perspective camera looking down -Z: w = -z, and the screen is the 320x240 viewport.
+std::vector<std::uint64_t> perspective_scene(Bus& bus) {
+    std::array<std::int32_t, 16> projection = kIdentity;
+    projection[11] = fx(-1), projection[10] = fx(-1), projection[14] = fx(-2), projection[15] = 0;  // w = -z, z' = -z - 2
+    write_mtx(bus, kMatrix, projection);
+    write_mtx(bus, kMatrix + 64, kIdentity);
+    write_viewport(bus);
+    return {dl_cmd(0x01030040, kMatrix), dl_cmd(0x01020040, kMatrix + 64), dl_cmd(0x03800010, kViewport),
+            dl_cmd(0xBC000004, 2)};
+}
+
+unsigned count_triangles(const std::vector<std::uint64_t>& trace) {
+    unsigned n = 0;
+    for (std::size_t i = 0; i < trace.size();) {
+        const unsigned op = static_cast<unsigned>(trace[i] >> 56) & 63;
+        if (op >= 0x08 && op <= 0x0F) ++n;
+        i += Rdp::words_in_command(op);
+    }
+    return n;
+}
+
+}  // namespace
+
+TEST_CASE("Clipping a triangle that crosses the near plane yields a fan in front of it") {
+    const auto n64 = N64::create(counting_rom("HLE NEARCLIP"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = perspective_scene(bus);
+    write_vtx(bus, kVertices, -2, -1, -4);
+    write_vtx(bus, kVertices + 16, 2, -1, -4);
+    write_vtx(bus, kVertices + 32, 0, -1, 4);  // behind the camera
+    dl.push_back(g_vtx(0, 3, kVertices));
+    dl.push_back(dl_cmd(0xBF000000, 0x00000204));
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    const HleRun run = run_hle(*n64, GfxUcode::F3dex095);
+    REQUIRE(count_triangles(run.trace) == 2);  // the quad left in front of the near plane
+    for (std::size_t i = 0; i < run.trace.size(); i += 4) {
+        const auto yh = static_cast<std::int16_t>((run.trace[i] & 0x3FFF) << 2) >> 2;
+        const auto yl = static_cast<std::int16_t>(((run.trace[i] >> 32) & 0x3FFF) << 2) >> 2;
+        CHECK(yh >= -8192);  // finite, within the RDP's coordinate range
+        CHECK(yl <= 8191);
+    }
+}
+
+TEST_CASE("F3DLX does not clip against the near plane") {
+    const auto n64 = N64::create(counting_rom("HLE NONEAR"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = perspective_scene(bus);
+    write_vtx(bus, kVertices, -2, -1, -4);
+    write_vtx(bus, kVertices + 16, 2, -1, -4);
+    write_vtx(bus, kVertices + 32, 0, -1, 4);
+    dl.push_back(g_vtx(0, 3, kVertices));
+    dl.push_back(dl_cmd(0xBF000000, 0x00000204));
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    CHECK(count_triangles(run_hle(*n64, GfxUcode::F3dlx095).trace) == 0);  // a vertex behind: dropped, not clipped
+}
+
+TEST_CASE("Triangles past the guard band are clipped to it") {
+    const auto n64 = N64::create(counting_rom("HLE GUARD"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = perspective_scene(bus);
+    write_vtx(bus, kVertices, -1, -1, -2);
+    write_vtx(bus, kVertices + 16, 1000, -1, -2);  // x/w = 500, far past ratio 2
+    write_vtx(bus, kVertices + 32, 0, 1, -2);
+    dl.push_back(g_vtx(0, 3, kVertices));
+    dl.push_back(dl_cmd(0xBF000000, 0x00000204));
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    const HleRun run = run_hle(*n64);
+    REQUIRE(count_triangles(run.trace) >= 1);
+    // No edge X beyond the guard band (ratio 2: 160 + 2 * 160 = 480 pixels).
+    for (std::size_t i = 0; i < run.trace.size(); i += 4) {
+        for (unsigned e = 1; e <= 3; ++e) {
+            const auto x = static_cast<std::int32_t>(run.trace[i + e] >> 32) / 65536.0;
+            CHECK(x <= 490.0);  // edges are evaluated at the start scanline: a little past the vertex
+            CHECK(x >= -170.0);
+        }
+    }
+}
+
+TEST_CASE("G_CULLDL skips the rest of the list when all vertices are off one plane") {
+    const auto n64 = N64::create(counting_rom("HLE CULLDL"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    auto dl = perspective_scene(bus);
+    for (unsigned i = 0; i < 3; ++i) write_vtx(bus, kVertices + i * 16, static_cast<std::int16_t>(100 + i), 0, -2);
+    const std::uint64_t rect = rdp_rectangle(0xF6, 4, 4, 0, 0);
+    dl.push_back(g_vtx(0, 3, kVertices));
+    dl.push_back(dl_cmd(0xBE000000, 2 * 2));  // G_CULLDL vertices 0..2: all far right
+    dl.push_back(rect);
+    dl.push_back(kEndDl);
+    write_dl(bus, kDisplayList, dl);
+    CHECK(run_hle(*n64).trace.empty());
 }
