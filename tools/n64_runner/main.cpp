@@ -12,7 +12,8 @@
 //       summary says no base test failed.
 //   ezy_n64_runner <rom> --pc [frames]
 //       Debugging: prints the CPU's PC and Cause after each frame (default 10 frames).
-// Options, anywhere after the ROM: --pif <file> (a real PIF ROM); --threaded-rdp (draw on a
+// Options, anywhere after the ROM: --pif <file> (a real PIF ROM); --hle-gfx (F3DEX graphics
+// tasks in C++ instead of on the RSP); --threaded-rdp (draw on a
 // second thread like ezyemu: faster, not cycle-exact); --time-from <frame> (with --screenshot:
 // prints the speed from that frame on, e.g. 1500 for MK64's demo race); --rdp-trace <file>
 // [--trace-from <frame>] (with --screenshot: writes every RDP command word consumed from that
@@ -140,12 +141,14 @@ int main(int raw_argc, char* raw_argv[]) {
     std::vector<char*> args;
     std::vector<std::uint8_t> pif;
     bool threaded_rdp = false;
+    bool hle_gfx = false;
     int time_from = -1;
     const char* trace_path = nullptr;
     int trace_from = 0;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--threaded-rdp") == 0) threaded_rdp = true;
+        else if (std::strcmp(raw_argv[i], "--hle-gfx") == 0) hle_gfx = true;
         else if (std::strcmp(raw_argv[i], "--time-from") == 0 && i + 1 < raw_argc) time_from = std::atoi(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--rdp-trace") == 0 && i + 1 < raw_argc) trace_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--trace-from") == 0 && i + 1 < raw_argc) trace_from = std::atoi(raw_argv[++i]);
@@ -156,7 +159,7 @@ int main(int raw_argc, char* raw_argv[]) {
         std::cerr << "Usage: ezy_n64_runner <rom> --screenshot <out.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --compare <reference.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --isviewer [seconds]\n"
-                     "Options: --pif <pif rom>, --threaded-rdp, --time-from <frame>\n";
+                     "Options: --pif <pif rom>, --hle-gfx, --threaded-rdp, --time-from <frame>\n";
         return 2;
     }
     const std::vector<std::uint8_t> rom = read_file(args[1]);
@@ -166,6 +169,7 @@ int main(int raw_argc, char* raw_argv[]) {
         return 2;
     }
     n64->set_threaded_rdp(threaded_rdp);
+    n64->set_hle_gfx(hle_gfx);
     std::cout << "Title: " << n64->cartridge().title() << '\n';
     const std::string mode = args[2];
     if (mode == "--screenshot" && argc >= 4) {

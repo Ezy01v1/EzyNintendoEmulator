@@ -2,9 +2,11 @@
 
 #include <array>
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
+#include "n64/gfx_hle/f3dex.hpp"
 #include "n64/gfx_hle/task.hpp"
 #include "n64/n64.hpp"
 #include "n64_test_helpers.hpp"
@@ -155,4 +157,133 @@ TEST_CASE("Audio tasks and HLE off still run on the RSP") {
         for (unsigned i = 0; i < 200; ++i) n64->step();
         CHECK(bus.read32(0x04000000) == 0x1234);
     }
+}
+
+namespace {
+
+// Writes display-list commands (w0, w1 pairs) at an RDRAM address.
+void write_dl(Bus& bus, std::uint32_t address, std::initializer_list<std::uint64_t> commands) {
+    for (const auto command : commands) bus.write64(address, command), address += 8;
+}
+
+constexpr std::uint64_t dl_cmd(std::uint32_t w0, std::uint32_t w1) { return (std::uint64_t{w0} << 32) | w1; }
+
+struct HleRun {
+    std::vector<std::uint64_t> trace;
+    F3dex::Result result;
+};
+
+HleRun run_hle(N64& n64, GfxUcode ucode = GfxUcode::F3dex095) {
+    auto& bus = n64.bus();
+    HleRun run{};
+    bus.rdp().set_trace(&run.trace);
+    F3dex f3dex;
+    run.result = f3dex.run_task(graphics_task(), ucode, bus.rdram(), bus.rdp(), bus.mi());
+    bus.rdp().set_trace(nullptr);
+    return run;
+}
+
+}  // namespace
+
+TEST_CASE("F3DEX segments, nested display lists and ENDDL") {
+    const auto n64 = N64::create(counting_rom("HLE DL"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    const std::uint64_t inner_rect = rdp_rectangle(0xF6, 4, 4, 0, 0);
+    const std::uint64_t outer_rect = rdp_rectangle(0xF6, 8, 8, 4, 4);
+    write_dl(bus, kDisplayList, {
+        dl_cmd(0xBC001806, 0x00100000),  // segment 6 = 0x100000
+        dl_cmd(0x06000000, 0x06000100),  // G_DL push to segment 6 + 0x100
+        outer_rect,
+        kEndDl,
+    });
+    write_dl(bus, 0x100100, {inner_rect, kEndDl});
+    const HleRun run = run_hle(*n64);
+    CHECK(run.result.ok);
+    CHECK(run.trace == std::vector<std::uint64_t>{inner_rect, outer_rect});
+}
+
+TEST_CASE("F3DEX stops at a DL nested 11 deep and at addresses outside RDRAM") {
+    const auto n64 = N64::create(counting_rom("HLE DEPTH"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    // Each list calls the next one, 0x100 further on, eleven times.
+    for (std::uint32_t i = 0; i < 12; ++i) {
+        write_dl(bus, kDisplayList + i * 0x100, {dl_cmd(0x06000000, kDisplayList + (i + 1) * 0x100), kEndDl});
+    }
+    CHECK_FALSE(run_hle(*n64).result.ok);
+
+    write_dl(bus, kDisplayList, {dl_cmd(0x06000000, 0x00FFFFF8), kEndDl});
+    CHECK_FALSE(run_hle(*n64).result.ok);
+    write_dl(bus, kDisplayList, {dl_cmd(0x06010000, 0x00900000), kEndDl});  // G_DL branch past RDRAM
+    CHECK_FALSE(run_hle(*n64).result.ok);
+}
+
+TEST_CASE("F3DEX texture rectangle pass-through uses RDPHALF words") {
+    const auto n64 = N64::create(counting_rom("HLE TEXRECT"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    const std::uint64_t texrect = dl_cmd(0xE4040040, 0x00010010);
+    write_dl(bus, kDisplayList, {
+        texrect,
+        dl_cmd(0xB4000000, 0x00100020),  // G_RDPHALF_1: S, T
+        dl_cmd(0xB3000000, 0x04000400),  // G_RDPHALF_2: DsDx, DtDy
+        kEndDl,
+    });
+    const HleRun run = run_hle(*n64);
+    CHECK(run.result.ok);
+    REQUIRE(Rdp::words_in_command(0x24) == 2);
+    CHECK(run.trace == std::vector<std::uint64_t>{texrect, 0x0010002004000400ULL});
+}
+
+TEST_CASE("F3DEX translates segmented image addresses") {
+    const auto n64 = N64::create(counting_rom("HLE SETIMG"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    write_dl(bus, kDisplayList, {
+        dl_cmd(0xBC000806, 0x00300000),  // segment 2 = 0x300000
+        dl_cmd(0xFF10013F, 0x02000400),  // Set Color Image at segment 2 + 0x400
+        kEndDl,
+    });
+    const HleRun run = run_hle(*n64);
+    CHECK(run.trace == std::vector<std::uint64_t>{dl_cmd(0xFF10013F, 0x00300400)});
+}
+
+TEST_CASE("G_LOAD_UCODE to F3DLX switches modes and to an unknown ucode stops") {
+    const auto n64 = N64::create(counting_rom("HLE LOADUC"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr std::uint32_t kOtherData = 0x220000;
+    for (std::uint32_t i = 0; i < 0x800; i += 4) bus.write32(kOtherData + i, 0);
+    write_bytes(bus, kOtherData + 0x130, "RSP Gfx ucode F3DLX         0.95 Yoshitaka Yasumoto Nintendo.");
+    const std::uint64_t rect = rdp_rectangle(0xF6, 4, 4, 0, 0);
+    write_dl(bus, kDisplayList, {
+        dl_cmd(0xB4000000, kOtherData),  // G_RDPHALF_1: the new ucode's data segment
+        dl_cmd(0xAF0007FF, 0x00230000),  // G_LOAD_UCODE, data size 0x800
+        rect,
+        kEndDl,
+    });
+    HleRun run = run_hle(*n64);
+    CHECK(run.result.ok);
+    CHECK(run.trace == std::vector<std::uint64_t>{rect});
+
+    write_bytes(bus, kOtherData + 0x130, "RSP Gfx ucode F3DEX         1.23 Yoshitaka Yasumoto Nintendo.");
+    run = run_hle(*n64);
+    CHECK_FALSE(run.result.ok);
+    CHECK(run.trace.empty());
+}
+
+TEST_CASE("G_SETOTHERMODE_H and _L update the mode and send Set Other Modes") {
+    const auto n64 = N64::create(counting_rom("HLE OTHERMODE"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    write_dl(bus, kDisplayList, {
+        dl_cmd(0xBA001701, 0x00800000),  // H: shift 23, length 1 (F3DEX's initial H is 0x080CFF)
+        dl_cmd(0xB900031D, 0x0F0A4000),  // L: shift 3, length 29
+        dl_cmd(0xBA000C02, 0x00002000),  // H: shift 12, length 2
+        kEndDl,
+    });
+    const HleRun run = run_hle(*n64);
+    CHECK(run.trace == std::vector<std::uint64_t>{0xEF880CFF00000000ULL, 0xEF880CFF0F0A4000ULL,
+                                                   0xEF882CFF0F0A4000ULL});
 }
