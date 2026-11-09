@@ -93,9 +93,20 @@ void Cop0::tick_random() {
     random = random == wired ? 31 : (random - 1) & 63;
 }
 
-void Cop0::set_ip2(bool level) {
-    if (level) regs_[kCause] |= kIP2;
-    else regs_[kCause] &= ~std::uint64_t{kIP2};
+void Cop0::retire_many(std::uint64_t cycles, std::uint64_t instructions) {
+    half_cycles_ += cycles;
+    // Random walks a fixed cycle: 31 down to Wired (Wired <= 31), or 31 down to 0, then 63
+    // down to Wired (Wired > 31). Step one at a time until it is on the cycle, then jump.
+    const std::uint64_t wired = regs_[kWired] & 63;
+    const std::uint64_t length = wired <= 31 ? 32 - wired : 96 - wired;
+    const auto on_cycle = [&](std::uint64_t r) { return wired <= 31 ? r >= wired && r <= 31 : r <= 31 || r >= wired; };
+    while (instructions > 0 && !on_cycle(regs_[kRandom])) {
+        tick_random();
+        --instructions;
+    }
+    const std::uint64_t r = regs_[kRandom];
+    const std::uint64_t index = ((r <= 31 ? 31 - r : 95 - r) + instructions) % length;
+    regs_[kRandom] = index <= 31 ? 31 - index : 95 - index;
 }
 
 }  // namespace ezy::n64

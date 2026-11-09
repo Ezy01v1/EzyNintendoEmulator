@@ -63,6 +63,7 @@ void Vr4300::branch(bool taken, std::uint64_t target, bool likely) {
     if (taken) {
         next_pc_ = target;
         branch_taken_ = true;
+        if (target == current_pc_) idle_candidate_ = target;  // maybe an idle loop
     } else if (likely) {
         // A branch-likely that isn't taken skips (nullifies) its delay slot.
         pc_ = next_pc_;

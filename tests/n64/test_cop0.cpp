@@ -241,3 +241,32 @@ TEST_CASE("Random with Wired above 31 covers 0..63") {
     CHECK(lowest == 0);
     CHECK(highest > 50);
 }
+
+TEST_CASE("Cop0 retire_many matches retiring one instruction at a time") {
+    for (std::uint64_t wired : {0ULL, 5ULL, 31ULL, 40ULL, 63ULL}) {
+        for (std::uint64_t count : {0ULL, 1ULL, 7ULL, 100ULL, 1000ULL}) {
+            Cop0 bulk, single;
+            bulk.write(Cop0::kWired, wired);
+            single.write(Cop0::kWired, wired);
+            bulk.write(Cop0::kCompare, 0xFFFFFFFF);
+            single.write(Cop0::kCompare, 0xFFFFFFFF);
+            bulk.retire_many(count * 2, count);
+            for (std::uint64_t i = 0; i < count; ++i) single.retire(2);
+            CHECK(bulk.read(Cop0::kRandom) == single.read(Cop0::kRandom));
+            CHECK(bulk.read(Cop0::kCount) == single.read(Cop0::kCount));
+        }
+    }
+}
+
+TEST_CASE("Cop0 cycles_until_compare is the cycle that sets IP7") {
+    for (std::uint64_t compare : {1ULL, 2ULL, 50ULL}) {
+        Cop0 c;
+        c.write(Cop0::kCompare, compare);
+        c.retire(1);  // an odd half cycle
+        const std::uint64_t n = c.cycles_until_compare();
+        for (std::uint64_t i = 1; i < n; ++i) c.retire(1);
+        CHECK((c.cause() & Cop0::kIP7) == 0);
+        c.retire(1);
+        CHECK((c.cause() & Cop0::kIP7) != 0);
+    }
+}

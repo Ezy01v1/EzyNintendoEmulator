@@ -42,6 +42,23 @@ public:
     void schedule(EventType type, std::uint64_t when) {
         slots_[index(type)] = {true, when};
         if (when < next_) next_ = when;
+        if (type != EventType::RspStep && when < others_next_) others_next_ = when;
+    }
+
+    // Fast path for the RSP, which reschedules itself every 1-2 cycles: if its step is due
+    // and strictly before every other event (so the order is the same as pop_due's), takes
+    // it and returns true with its time. Ties go through pop_due.
+    bool take_rsp_step(std::uint64_t& when) {
+        Slot& rsp = slots_[index(EventType::RspStep)];
+        if (!rsp.active || rsp.when > now_ || rsp.when >= others_next_) return false;
+        rsp.active = false;
+        when = rsp.when;
+        return true;
+    }
+    // After a run of take_rsp_step: the exact bound again, so pop_due stays a single compare.
+    void settle_rsp() {
+        const Slot& rsp = slots_[index(EventType::RspStep)];
+        next_ = rsp.active && rsp.when < others_next_ ? rsp.when : others_next_;
     }
     void schedule_in(EventType type, std::uint64_t cycles) { schedule(type, now_ + cycles); }
     void cancel(EventType type) { slots_[index(type)].active = false; }
@@ -69,6 +86,7 @@ public:
         for (std::size_t i = 0; i < count; ++i) ar(slots_[i]);
         for (std::size_t i = count; i < slots_.size(); ++i) slots_[i] = {};
         next_ = 0;  // recomputed by the next pop_due
+        others_next_ = 0;
     }
 
 private:
@@ -88,6 +106,8 @@ private:
     // A lower bound on the earliest active event (never later than it). schedule() lowers it;
     // cancelling or rescheduling later may leave it early, which only costs one slow scan.
     std::uint64_t next_ = 0;
+    // The same kind of lower bound, for every event except RspStep.
+    std::uint64_t others_next_ = 0;
 };
 
 }  // namespace ezy::n64

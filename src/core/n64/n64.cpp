@@ -34,8 +34,32 @@ std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<co
 }
 
 void N64::step() {
+    // Idle loop: jump over whole iterations up to just before the next event or Compare, so
+    // everything happens at the same cycle as when stepping one instruction at a time.
+    if (const int per = cpu_.idle_loop_cycles()) {
+        const std::uint64_t now = scheduler_.now();
+        std::uint64_t target = now + cpu_.cycles_until_compare();
+        if (const auto next = scheduler_.next_event_time(); next && *next < target) target = *next;
+        if (target > now + 1) {
+            const std::uint64_t iterations = (target - now - 1) / static_cast<std::uint64_t>(per);
+            if (iterations > 0) {
+                cpu_.skip_idle_loop(iterations);
+                scheduler_.advance(iterations * static_cast<std::uint64_t>(per));
+            }
+        }
+    }
     scheduler_.advance(static_cast<std::uint64_t>(cpu_.step()));
-    while (const auto due = scheduler_.pop_due()) bus_.handle_event(due->type, due->when);
+    for (;;) {
+        std::uint64_t when = 0;
+        if (scheduler_.take_rsp_step(when)) {
+            bus_.rsp_step(when);
+            while (scheduler_.take_rsp_step(when)) bus_.rsp_step(when);
+            scheduler_.settle_rsp();
+        }
+        const auto due = scheduler_.pop_due();
+        if (!due) break;
+        bus_.handle_event(due->type, due->when);
+    }
 }
 
 void N64::run_frame() {

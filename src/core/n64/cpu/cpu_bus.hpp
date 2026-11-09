@@ -23,6 +23,21 @@ public:
     [[nodiscard]] virtual std::uint32_t uncached_cycles(std::uint32_t paddr) const = 0;
     // The RCP's interrupt line (MI), wired to Cause.IP2.
     [[nodiscard]] virtual bool interrupt_line() const = 0;
+
+    // Plain memory at physical address 0 (RDRAM) that the CPU may read and write directly,
+    // skipping the virtual calls. Accesses there must have no side effects. Empty by default.
+    [[nodiscard]] std::uint8_t* direct_ram() const { return direct_ram_; }
+    [[nodiscard]] std::uint32_t direct_ram_size() const { return direct_ram_size_; }
+
+protected:
+    void set_direct_ram(std::uint8_t* base, std::uint32_t size) {
+        direct_ram_ = base;
+        direct_ram_size_ = size;
+    }
+
+private:
+    std::uint8_t* direct_ram_ = nullptr;
+    std::uint32_t direct_ram_size_ = 0;
 };
 
 }  // namespace ezy::n64

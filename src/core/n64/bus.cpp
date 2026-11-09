@@ -24,6 +24,7 @@ Bus::Bus(Scheduler& scheduler, const Cartridge& cart) : scheduler_(scheduler), c
     vi_.set_region(cart.region());
     ai_.set_region(cart.region());
     vi_.start(scheduler_);
+    set_direct_ram(rdram_.data(), kRdramSize);
 }
 
 std::uint8_t* Bus::memory(std::uint32_t paddr) {

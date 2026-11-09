@@ -26,6 +26,13 @@ public:
 
     int step();
 
+    // Cycles of one iteration if the CPU sits at the start of an idle loop that no pending
+    // interrupt would leave, else 0. skip_idle_loop() then runs whole iterations at once.
+    [[nodiscard]] int idle_loop_cycles() const;
+    void skip_idle_loop(std::uint64_t iterations);
+    // CPU cycles until Count reaches Compare (and sets Cause.IP7).
+    [[nodiscard]] std::uint64_t cycles_until_compare() const { return cop0_.cycles_until_compare(); }
+
     [[nodiscard]] std::uint64_t gpr(int index) const { return gpr_[static_cast<std::size_t>(index)]; }
     void set_gpr(int index, std::uint64_t value) {
         if (index != 0) gpr_[static_cast<std::size_t>(index)] = value;
@@ -110,6 +117,9 @@ private:
     std::uint32_t last_paddr_ = 0;  // physical address of the last load (LL sets LLAddr from it)
     int cycles_ = 0;                // cycles of the instruction being executed
     bool exception_ = false;        // the instruction being executed raised an exception
+    // Target of the last taken branch that jumped to its own address (not saved: it only
+    // speeds up idle_loop_cycles()).
+    std::uint64_t idle_candidate_ = 1;
 };
 
 }  // namespace ezy::n64
