@@ -123,6 +123,12 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         (y con `--threaded-rdp` en el runner): ya no es exacto al ciclo, así que pruebas y runners
         siguen en modo exacto por defecto. MK64 ~7,3 s → **~5,3 s** (≈56 cuadros/s).
         Bits ocultos de RDRAM en arreglo plano en lugar de `std::map`.
+  - **Ojo: la pantalla de título engaña.** En carrera (demo de MK64 desde el cuadro 1500) va a
+    ~25 cuadros/s con RDP en hilo y ~18–20 exacto. Medir con
+    `ezy_n64_runner <mk64> --screenshot x.bmp 1900 --time-from 1500 [--threaded-rdp]`, y siempre A/B
+    seguidas (la base de la PC varía ±10 %). En carrera pesan RSP (~1/3), CPU (~1/4) y RDP.
+  - Probado y **descartado** en el RSP escalar: forzar inline de `execute_scalar` (más lento) y
+    predecodificar (el `switch` ya es tabla de saltos; no hay qué ahorrar). Tabla de `select_lane`: neutra.
 - [ ] **Etapa 2: decidir según lo medido**:
   - Dynarec (JIT) MIPS → x86-64 para la CPU (y luego el RSP): la ganancia grande (5–20×), y la
     misma técnica que exigirán GameCube y Wii.
@@ -254,3 +260,6 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-09 — PR #15 mergeado. RDP en otro hilo (solo ezyemu / `--threaded-rdp`, sincroniza en Sync Full): MK64 300
   cuadros ~5,3 s (≈56 cuadros/s), imagen igual a la exacta en esa escena. 154/154 pruebas, n64-systemtest 2984/3721
   en ambos modos. Pendiente: abrir PR de `n64/rdp-thread` y probar MK64 jugando en ezyemu (usuario).
+- 2026-11-09 — Medido en carrera (demo, cuadros 1500–1900): ~25 cuadros/s con RDP en hilo. Afinar el intérprete del
+  RSP no da más (inline y predecodificación descartados). Runner con `--time-from`. Siguiente: decidir HLE de gráficos
+  (F3DEX) o JIT (CPU y luego RSP).

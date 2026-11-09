@@ -13,7 +13,9 @@
 //   ezy_n64_runner <rom> --pc [frames]
 //       Debugging: prints the CPU's PC and Cause after each frame (default 10 frames).
 // Options, anywhere after the ROM: --pif <file> (a real PIF ROM); --threaded-rdp (draw on a
-// second thread like ezyemu: faster, not cycle-exact).
+// second thread like ezyemu: faster, not cycle-exact); --time-from <frame> (with --screenshot:
+// prints the speed from that frame on, e.g. 1500 for MK64's demo race).
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -136,9 +138,11 @@ int main(int raw_argc, char* raw_argv[]) {
     std::vector<char*> args;
     std::vector<std::uint8_t> pif;
     bool threaded_rdp = false;
+    int time_from = -1;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--threaded-rdp") == 0) threaded_rdp = true;
+        else if (std::strcmp(raw_argv[i], "--time-from") == 0 && i + 1 < raw_argc) time_from = std::atoi(raw_argv[++i]);
         else args.push_back(raw_argv[i]);
     }
     const int argc = static_cast<int>(args.size());
@@ -146,7 +150,7 @@ int main(int raw_argc, char* raw_argv[]) {
         std::cerr << "Usage: ezy_n64_runner <rom> --screenshot <out.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --compare <reference.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --isviewer [seconds]\n"
-                     "Options: --pif <pif rom>, --threaded-rdp\n";
+                     "Options: --pif <pif rom>, --threaded-rdp, --time-from <frame>\n";
         return 2;
     }
     const std::vector<std::uint8_t> rom = read_file(args[1]);
@@ -160,7 +164,16 @@ int main(int raw_argc, char* raw_argv[]) {
     const std::string mode = args[2];
     if (mode == "--screenshot" && argc >= 4) {
         const int frames = argc > 4 ? std::atoi(args[4]) : 120;
-        for (int i = 0; i < frames; ++i) n64->run_frame();
+        auto timed_from = std::chrono::steady_clock::now();
+        for (int i = 0; i < frames; ++i) {
+            if (i == time_from) timed_from = std::chrono::steady_clock::now();
+            n64->run_frame();
+        }
+        if (time_from >= 0 && time_from < frames) {
+            const std::chrono::duration<double> spent = std::chrono::steady_clock::now() - timed_from;
+            std::cout << "Frames " << time_from << "-" << frames << ": " << spent.count() << " s ("
+                      << (frames - time_from) / spent.count() << " frames/s)\n";
+        }
         const std::vector<char> bmp = encode_bmp(n64->image());
         std::ofstream(args[3], std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         std::cout << "Saved " << args[3] << " (" << n64->image().width << "x" << n64->image().height << ")\n";

@@ -22,7 +22,7 @@ enum VectorOp : unsigned {
     VRCP = 0x30, VRCPL, VRCPH, VMOV, VRSQ, VRSQL, VRSQH, VNOP, VNULL = 0x3F,
 };
 
-unsigned select_lane(unsigned element, unsigned lane) {
+constexpr unsigned select_lane(unsigned element, unsigned lane) {
     if (element < 2) return lane;
     if (element < 4) return (lane & 6) | (element & 1);
     if (element < 8) return (lane & 4) | (element & 3);
@@ -145,8 +145,16 @@ void RspVector::execute_alu(std::uint32_t word) {
     }
 
     // Snapshot the selected VT lanes before writing VD, which can alias VT.
+    static constexpr auto kSelect = [] {
+        std::array<std::array<std::uint8_t, 8>, 16> table{};
+        for (unsigned e = 0; e < 16; ++e) {
+            for (unsigned lane = 0; lane < 8; ++lane) table[e][lane] = static_cast<std::uint8_t>(select_lane(e, lane));
+        }
+        return table;
+    }();
+    const auto& pick = kSelect[element];
     Vector selected{};
-    for (unsigned lane = 0; lane < selected.size(); ++lane) selected[lane] = vt[select_lane(element, lane)];
+    for (unsigned lane = 0; lane < selected.size(); ++lane) selected[lane] = vt[pick[lane]];
     if (op >= VRCP && op <= VRSQH) {
         const unsigned lane = source & 7;
         for (unsigned i = 0; i < selected.size(); ++i) set_accumulator_low(i, selected[i]);
