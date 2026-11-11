@@ -19,15 +19,17 @@ constexpr std::uint64_t kMaxFrameCycles = 93'750'000 / 10;
 
 }  // namespace
 
-N64::N64(Cartridge cart, RdpMode mode) : cart_(std::move(cart)), bus_(scheduler_, cart_, mode), cpu_(bus_) {}
+N64::N64(Cartridge cart, RdpMode mode, RspMode rsp_mode)
+    : cart_(std::move(cart)), bus_(scheduler_, cart_, mode, rsp_mode), cpu_(bus_) {}
 
 RdpMode N64::default_rdp_mode() { return ezy::n64::default_rdp_mode(); }
 void N64::set_default_rdp_mode(RdpMode mode) { ezy::n64::set_default_rdp_mode(mode); }
 
-std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> pif_rom, RdpMode mode) {
+std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> pif_rom,
+                                 RdpMode mode, RspMode rsp_mode) {
     auto cart = Cartridge::load(rom);
     if (!cart) return nullptr;
-    std::unique_ptr<N64> n64(new N64(std::move(*cart), mode));
+    std::unique_ptr<N64> n64(new N64(std::move(*cart), mode, rsp_mode));
     if (pif_rom.size() == kPifRomSize) {
         n64->bus_.set_pif_rom(pif_rom);
         n64->cpu_.set_pc(0xFFFFFFFFBFC00000ULL);  // Cop0 starts in its reset state (BEV, ERL)

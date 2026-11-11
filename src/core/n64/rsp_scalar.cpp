@@ -1,9 +1,12 @@
 #include "n64/rsp_regs.hpp"
 
+#include <algorithm>
+
 namespace ezy::n64 {
 
 void RspRegs::step(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when) {
     if (sp_status_ & kHalt) return;
+    if (jit_) jit_->record_fallback();
 
     const std::uint32_t pc = sp_pc_ & kPcMask;
     std::uint32_t word = 0;
@@ -30,6 +33,30 @@ std::optional<std::uint64_t> RspRegs::run(Mi& mi, Rdp& rdp, Scheduler& scheduler
                                           bool stop_on_line) {
     for (;;) {
         if (sp_status_ & kHalt) return std::nullopt;
+        if (jit_active() && !(sp_status_ & kSingleStep) &&
+            next_pc_ == ((sp_pc_ + 4) & kPcMask) && when < scheduler.others_bound()) {
+            if (jit_generation_ != imem_generation_) {
+                jit_->invalidate();
+                jit_generation_ = imem_generation_;
+            }
+            const auto limit = std::min(scheduler.now() + 1, scheduler.others_bound());
+            RspJitView view{gpr_.data(),mem_.data(),&sp_pc_,&next_pc_,&short_step_,this,&RspRegs::jit_vector};
+            RspJitRun native{when,limit,stop_on_line && mi.line() ? 1U : ~std::uint32_t{0},0};
+            jit_->run(view,std::span(mem_).subspan<0x1000,0x1000>(),native);
+            if (native.retired != 0) {
+                if (stop_on_line && mi.line()) {
+                    scheduler.schedule(EventType::RspStep,native.when);
+                    return when; // MI was already set at entry; exactly one retired.
+                }
+                if (native.when > scheduler.now() || native.when >= scheduler.others_bound()) {
+                    scheduler.schedule(EventType::RspStep,native.when);
+                    return std::nullopt;
+                }
+                when = native.when;
+                continue;
+            }
+        }
+        if (jit_) jit_->record_fallback();
         const std::uint32_t pc = sp_pc_ & kPcMask;
         const std::uint8_t* imem = mem_.data() + 0x1000 + pc;
         const std::uint32_t word = (std::uint32_t{imem[0]} << 24) | (imem[1] << 16) | (imem[2] << 8) | imem[3];

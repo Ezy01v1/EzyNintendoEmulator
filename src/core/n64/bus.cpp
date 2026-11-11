@@ -20,7 +20,8 @@ constexpr std::uint32_t kIsViewerMagic = 0x49533634;  // "IS64"
 
 }  // namespace
 
-Bus::Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode) : scheduler_(scheduler), cart_(cart) {
+Bus::Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode, RspMode rsp_mode)
+    : scheduler_(scheduler), cart_(cart), rsp_(rsp_mode) {
     vi_.set_region(cart.region());
     ai_.set_region(cart.region());
     vi_.start(scheduler_);

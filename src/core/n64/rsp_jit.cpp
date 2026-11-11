@@ -25,7 +25,9 @@ struct RspJit::Impl {
     };
 
     void flush() {
-        runtime.reset();
+        // The pinned allocator's soft reset can retain tree links from freed
+        // executable blocks. Invalidation must discard those blocks as well.
+        runtime.reset(asmjit::ResetPolicy::kHard);
         entries = {};
         bytes = 0;
         ++stats.invalidations;

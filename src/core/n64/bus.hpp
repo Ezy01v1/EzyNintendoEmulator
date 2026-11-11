@@ -34,7 +34,8 @@ class Bus final : public CpuBus {
 public:
     static constexpr std::uint32_t kRdramSize = 8 * 1024 * 1024;
 
-    Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode = default_rdp_mode());
+    Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode = default_rdp_mode(),
+        RspMode rsp_mode = default_rsp_mode());
 
     std::uint8_t read8(std::uint32_t paddr) override;
     std::uint16_t read16(std::uint32_t paddr) override;

@@ -8,6 +8,11 @@ target_compile_definitions(ezy_n64_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
 add_test(NAME ezy_n64_tests COMMAND ezy_n64_tests)
 add_test(NAME ezy_n64_threaded_tests COMMAND ezy_n64_tests --rdp-threaded)
 set_tests_properties(ezy_n64_tests ezy_n64_threaded_tests PROPERTIES TIMEOUT 120)
+if(EZY_N64_RSP_JIT AND TARGET asmjit::asmjit)
+    add_test(NAME ezy_n64_rsp_jit_tests COMMAND ezy_n64_tests --rsp-jit)
+    add_test(NAME ezy_n64_rsp_jit_threaded_tests COMMAND ezy_n64_tests --rsp-jit --rdp-threaded)
+    set_tests_properties(ezy_n64_rsp_jit_tests ezy_n64_rsp_jit_threaded_tests PROPERTIES TIMEOUT 180)
+endif()
 
 # PeterLemon's CPU test ROMs (roms/README.md): each one whose .bmp reference sits next to
 # it, compared on the VI image. Release only, and only when the ROMs are present.

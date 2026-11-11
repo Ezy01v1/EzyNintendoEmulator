@@ -136,6 +136,10 @@ void print_rdp_stats(N64& n64) {
     const auto stats = n64.bus().rdp_stats();
     std::cout << "RDP packets: " << stats.submitted << ", waits: " << stats.waits
               << ", queue waits: " << stats.queue_waits << '\n';
+    const auto jit=n64.bus().rsp().jit_stats();
+    std::cout << "RSP backend: " << (n64.bus().rsp().jit_active() ? "JIT" : "interpreter")
+              << ", native: " << jit.native_instructions << ", fallback: " << jit.fallback_instructions
+              << ", blocks: " << jit.compiled_blocks << ", compile ms: " << jit.compile_ns/1e6 << '\n';
 }
 
 }  // namespace
@@ -144,10 +148,13 @@ int main(int raw_argc, char* raw_argv[]) {
     std::vector<char*> args;
     std::vector<std::uint8_t> pif;
     auto rdp_mode = ezy::n64::RdpMode::Synchronous;
+    auto rsp_mode = ezy::n64::RspMode::Interpreter;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--rdp-threaded") == 0) rdp_mode = ezy::n64::RdpMode::Threaded;
         else if (std::strcmp(raw_argv[i], "--rdp-sync") == 0) rdp_mode = ezy::n64::RdpMode::Synchronous;
+        else if (std::strcmp(raw_argv[i], "--rsp-jit") == 0) rsp_mode = ezy::n64::RspMode::Jit;
+        else if (std::strcmp(raw_argv[i], "--rsp-interpreter") == 0) rsp_mode = ezy::n64::RspMode::Interpreter;
         else args.push_back(raw_argv[i]);
     }
     const int argc = static_cast<int>(args.size());
@@ -156,17 +163,18 @@ int main(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --compare <reference.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --isviewer [seconds]\n"
                      "       ezy_n64_runner <rom> --state-check [frames]\n"
-                     "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync\n";
+                     "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter\n";
         return 2;
     }
     const std::vector<std::uint8_t> rom = read_file(args[1]);
-    auto n64 = N64::create(rom, pif, rdp_mode);
+    auto n64 = N64::create(rom, pif, rdp_mode, rsp_mode);
     if (!n64) {
         std::cerr << "Not an N64 ROM: " << args[1] << '\n';
         return 2;
     }
     std::cout << "Title: " << n64->cartridge().title() << '\n';
     std::cout << "RDP: " << (n64->bus().rdp_threaded() ? "threaded" : "synchronous") << '\n';
+    std::cout << "RSP: " << (n64->bus().rsp().jit_active() ? "JIT available" : "interpreter") << '\n';
     const std::string mode = args[2];
     if (mode == "--screenshot" && argc >= 4) {
         const int frames = argc > 4 ? std::atoi(args[4]) : 120;
@@ -188,7 +196,9 @@ int main(int raw_argc, char* raw_argv[]) {
         const auto state = n64->save_state();
         const auto other_mode = rdp_mode == ezy::n64::RdpMode::Threaded
             ? ezy::n64::RdpMode::Synchronous : ezy::n64::RdpMode::Threaded;
-        const auto other = N64::create(rom, pif, other_mode);
+        const auto other_rsp = rsp_mode == ezy::n64::RspMode::Jit
+            ? ezy::n64::RspMode::Interpreter : ezy::n64::RspMode::Jit;
+        const auto other = N64::create(rom, pif, other_mode, other_rsp);
         if (!other || !other->load_state(state) || other->save_state() != state) return 1;
         for (int i = 0; i < 120; ++i) { n64->run_frame(); other->run_frame(); }
         if (n64->save_state() != other->save_state() || n64->image().argb != other->image().argb) {

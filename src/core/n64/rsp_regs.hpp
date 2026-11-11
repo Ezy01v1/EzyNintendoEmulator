@@ -8,13 +8,22 @@
 #include "n64/mi.hpp"
 #include "n64/rdp.hpp"
 #include "n64/rsp_vector.hpp"
+#include "n64/rsp_jit.hpp"
 #include "n64/scheduler.hpp"
 
 namespace ezy::n64 {
 
+enum class RspMode { Interpreter, Jit };
+RspMode default_rsp_mode();
+void set_default_rsp_mode(RspMode mode);
+
 // RSP scalar and vector cores, their two 4 KiB memory banks and the SP DMA interface.
 class RspRegs {
 public:
+    explicit RspRegs(RspMode mode = default_rsp_mode());
+    ~RspRegs();
+    [[nodiscard]] bool jit_active() const { return jit_ && jit_->available(); }
+    [[nodiscard]] RspJit::Stats jit_stats() const { return jit_ ? jit_->stats() : RspJit::Stats{}; }
     [[nodiscard]] const std::uint8_t* mem() const { return mem_.data(); } // inspection only
     [[nodiscard]] std::uint8_t read_memory8(std::uint32_t address) const { return mem_[address & 0x1FFF]; }
     void write_memory(std::uint32_t address, std::span<const std::uint8_t> bytes);
@@ -50,6 +59,7 @@ public:
     }
 
 private:
+    static void jit_vector(void* self, std::uint32_t word) noexcept;
     void invalidate_jit() { ++imem_generation_; }
     std::uint64_t imem_generation_ = 0; // host cache identity, never serialized
     static constexpr std::uint32_t kPcMask = 0xFFC;
@@ -83,6 +93,8 @@ private:
     std::uint32_t next_pc_ = 4;  // a branch sets the PC after its delay slot
     bool short_step_ = false;   // alternate 2 and 1 CPU cycles per RSP cycle
     RspVector vector_;
+    std::unique_ptr<RspJit> jit_;
+    std::uint64_t jit_generation_ = ~std::uint64_t{0};
 };
 
 }  // namespace ezy::n64

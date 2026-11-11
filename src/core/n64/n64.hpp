@@ -25,7 +25,8 @@ public:
     // and the CPU keep references to each other's neighbours.
     [[nodiscard]] static std::unique_ptr<N64> create(std::span<const std::uint8_t> rom,
                                                      std::span<const std::uint8_t> pif_rom = {},
-                                                     RdpMode mode = default_rdp_mode());
+                                                     RdpMode mode = default_rdp_mode(),
+                                                     RspMode rsp_mode = ezy::n64::default_rsp_mode());
     static RdpMode default_rdp_mode();
     static void set_default_rdp_mode(RdpMode mode);
 
@@ -53,7 +54,7 @@ public:
     [[nodiscard]] bool load_state(std::span<const std::uint8_t> state);
 
 private:
-    explicit N64(Cartridge cart, RdpMode mode);
+    explicit N64(Cartridge cart, RdpMode mode, RspMode rsp_mode);
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {

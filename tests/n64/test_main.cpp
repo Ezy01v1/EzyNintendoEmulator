@@ -12,6 +12,10 @@ int main(int argc, char** argv) {
             ezy::n64::N64::set_default_rdp_mode(ezy::n64::RdpMode::Threaded);
         else if (std::strcmp(argv[i], "--rdp-sync") == 0)
             ezy::n64::N64::set_default_rdp_mode(ezy::n64::RdpMode::Synchronous);
+        else if (std::strcmp(argv[i], "--rsp-jit") == 0)
+            ezy::n64::set_default_rsp_mode(ezy::n64::RspMode::Jit);
+        else if (std::strcmp(argv[i], "--rsp-interpreter") == 0)
+            ezy::n64::set_default_rsp_mode(ezy::n64::RspMode::Interpreter);
         else args.push_back(argv[i]);
     }
     doctest::Context context;

@@ -2225,3 +2225,55 @@ TEST_CASE("RSP batched vector execution matches individual steps at every cycle 
         CHECK(actual.take() == reference.take());
     }
 }
+
+#if EZY_N64_RSP_JIT
+TEST_CASE("RSP JIT discards hot code after mirrored writes DMA and state restoration") {
+    const auto n64=N64::create(counting_rom("JIT INVALIDATION"),{},RdpMode::Synchronous,RspMode::Jit);
+    REQUIRE(n64);
+    auto& bus=n64->bus();
+    REQUIRE(bus.rsp().jit_active());
+    const auto program=[&](int value) {
+        write_rsp_program(bus,{mips::addiu(1,0,value),mips::sw(1,0,0x300),mips::r(0,0,0,0,0,13)});
+    };
+    const auto run=[&] {
+        bus.write32(0x04080000,0);
+        bus.write32(0x04040010,5);
+        for(unsigned i=0;i<500 && !(bus.read32(0x04040010)&1);++i) n64->step();
+        REQUIRE((bus.read32(0x04040010)&1)!=0);
+    };
+    program(17); run(); run(); // Warm PC 0 after initial scheduler settlement.
+    REQUIRE(bus.read32(0x04000300)==17);
+    REQUIRE(bus.rsp().jit_stats().native_instructions>0);
+    const auto original=n64->save_state();
+    SUBCASE("CPU writes through a mirrored IMEM address") {
+        bus.write32(0x04021000,mips::addiu(1,0,42));
+        run();
+        CHECK(bus.read32(0x04000300)==42);
+    }
+    SUBCASE("SP DMA replaces an already compiled opcode") {
+        bus.write32(0x5000,mips::addiu(1,0,42));
+        bus.write32(0x5004,mips::sw(1,0,0x300));
+        bus.write32(0x04040000,0x1000);
+        bus.write32(0x04040004,0x5000);
+        bus.write32(0x04040008,7);
+        for(unsigned i=0;i<30;++i) n64->step();
+        run();
+        CHECK(bus.read32(0x04000300)==42);
+    }
+    SUBCASE("Loading old IMEM over hot new code and rejecting a truncated state") {
+        program(42); run(); run();
+        REQUIRE(bus.read32(0x04000300)==42);
+        const auto changed=n64->save_state();
+        REQUIRE(n64->load_state(original));
+        run();
+        CHECK(bus.read32(0x04000300)==17);
+        const auto before=n64->save_state();
+        auto truncated=changed;
+        truncated.resize(truncated.size()-8);
+        CHECK_FALSE(n64->load_state(truncated));
+        CHECK(n64->save_state()==before);
+        run();
+        CHECK(bus.read32(0x04000300)==17);
+    }
+}
+#endif
