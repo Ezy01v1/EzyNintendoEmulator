@@ -2168,3 +2168,60 @@ TEST_CASE("N64 peripheral observers synchronize pending RDP writes without Sync 
         CHECK(image.argb[0] == 0xFF123456);
     }
 }
+
+TEST_CASE("RSP batched vector execution matches individual steps at every cycle boundary") {
+    const std::array program{
+        mips::addiu(1, 0, 0x200), mips::lui(2, 0x1234), mips::ori(2, 2, 0x5678),
+        mips::sw(2, 1, 0),
+        // LQV v2,0(r1), VXOR v3,v2,v2, SQV v3,16(r1)
+        mips::i(0x32, 1, 2, 4 << 11), vector_op(0x2C, 3, 2, 2),
+        mips::i(0x3A, 1, 3, (4 << 11) | 1),
+        cop2_transfer(0, 4, 2, 0), cop2_transfer(4, 4, 5, 15),
+        cop2_transfer(0, 0, 2, 0), // Writing r0 is still discarded.
+        mips::i(0x32, 0, 6, (4 << 11) | 1), // Base r0.
+        mips::beq(0, 0, 2), vector_op(0x2C, 7, 2, 2), // Vector delay slot.
+        mips::addiu(6, 0, 99), // Skipped by the branch.
+        mips::i(0x3A, 0, 7, (4 << 11) | 2),
+        cop2_transfer(6, 2, 0), cop2_transfer(2, 5, 0),
+        vector_op(0x37, 0, 0, 0), mips::r(0, 0, 0, 0, 0, 0x0D),
+    };
+    for (std::uint64_t bound = 0; bound <= 40; ++bound) {
+        CAPTURE(bound);
+        Scheduler singles, batched;
+        Mi single_mi, batch_mi;
+        Rdp single_rdp, batch_rdp;
+        RspRegs single_rsp, batch_rsp;
+        for (std::size_t i = 0; i < program.size(); ++i) {
+            for (unsigned byte = 0; byte < 4; ++byte) {
+                const auto value = static_cast<std::uint8_t>(program[i] >> (24 - byte * 8));
+                single_rsp.mem()[0x1000 + i * 4 + byte] = value;
+                batch_rsp.mem()[0x1000 + i * 4 + byte] = value;
+            }
+        }
+        single_rsp.write_sp(0x10, 0x101, single_mi, singles, 0); // halt clear, interrupt on BREAK
+        batch_rsp.write_sp(0x10, 0x101, batch_mi, batched, 0);
+        singles.schedule(EventType::ViLine, 11);
+        batched.schedule(EventType::ViLine, 11);
+        singles.advance_to(bound);
+        batched.advance_to(bound);
+        while (const auto event = singles.pop_due()) {
+            if (event->type == EventType::RspStep)
+                single_rsp.step(single_mi, single_rdp, singles, event->when);
+        }
+        while (const auto event = batched.pop_due()) {
+            if (event->type == EventType::RspStep)
+                batch_rsp.run(batch_mi, batch_rdp, batched, event->when, false);
+        }
+        ezy::StateWriter reference, actual;
+        // Inactive slots retain an unobservable last timestamp; batching need not
+        // update it on BREAK. Compare scheduling behavior and all live RSP state.
+        CHECK(singles.next_event_time() == batched.next_event_time());
+        for (unsigned type = 0; type < kEventTypeCount; ++type)
+            CHECK(singles.pending(static_cast<EventType>(type)) == batched.pending(static_cast<EventType>(type)));
+        single_mi.serialize(reference);
+        single_rsp.serialize(reference, 11, single_rdp);
+        batch_mi.serialize(actual);
+        batch_rsp.serialize(actual, 11, batch_rdp);
+        CHECK(actual.take() == reference.take());
+    }
+}

@@ -6,7 +6,10 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-10_
 
-> **Para retomar:** evaluar la **Etapa 2 de velocidad N64** con un nuevo perfil.
+> **Para retomar:** aprobar el diseño de **JIT del RSP** antes de preparar su plan.
+> Perfil y dos ajustes del intérprete evaluados en `codex/n64-rsp-speed`; ambos
+> ajustes retirados por no mejorar el tiempo real. Diseño revisado en
+> `docs/superpowers/specs/2026-11-10-n64-rsp-jit-design.md`; aún sin implementar.
 > CPU/RSP optimizados en `main` (PR #15). El RDP en hilo está implementado y validado
 > en `codex/n64-threaded-rdp`, pero quedó experimental: resultó más lento. La rama es local.
 
@@ -134,6 +137,12 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         Diseño y plan en `docs/superpowers/`, con fecha 2026-11-10. No repetir esta implementación
         como pendiente ni confundir estas mediciones locales con las de otra PC u otro momento.
 - [ ] **Etapa 2: decidir según lo medido**:
+  - Perfil local actualizado: `execute_scalar` 11,7 %, bucle RSP 6,7 %, memoria vectorial
+    5,9 %, ALU vectorial 5,7 %, más operaciones por carril. Propuesta: **JIT del RSP primero**,
+    conservando el intérprete como referencia y respaldo. AsmJit fijado por SHA, x86-64,
+    invalidación de IMEM y presupuesto de ciclos exacto. Diseño revisado, pendiente de aprobación.
+  - Experimentos descartados: `/Ob3` (+0,15 % mediano, no significativo) y despacho vectorial
+    directo desde `run` (4,9 % más lento). Ambos revertidos; no repetirlos como mejoras.
   - Dynarec (JIT) MIPS → x86-64 para la CPU (y luego el RSP): la ganancia grande (5–20×), y la
     misma técnica que exigirán GameCube y Wii.
   - O RSP en alto nivel (HLE) de los microcódigos gráficos (F3DEX etc.) si el RSP sigue pesando.
@@ -288,3 +297,14 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   por defecto y el hilo queda experimental. No se ejecutaron n64-systemtest (ROM ausente) ni TSan
   (sin toolchain compatible preparado). Siguiente: nuevo perfil y decisión de Etapa 2, no cambiar ROM.
   Sin merge ni push; la publicación sigue requiriendo autorización explícita.
+- 2026-11-10 — Etapa 2, rama `codex/n64-rsp-speed`: perfil síncrono actualizado. `/Ob3` comparado
+  sin caché incremental LTCG: mediana 12,692 → 12,673 s, sin ganancia real clara; retirado.
+  Despacho directo COP2/LWC2/SWC2: 11,561 → 12,124 s, 4,9 % peor; retirado. Tres pares alternados
+  por experimento, imagen exacta. No quedó ninguno de los cambios de rendimiento en producción.
+  Se conserva una prueba diferencial del RSP en 41 límites de ciclo, con r0, delay slot vectorial,
+  memoria, COP2, evento externo y BREAK con IRQ: 177/177 casos y 1963 comprobaciones en ambos
+  modos RDP. Las marcas de hora de slots inactivos del planificador no son observables; la prueba
+  compara eventos pendientes/próximo evento y todo el estado RSP/MI, no esos residuos históricos.
+  Preparado y revisado diseño JIT del RSP, sin preguntas técnicas importantes pendientes; falta
+  aprobación antes de instalar AsmJit o implementar. La ROM histórica de systemtest es `196f542`;
+  su repo actual remite a nemu64-test, cuyos nuevos totales no deben confundirse con 3721.
