@@ -34,7 +34,7 @@ class Bus final : public CpuBus {
 public:
     static constexpr std::uint32_t kRdramSize = 8 * 1024 * 1024;
 
-    Bus(Scheduler& scheduler, const Cartridge& cart);
+    Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode = default_rdp_mode());
 
     std::uint8_t read8(std::uint32_t paddr) override;
     std::uint16_t read16(std::uint32_t paddr) override;
@@ -46,6 +46,13 @@ public:
     void write64(std::uint32_t paddr, std::uint64_t value) override;
     [[nodiscard]] std::uint32_t uncached_cycles(std::uint32_t paddr) const override;
     [[nodiscard]] bool interrupt_line() const override { return mi_.line(); }
+    void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const override {
+        rdp_.prepare_memory(address, bytes, write);
+    }
+    void drain_rdp() const { rdp_.drain(); }
+    [[nodiscard]] bool rdp_threaded() const { return rdp_.threaded(); }
+    [[nodiscard]] RdpWorker::Stats rdp_stats() const { return rdp_.stats(); }
+    [[nodiscard]] Vi::Image image() const { drain_rdp(); return vi_.image(rdram_); }
 
     void handle_event(EventType type, std::uint64_t when);
     // The RspStep event, without the dispatch (the step loop's fast path).
@@ -64,15 +71,15 @@ public:
     // An optional real PIF ROM (1984 bytes) mapped at 0x1FC00000.
     void set_pif_rom(std::span<const std::uint8_t> rom);
     [[nodiscard]] const Vi& vi() const { return vi_; }
-    [[nodiscard]] std::span<std::uint8_t> rdram() { return rdram_; }
-    [[nodiscard]] std::span<const std::uint8_t> rdram() const { return rdram_; }
     // Text a program printed through the ISViewer port since the last call.
     [[nodiscard]] std::string take_isviewer_output();
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {
+        drain_rdp();
         ar(rdram_), ar(rdram_regs_), ar(ri_), ar(isviewer_);
         set_direct_ram(rdram_.data(), static_cast<std::uint32_t>(rdram_.size()));
+        if constexpr (Ar::kLoading) rdp_.bind_memory(rdram_);
         mi_.serialize(ar);
         pi_.serialize(ar);
         rsp_.serialize(ar, version, rdp_);

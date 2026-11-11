@@ -20,11 +20,12 @@ constexpr std::uint32_t kIsViewerMagic = 0x49533634;  // "IS64"
 
 }  // namespace
 
-Bus::Bus(Scheduler& scheduler, const Cartridge& cart) : scheduler_(scheduler), cart_(cart) {
+Bus::Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode) : scheduler_(scheduler), cart_(cart) {
     vi_.set_region(cart.region());
     ai_.set_region(cart.region());
     vi_.start(scheduler_);
     set_direct_ram(rdram_.data(), kRdramSize);
+    if (mode == RdpMode::Threaded) set_memory_guard(rdp_.enable_threaded(rdram_));
 }
 
 std::uint8_t* Bus::memory(std::uint32_t paddr) {
@@ -74,12 +75,15 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     } else if (paddr >= kVi && paddr < kAi) {
         vi_.write(paddr - kVi, value, mi_);
     } else if (paddr >= kAi && paddr < kPi) {
+        if (((paddr - kAi) & 0x1F) == 4) drain_rdp();
         ai_.write(paddr - kAi, value, mi_, scheduler_, rdram_);
     } else if (paddr >= kPi && paddr < kRi) {
+        if (((paddr - kPi) & 0x3F) == 8 || ((paddr - kPi) & 0x3F) == 12) drain_rdp();
         pi_.write(paddr - kPi, value, mi_, scheduler_, rdram_, cart_);
     } else if (paddr >= kRi && paddr < kSi) {
         ri_[(paddr >> 2) & 7] = value;
     } else if (paddr >= kSi && paddr < kSi + 0x100000) {
+        if (((paddr - kSi) & 0x1F) == 4 || ((paddr - kSi) & 0x1F) == 16) drain_rdp();
         si_.write(paddr - kSi, value, mi_, scheduler_, rdram_, pif_);
     } else if (paddr >= kPifRam && paddr < kPifRam + 64) {
         const std::uint32_t o = paddr - kPifRam;
@@ -102,6 +106,7 @@ std::uint16_t Bus::cart_read16(std::uint32_t paddr) { return static_cast<std::ui
 bool Bus::is_cart(std::uint32_t paddr) { return paddr >= 0x05000000 && paddr < kPifRom; }
 
 std::uint8_t Bus::read8(std::uint32_t paddr) {
+    guard_memory(paddr, 1, false);
     if (std::uint8_t* m = memory(paddr)) return *m;
     if (is_cart(paddr)) {
         const std::uint16_t half = cart_read16(paddr);
@@ -117,6 +122,7 @@ std::uint16_t Bus::read16(std::uint32_t paddr) {
 }
 
 std::uint32_t Bus::read32(std::uint32_t paddr) {
+    guard_memory(paddr, 4, false);
     if (std::uint8_t* m = memory(paddr)) {
         return (static_cast<std::uint32_t>(m[0]) << 24) | (m[1] << 16) | (m[2] << 8) | m[3];
     }
@@ -128,6 +134,7 @@ std::uint64_t Bus::read64(std::uint32_t paddr) {
 }
 
 void Bus::write8(std::uint32_t paddr, std::uint8_t value) {
+    guard_memory(paddr, 1, true);
     if (std::uint8_t* m = memory(paddr)) {
         *m = value;
         return;
@@ -145,6 +152,7 @@ void Bus::write16(std::uint32_t paddr, std::uint16_t value) {
 }
 
 void Bus::write32(std::uint32_t paddr, std::uint32_t value) {
+    guard_memory(paddr, 4, true);
     if (std::uint8_t* m = memory(paddr)) {
         m[0] = static_cast<std::uint8_t>(value >> 24);
         m[1] = static_cast<std::uint8_t>(value >> 16);
@@ -172,8 +180,8 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         case EventType::PiDma: pi_.finish_dma(mi_); break;
         case EventType::ViLine: vi_.on_line(mi_, scheduler_, when); break;
         case EventType::SiDma: si_.finish_dma(mi_); break;
-        case EventType::AiDma: ai_.on_dma_end(mi_, scheduler_, rdram_); break;
-        case EventType::SpDma: rsp_.finish_dma_row(scheduler_, rdram_, when); break;
+        case EventType::AiDma: drain_rdp(); ai_.on_dma_end(mi_, scheduler_, rdram_); break;
+        case EventType::SpDma: drain_rdp(); rsp_.finish_dma_row(scheduler_, rdram_, when); break;
         case EventType::RspStep: rsp_.step(mi_, rdp_, scheduler_, when); break;
         case EventType::RdpWord: rdp_.step(mi_, scheduler_, rdram_, rsp_.dmem(), when); break;
         default: break;

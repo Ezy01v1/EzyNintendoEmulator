@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 namespace ezy::n64 {
 
@@ -28,8 +29,13 @@ public:
     // skipping the virtual calls. Accesses there must have no side effects. Empty by default.
     [[nodiscard]] std::uint8_t* direct_ram() const { return direct_ram_; }
     [[nodiscard]] std::uint32_t direct_ram_size() const { return direct_ram_size_; }
+    void guard_memory(std::uint32_t address, std::size_t bytes, bool write) const {
+        if (memory_guard_) prepare_memory(address, bytes, write);
+    }
+    virtual void prepare_memory(std::uint32_t, std::size_t, bool) const {}
 
 protected:
+    void set_memory_guard(bool enabled) { memory_guard_ = enabled; }
     void set_direct_ram(std::uint8_t* base, std::uint32_t size) {
         direct_ram_ = base;
         direct_ram_size_ = size;
@@ -38,6 +44,7 @@ protected:
 private:
     std::uint8_t* direct_ram_ = nullptr;
     std::uint32_t direct_ram_size_ = 0;
+    bool memory_guard_ = false;
 };
 
 }  // namespace ezy::n64

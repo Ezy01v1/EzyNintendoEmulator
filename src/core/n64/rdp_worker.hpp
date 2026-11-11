@@ -45,6 +45,8 @@ public:
     [[nodiscard]] bool pending() const {
         return failed_.load(std::memory_order_acquire) || submitted_ > completed_.load(std::memory_order_acquire);
     }
+    struct Stats { std::uint64_t submitted = 0, waits = 0, queue_waits = 0; };
+    [[nodiscard]] Stats stats() const { return {submitted_, waits_, queue_waits_}; }
 
 private:
     static constexpr std::uint32_t kRamSize = 8 * 1024 * 1024;
@@ -56,6 +58,8 @@ private:
     std::vector<Work> queue_;
     std::array<std::uint64_t, (kRamSize >> kPageShift)> readers_{}, writers_{};
     std::uint64_t submitted_ = 0;
+    mutable std::uint64_t waits_ = 0;
+    std::uint64_t queue_waits_ = 0;
     std::atomic<std::uint64_t> completed_{0};
     std::atomic<bool> failed_{false};
     mutable std::mutex mutex_;

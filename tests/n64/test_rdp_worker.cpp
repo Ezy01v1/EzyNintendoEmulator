@@ -146,9 +146,9 @@ TEST_CASE("RDP reservations include unaligned targets and X beyond the row strid
     auto access = state.access(packet);
     REQUIRE(access.count == 2);
     CHECK(access.ranges[0].begin == 0x4000);
-    CHECK(access.ranges[0].end == 0x4027);
+    CHECK(access.ranges[0].end >= 0x4027);
     CHECK(access.ranges[1].begin == 0x6000);
-    CHECK(access.ranges[1].end == 0x6013);
+    CHECK(access.ranges[1].end >= 0x6013);
     CHECK(access.ranges[0].write);
     packet.words[0] = 0x3400000000000000ULL;
     access = state.access(packet);
@@ -156,4 +156,30 @@ TEST_CASE("RDP reservations include unaligned targets and X beyond the row strid
     CHECK(access.ranges[0].begin == 0);
     CHECK(access.ranges[0].end == 8 * 1024 * 1024);
     CHECK_FALSE(access.ranges[0].write);
+}
+
+TEST_CASE("RDP reservations cover inclusive COPY and fill edges on a page boundary") {
+    RdpMemoryState state;
+    state.color_address = 0x0FF8;
+    state.width = 1;
+    state.pixel_size = 2;
+    state.scissor = (16ULL << 12) | 4;
+    for (const auto op : {0x24ULL, 0x08ULL}) {
+        RdpPacket packet;
+        packet.words[0] = op << 56;
+        const auto access = state.access(packet);
+        REQUIRE(access.count == 1);
+        // These paths may write the pixel at x = floor(scissor_right / 4).
+        CHECK(access.ranges[0].begin <= 0x1000);
+        CHECK(access.ranges[0].end >= 0x1002);
+    }
+}
+
+TEST_CASE("RDP worker destruction completes all published packets") {
+    unsigned completed = 0;
+    {
+        RdpWorker worker([&](const RdpPacket&) { ++completed; }, 2);
+        for (unsigned i = 0; i < 100; ++i) worker.submit({}, {});
+    }
+    CHECK(completed == 100);
 }

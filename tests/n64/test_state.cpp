@@ -2084,3 +2084,87 @@ TEST_CASE("create refuses a file that isn't an N64 ROM") {
     const std::vector<std::uint8_t> junk(0x2000, 0x55);
     CHECK_FALSE(N64::create(junk));
 }
+
+TEST_CASE("N64 threaded mode preserves state across synchronous restore and rollback") {
+    const auto rom = counting_rom("THREADED STATE");
+    const auto async = N64::create(rom, {}, RdpMode::Threaded);
+    const auto sync = N64::create(rom, {}, RdpMode::Synchronous);
+    REQUIRE(async);
+    REQUIRE(sync);
+    REQUIRE(async->bus().rdp_threaded());
+    auto& bus = async->bus();
+    const std::array<std::uint64_t, 5> commands{
+        0x3F18000300004000ULL, kFillMode, rdp_rectangle(0x2D, 0, 0, 4, 1),
+        0x3700000012345678ULL, rdp_rectangle(0x36, 3, 0, 0, 0),
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 20; ++i) async->step();
+    // No Sync Full: save must drain before serializing RAM and raster state.
+    const auto state = async->save_state();
+    CHECK(bus.read32(0x4000) == 0x12345678);
+    REQUIRE(sync->load_state(state));
+    CHECK(sync->save_state() == state);
+    auto truncated = state;
+    truncated.resize(truncated.size() - 8);
+    CHECK_FALSE(async->load_state(truncated));
+    CHECK(async->save_state() == state);
+    for (unsigned i = 0; i < 100; ++i) { async->step(); sync->step(); }
+    CHECK(async->save_state() == sync->save_state());
+}
+
+TEST_CASE("N64 peripheral observers synchronize pending RDP writes without Sync Full") {
+    const auto n64 = N64::create(counting_rom("RDP OBSERVERS"), {}, RdpMode::Threaded);
+    REQUIRE(n64);
+    REQUIRE(n64->bus().rdp_threaded());
+    auto& bus = n64->bus();
+    const std::array<std::uint64_t, 5> commands{
+        0x3F18000F00004000ULL, kFillMode, rdp_rectangle(0x2D, 0, 0, 16, 1),
+        0x3700000012345600ULL, rdp_rectangle(0x36, 15, 0, 0, 0),
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 20; ++i) n64->step();
+    SUBCASE("SI reads the completed framebuffer") {
+        bus.write32(0x04800000, 0x4000);
+        bus.write32(0x04800010, 0x1FC007C0);
+        CHECK(bus.pif().ram()[0] == 0x12);
+        CHECK(bus.pif().ram()[1] == 0x34);
+    }
+    SUBCASE("SP DMA reads the completed framebuffer") {
+        bus.write32(0x04040000, 0);
+        bus.write32(0x04040004, 0x4000);
+        bus.write32(0x04040008, 63);
+        for (unsigned i = 0; i < 80; ++i) n64->step();
+        CHECK(bus.read32(0x04000000) == 0x12345600);
+    }
+    SUBCASE("AI reads the completed framebuffer as audio samples") {
+        bus.write32(0x04500008, 1);
+        bus.write32(0x04500000, 0x4000);
+        bus.write32(0x04500004, 64);
+        REQUIRE_FALSE(bus.ai().samples().empty());
+        CHECK(bus.ai().samples()[0] == doctest::Approx(0x1234 / 32768.0));
+    }
+    SUBCASE("PI writes occur after the queued draw") {
+        bus.write32(0x04600000, 0x4000);
+        bus.write32(0x04600004, 0x10000000);
+        bus.write32(0x0460000C, 3);
+        CHECK(bus.read32(0x4000) == 0x80371240);
+    }
+    SUBCASE("VI image extraction observes the completed framebuffer") {
+        bus.write32(0x04400000, 3);
+        bus.write32(0x04400004, 0x4000);
+        bus.write32(0x04400008, 16);
+        bus.write32(0x04400024, 16);
+        bus.write32(0x04400028, 480);
+        bus.write32(0x04400030, 1024);
+        bus.write32(0x04400034, 1024);
+        const auto image = n64->image();
+        REQUIRE_FALSE(image.argb.empty());
+        CHECK(image.argb[0] == 0xFF123456);
+    }
+}

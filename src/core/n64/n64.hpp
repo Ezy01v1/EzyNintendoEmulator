@@ -24,7 +24,10 @@ public:
     // at the reset vector 0xBFC00000 like the hardware. Heap-allocated because the bus
     // and the CPU keep references to each other's neighbours.
     [[nodiscard]] static std::unique_ptr<N64> create(std::span<const std::uint8_t> rom,
-                                                     std::span<const std::uint8_t> pif_rom = {});
+                                                     std::span<const std::uint8_t> pif_rom = {},
+                                                     RdpMode mode = default_rdp_mode());
+    static RdpMode default_rdp_mode();
+    static void set_default_rdp_mode(RdpMode mode);
 
     N64(const N64&) = delete;
     N64& operator=(const N64&) = delete;
@@ -41,7 +44,7 @@ public:
     [[nodiscard]] const Bus& bus() const { return bus_; }
     [[nodiscard]] const Cartridge& cartridge() const { return cart_; }
     [[nodiscard]] std::uint64_t cycles() const { return scheduler_.now(); }
-    [[nodiscard]] Vi::Image image() const { return bus_.vi().image(bus_.rdram()); }
+    [[nodiscard]] Vi::Image image() const { return bus_.image(); }
 
     // Save states: the whole machine as bytes. load_state() refuses a state of another
     // game or format version and, if the state turns out to be truncated, leaves the
@@ -50,7 +53,7 @@ public:
     [[nodiscard]] bool load_state(std::span<const std::uint8_t> state);
 
 private:
-    explicit N64(Cartridge cart);
+    explicit N64(Cartridge cart, RdpMode mode);
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {

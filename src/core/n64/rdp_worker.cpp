@@ -18,6 +18,7 @@ RdpWorker::~RdpWorker() {
 
 void RdpWorker::submit(const RdpPacket& packet, const RdpAccess& access) {
     std::unique_lock lock(mutex_);
+    if (size_ == queue_.size()) ++queue_waits_;
     changed_.wait(lock, [this] { return size_ < queue_.size() || stopping_; });
     if (failure_) std::rethrow_exception(failure_);
     if (stopping_) throw std::runtime_error("RDP worker stopped");
@@ -39,6 +40,7 @@ void RdpWorker::submit(const RdpPacket& packet, const RdpAccess& access) {
 
 void RdpWorker::wait(std::uint64_t sequence) const {
     if (!failed_.load(std::memory_order_acquire) && completed_.load(std::memory_order_acquire) >= sequence) return;
+    ++waits_;
     std::unique_lock lock(mutex_);
     changed_.wait(lock, [this, sequence] {
         return failure_ || completed_.load(std::memory_order_acquire) >= sequence;

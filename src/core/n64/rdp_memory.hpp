@@ -32,9 +32,11 @@ struct RdpMemoryState {
         if (op == 0x30 || op == 0x33 || op == 0x34) return RdpAccess::range(0, ram_size, false);
         RdpAccess result;
         if (!((op >= 0x08 && op <= 0x0F) || op == 0x24 || op == 0x36)) return result;
-        const auto right = (static_cast<unsigned>(scissor >> 12) & 0xFFF) + 3;
+        const auto right = static_cast<unsigned>(scissor >> 12) & 0xFFF;
         const auto bottom = (static_cast<unsigned>(scissor) & 0xFFF) + 3;
-        const std::uint64_t x_end = right >> 2, y_end = bottom >> 2;
+        // COPY and fill triangles include the integer right edge, unlike the
+        // fractional coverage paths. Reserve that extra pixel for every draw.
+        const std::uint64_t x_end = (right >> 2) + 1, y_end = bottom >> 2;
         if (x_end == 0 || y_end == 0 || width == 0) return result;
         const auto pixels = (y_end - 1) * width + x_end;
         const unsigned bytes = pixel_size >= 1 ? 1U << (pixel_size - 1) : 4;

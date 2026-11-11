@@ -19,12 +19,15 @@ constexpr std::uint64_t kMaxFrameCycles = 93'750'000 / 10;
 
 }  // namespace
 
-N64::N64(Cartridge cart) : cart_(std::move(cart)), bus_(scheduler_, cart_), cpu_(bus_) {}
+N64::N64(Cartridge cart, RdpMode mode) : cart_(std::move(cart)), bus_(scheduler_, cart_, mode), cpu_(bus_) {}
 
-std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> pif_rom) {
+RdpMode N64::default_rdp_mode() { return ezy::n64::default_rdp_mode(); }
+void N64::set_default_rdp_mode(RdpMode mode) { ezy::n64::set_default_rdp_mode(mode); }
+
+std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> pif_rom, RdpMode mode) {
     auto cart = Cartridge::load(rom);
     if (!cart) return nullptr;
-    std::unique_ptr<N64> n64(new N64(std::move(*cart)));
+    std::unique_ptr<N64> n64(new N64(std::move(*cart), mode));
     if (pif_rom.size() == kPifRomSize) {
         n64->bus_.set_pif_rom(pif_rom);
         n64->cpu_.set_pc(0xFFFFFFFFBFC00000ULL);  // Cop0 starts in its reset state (BEV, ERL)
@@ -86,6 +89,7 @@ void N64::run_frame() {
 }
 
 std::vector<std::uint8_t> N64::save_state() {
+    bus_.drain_rdp(); // Drain before serializing even the scheduler and RAM.
     StateWriter writer;
     std::uint32_t magic = kStateMagic, version = kStateVersion, crc = cart_.crc32();
     writer(magic), writer(version), writer(crc);

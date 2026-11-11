@@ -2,6 +2,8 @@ add_executable(ezy_n64_tests test_main.cpp test_scheduler.cpp test_cartridge.cpp
 target_link_libraries(ezy_n64_tests PRIVATE ezy_n64 doctest::doctest ezy_warnings)
 target_compile_definitions(ezy_n64_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
 add_test(NAME ezy_n64_tests COMMAND ezy_n64_tests)
+add_test(NAME ezy_n64_threaded_tests COMMAND ezy_n64_tests --rdp-threaded)
+set_tests_properties(ezy_n64_tests ezy_n64_threaded_tests PROPERTIES TIMEOUT 120)
 
 # PeterLemon's CPU test ROMs (roms/README.md): each one whose .bmp reference sits next to
 # it, compared on the VI image. Release only, and only when the ROMs are present.

@@ -1,6 +1,7 @@
 #include "n64/rdp.hpp"
 
 #include <system_error>
+#include <atomic>
 
 namespace ezy::n64 {
 
@@ -10,6 +11,7 @@ constexpr std::uint32_t kXbus = 1U << 0, kFreeze = 1U << 1, kFlush = 1U << 2, kS
                         kPipeBusy = 1U << 5, kCommandBusy = 1U << 6, kDmaBusy = 1U << 8, kStartValid = 1U << 10;
 constexpr std::uint32_t kAddressMask = 0xFFFFF8, kCounterMask = 0xFFFFFF;
 constexpr std::uint64_t kWordCycles = 3;  // approximate command fetch and execution in CPU cycles
+std::atomic<RdpMode> default_mode{RdpMode::Synchronous};
 
 std::uint64_t rdp_cycles(std::uint64_t cpu_cycles) {
     return (cpu_cycles / 3) * 2 + (cpu_cycles % 3) * 2 / 3;
@@ -27,13 +29,16 @@ unsigned command_words(unsigned op) {
 } // namespace
 
 Rdp::~Rdp() = default; // The worker joins before the base raster state is destroyed.
+RdpMode default_rdp_mode() { return default_mode.load(std::memory_order_relaxed); }
+void set_default_rdp_mode(RdpMode mode) { default_mode.store(mode, std::memory_order_relaxed); }
 
 bool Rdp::enable_threaded(std::span<std::uint8_t> rdram) {
     if (worker_) return true;
     rebuild_memory_state();
+    worker_ram_ = rdram;
     try {
-        worker_ = std::make_unique<RdpWorker>([this, rdram](const RdpPacket& packet) {
-            execute_packet(packet, rdram);
+        worker_ = std::make_unique<RdpWorker>([this](const RdpPacket& packet) {
+            execute_packet(packet, worker_ram_);
         });
     } catch (const std::system_error&) {
         return false; // No thread was started; synchronous rendering remains available.

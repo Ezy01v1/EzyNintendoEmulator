@@ -24,6 +24,7 @@ int Vr4300::idle_loop_cycles() const {
     const auto paddr = static_cast<std::uint32_t>(pc_ & 0x1FFFFFFF);
     if (paddr + 8 > bus_.direct_ram_size()) return 0;
     if (interrupt_pending()) return 0;  // the next step leaves the loop
+    bus_.guard_memory(paddr, 8, false);
     const std::uint8_t* m = bus_.direct_ram() + paddr;
     const std::uint32_t branch = (std::uint32_t{m[0]} << 24) | (m[1] << 16) | (m[2] << 8) | m[3];
     const std::uint32_t slot = (std::uint32_t{m[4]} << 24) | (m[5] << 16) | (m[6] << 8) | m[7];
@@ -291,6 +292,7 @@ bool Vr4300::load(std::uint64_t vaddr, T& value, bool for_store) {
     last_paddr_ = t.paddr;
     if (!t.cached) cycles_ += static_cast<int>(bus_.uncached_cycles(t.paddr));
     if (t.paddr < bus_.direct_ram_size()) {  // RDRAM: read it in place (big-endian)
+        bus_.guard_memory(t.paddr, sizeof(T), false);
         const std::uint8_t* m = bus_.direct_ram() + t.paddr;
         std::uint64_t v = 0;
         for (std::size_t i = 0; i < sizeof(T); ++i) v = (v << 8) | m[i];
@@ -314,6 +316,7 @@ bool Vr4300::store(std::uint64_t vaddr, T value) {
     if (!translate(vaddr, true, t)) return false;
     if (!t.cached) cycles_ += static_cast<int>(bus_.uncached_cycles(t.paddr));
     if (t.paddr < bus_.direct_ram_size()) {
+        bus_.guard_memory(t.paddr, sizeof(T), true);
         std::uint8_t* m = bus_.direct_ram() + t.paddr;
         for (std::size_t i = 0; i < sizeof(T); ++i) m[i] = static_cast<std::uint8_t>(static_cast<std::uint64_t>(value) >> (8 * (sizeof(T) - 1 - i)));
         return true;

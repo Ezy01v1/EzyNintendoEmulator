@@ -14,13 +14,19 @@
 
 namespace ezy::n64 {
 
+enum class RdpMode { Synchronous, Threaded };
+RdpMode default_rdp_mode();
+void set_default_rdp_mode(RdpMode mode);
+
 // Display Processor command interface and software rasterizer.
 class Rdp : private RdpRasterizer {
 public:
     Rdp() = default;
     ~Rdp();
     bool enable_threaded(std::span<std::uint8_t> rdram);
+    void bind_memory(std::span<std::uint8_t> rdram) { drain(); worker_ram_ = rdram; }
     [[nodiscard]] bool threaded() const { return worker_ != nullptr; }
+    [[nodiscard]] RdpWorker::Stats stats() const { return worker_ ? worker_->stats() : RdpWorker::Stats{}; }
     void drain() const { if (worker_) worker_->drain(); }
     void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const {
         if (worker_ && worker_->pending()) worker_->wait_memory(address, bytes, write);
@@ -105,6 +111,7 @@ private:
     std::uint32_t draw_words_ = 0;
     std::array<std::uint64_t, 22> draw_command_{};
     RdpMemoryState memory_state_;
+    std::span<std::uint8_t> worker_ram_;
     std::unique_ptr<RdpWorker> worker_;
 };
 

@@ -13,6 +13,8 @@
 //   ezy_n64_runner <rom> --pc [frames]
 //       Debugging: prints the CPU's PC and Cause after each frame (default 10 frames).
 // Option, anywhere after the ROM: --pif <file> (a real PIF ROM).
+// --rdp-threaded / --rdp-sync selects host execution without changing emulated timing.
+// --state-check [frames] compares a cross-mode save/load continuation for 120 frames.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -129,13 +131,23 @@ int run_isviewer(N64& n64, double seconds) {
     return all.find("Base: Failed 0 of") != std::string::npos ? 0 : 1;
 }
 
+void print_rdp_stats(N64& n64) {
+    n64.bus().drain_rdp();
+    const auto stats = n64.bus().rdp_stats();
+    std::cout << "RDP packets: " << stats.submitted << ", waits: " << stats.waits
+              << ", queue waits: " << stats.queue_waits << '\n';
+}
+
 }  // namespace
 
 int main(int raw_argc, char* raw_argv[]) {
     std::vector<char*> args;
     std::vector<std::uint8_t> pif;
+    auto rdp_mode = ezy::n64::RdpMode::Synchronous;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
+        else if (std::strcmp(raw_argv[i], "--rdp-threaded") == 0) rdp_mode = ezy::n64::RdpMode::Threaded;
+        else if (std::strcmp(raw_argv[i], "--rdp-sync") == 0) rdp_mode = ezy::n64::RdpMode::Synchronous;
         else args.push_back(raw_argv[i]);
     }
     const int argc = static_cast<int>(args.size());
@@ -143,16 +155,18 @@ int main(int raw_argc, char* raw_argv[]) {
         std::cerr << "Usage: ezy_n64_runner <rom> --screenshot <out.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --compare <reference.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --isviewer [seconds]\n"
-                     "Option: --pif <pif rom>\n";
+                     "       ezy_n64_runner <rom> --state-check [frames]\n"
+                     "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync\n";
         return 2;
     }
     const std::vector<std::uint8_t> rom = read_file(args[1]);
-    auto n64 = N64::create(rom, pif);
+    auto n64 = N64::create(rom, pif, rdp_mode);
     if (!n64) {
         std::cerr << "Not an N64 ROM: " << args[1] << '\n';
         return 2;
     }
     std::cout << "Title: " << n64->cartridge().title() << '\n';
+    std::cout << "RDP: " << (n64->bus().rdp_threaded() ? "threaded" : "synchronous") << '\n';
     const std::string mode = args[2];
     if (mode == "--screenshot" && argc >= 4) {
         const int frames = argc > 4 ? std::atoi(args[4]) : 120;
@@ -160,9 +174,31 @@ int main(int raw_argc, char* raw_argv[]) {
         const std::vector<char> bmp = encode_bmp(n64->image());
         std::ofstream(args[3], std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         std::cout << "Saved " << args[3] << " (" << n64->image().width << "x" << n64->image().height << ")\n";
+        print_rdp_stats(*n64);
         return 0;
     }
-    if (mode == "--compare" && argc >= 4) return run_compare(*n64, args[3], argc > 4 ? std::atoi(args[4]) : 120);
+    if (mode == "--compare" && argc >= 4) {
+        const int result = run_compare(*n64, args[3], argc > 4 ? std::atoi(args[4]) : 120);
+        print_rdp_stats(*n64);
+        return result;
+    }
+    if (mode == "--state-check") {
+        const int frames = argc > 3 ? std::atoi(args[3]) : 300;
+        for (int i = 0; i < frames; ++i) n64->run_frame();
+        const auto state = n64->save_state();
+        const auto other_mode = rdp_mode == ezy::n64::RdpMode::Threaded
+            ? ezy::n64::RdpMode::Synchronous : ezy::n64::RdpMode::Threaded;
+        const auto other = N64::create(rom, pif, other_mode);
+        if (!other || !other->load_state(state) || other->save_state() != state) return 1;
+        for (int i = 0; i < 120; ++i) { n64->run_frame(); other->run_frame(); }
+        if (n64->save_state() != other->save_state() || n64->image().argb != other->image().argb) {
+            std::cerr << "Failed: cross-mode state continuation differs\n";
+            return 1;
+        }
+        std::cout << "Passed: cross-mode state continuation after " << frames << "+120 frames\n";
+        print_rdp_stats(*n64);
+        return 0;
+    }
     if (mode == "--isviewer") return run_isviewer(*n64, argc > 3 ? std::atof(args[3]) : 60.0);
     if (mode == "--pc") {
         const int frames = argc > 3 ? std::atoi(args[3]) : 10;
