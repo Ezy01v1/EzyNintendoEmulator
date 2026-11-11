@@ -15,7 +15,9 @@ namespace ezy::n64 {
 // RSP scalar and vector cores, their two 4 KiB memory banks and the SP DMA interface.
 class RspRegs {
 public:
-    [[nodiscard]] std::uint8_t* mem() { return mem_.data(); }  // DMEM then IMEM
+    [[nodiscard]] const std::uint8_t* mem() const { return mem_.data(); } // inspection only
+    [[nodiscard]] std::uint8_t read_memory8(std::uint32_t address) const { return mem_[address & 0x1FFF]; }
+    void write_memory(std::uint32_t address, std::span<const std::uint8_t> bytes);
     [[nodiscard]] std::span<const std::uint8_t, 0x1000> dmem() const { return std::span(mem_).first<0x1000>(); }
     [[nodiscard]] std::uint32_t read_sp(std::uint32_t offset);
     void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
@@ -26,6 +28,7 @@ public:
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version, Rdp& rdp) {
+        if constexpr (Ar::kLoading) invalidate_jit();
         ar(mem_);
         std::array<std::uint32_t, 8> legacy_regs{};
         if (version == 1) ar(legacy_regs);
@@ -47,6 +50,8 @@ public:
     }
 
 private:
+    void invalidate_jit() { ++imem_generation_; }
+    std::uint64_t imem_generation_ = 0; // host cache identity, never serialized
     static constexpr std::uint32_t kPcMask = 0xFFC;
     static constexpr std::uint32_t kHalt = 1U << 0, kBroke = 1U << 1, kSingleStep = 1U << 5,
                                    kInterruptOnBreak = 1U << 6;

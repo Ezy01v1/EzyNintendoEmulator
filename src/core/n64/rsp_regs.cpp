@@ -2,6 +2,16 @@
 
 namespace ezy::n64 {
 
+void RspRegs::write_memory(std::uint32_t address, std::span<const std::uint8_t> bytes) {
+    bool imem = false;
+    for (const auto byte : bytes) {
+        imem |= (address & 0x1000) != 0;
+        mem_[address & 0x1FFF] = byte;
+        ++address;
+    }
+    if (imem) invalidate_jit();
+}
+
 namespace {
 
 constexpr std::uint32_t kDmaBusy = 1U << 2, kDmaFull = 1U << 3;
@@ -95,6 +105,7 @@ void RspRegs::finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram
     if (dma_.direction == DmaDirection::Idle) return;
     const std::uint32_t bytes = (dma_.length & kLengthMask) + 8;
     const std::uint32_t bank = dma_.sp_address & 0x1000;
+    if (dma_.direction == DmaDirection::ToSp && bank != 0) invalidate_jit();
     for (std::uint32_t i = 0; i < bytes; ++i) {
         std::uint8_t& sp = mem_[bank | ((dma_.sp_address + i) & 0xFFF)];
         const std::uint32_t dram = (dma_.dram_address + i) & kDramMask;

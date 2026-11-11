@@ -30,7 +30,6 @@ Bus::Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode) : scheduler_
 
 std::uint8_t* Bus::memory(std::uint32_t paddr) {
     if (paddr < kRdramSize) return &rdram_[paddr];
-    if (paddr >= kSpMem && paddr < kSpRegs) return rsp_.mem() + (paddr & 0x1FFF);  // mirrored
     if (paddr >= kIsViewer + 0x20 && paddr < kIsViewer + 0x10000) return &isviewer_[paddr - kIsViewer];
     return nullptr;
 }
@@ -107,6 +106,7 @@ bool Bus::is_cart(std::uint32_t paddr) { return paddr >= 0x05000000 && paddr < k
 
 std::uint8_t Bus::read8(std::uint32_t paddr) {
     guard_memory(paddr, 1, false);
+    if (paddr >= kSpMem && paddr < kSpRegs) return rsp_.read_memory8(paddr);
     if (std::uint8_t* m = memory(paddr)) return *m;
     if (is_cart(paddr)) {
         const std::uint16_t half = cart_read16(paddr);
@@ -116,6 +116,7 @@ std::uint8_t Bus::read8(std::uint32_t paddr) {
 }
 
 std::uint16_t Bus::read16(std::uint32_t paddr) {
+    if (paddr >= kSpMem && paddr < kSpRegs) return static_cast<std::uint16_t>((read8(paddr) << 8) | read8(paddr + 1));
     if (memory(paddr)) return static_cast<std::uint16_t>((read8(paddr) << 8) | read8(paddr + 1));
     if (is_cart(paddr)) return cart_read16(paddr);
     return static_cast<std::uint16_t>(read_io(paddr) >> ((2 - (paddr & 2)) * 8));
@@ -123,6 +124,11 @@ std::uint16_t Bus::read16(std::uint32_t paddr) {
 
 std::uint32_t Bus::read32(std::uint32_t paddr) {
     guard_memory(paddr, 4, false);
+    if (paddr >= kSpMem && paddr < kSpRegs) {
+        std::uint32_t value = 0;
+        for (unsigned i = 0; i < 4; ++i) value = (value << 8) | rsp_.read_memory8(paddr + i);
+        return value;
+    }
     if (std::uint8_t* m = memory(paddr)) {
         return (static_cast<std::uint32_t>(m[0]) << 24) | (m[1] << 16) | (m[2] << 8) | m[3];
     }
@@ -135,6 +141,7 @@ std::uint64_t Bus::read64(std::uint32_t paddr) {
 
 void Bus::write8(std::uint32_t paddr, std::uint8_t value) {
     guard_memory(paddr, 1, true);
+    if (paddr >= kSpMem && paddr < kSpRegs) { rsp_.write_memory(paddr, std::span(&value, 1)); return; }
     if (std::uint8_t* m = memory(paddr)) {
         *m = value;
         return;
@@ -143,6 +150,11 @@ void Bus::write8(std::uint32_t paddr, std::uint8_t value) {
 }
 
 void Bus::write16(std::uint32_t paddr, std::uint16_t value) {
+    if (paddr >= kSpMem && paddr < kSpRegs) {
+        const std::array bytes{static_cast<std::uint8_t>(value >> 8), static_cast<std::uint8_t>(value)};
+        rsp_.write_memory(paddr, bytes);
+        return;
+    }
     if (memory(paddr)) {
         write8(paddr, static_cast<std::uint8_t>(value >> 8));
         write8(paddr + 1, static_cast<std::uint8_t>(value));
@@ -153,6 +165,12 @@ void Bus::write16(std::uint32_t paddr, std::uint16_t value) {
 
 void Bus::write32(std::uint32_t paddr, std::uint32_t value) {
     guard_memory(paddr, 4, true);
+    if (paddr >= kSpMem && paddr < kSpRegs) {
+        const std::array bytes{static_cast<std::uint8_t>(value >> 24), static_cast<std::uint8_t>(value >> 16),
+                               static_cast<std::uint8_t>(value >> 8), static_cast<std::uint8_t>(value)};
+        rsp_.write_memory(paddr, bytes);
+        return;
+    }
     if (std::uint8_t* m = memory(paddr)) {
         m[0] = static_cast<std::uint8_t>(value >> 24);
         m[1] = static_cast<std::uint8_t>(value >> 16);

@@ -2194,8 +2194,8 @@ TEST_CASE("RSP batched vector execution matches individual steps at every cycle 
         for (std::size_t i = 0; i < program.size(); ++i) {
             for (unsigned byte = 0; byte < 4; ++byte) {
                 const auto value = static_cast<std::uint8_t>(program[i] >> (24 - byte * 8));
-                single_rsp.mem()[0x1000 + i * 4 + byte] = value;
-                batch_rsp.mem()[0x1000 + i * 4 + byte] = value;
+                single_rsp.write_memory(static_cast<std::uint32_t>(0x1000 + i * 4 + byte), std::span(&value, 1));
+                batch_rsp.write_memory(static_cast<std::uint32_t>(0x1000 + i * 4 + byte), std::span(&value, 1));
             }
         }
         single_rsp.write_sp(0x10, 0x101, single_mi, singles, 0); // halt clear, interrupt on BREAK
