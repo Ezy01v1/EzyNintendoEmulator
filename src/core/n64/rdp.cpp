@@ -785,6 +785,14 @@ bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsig
     if (!(solid_.modes & (1U << 4))) return true;
     const unsigned stored = (unsigned{rdram[address]} << 8) | rdram[address + 1];
     const std::uint32_t memory_z = decompress_depth(stored >> 2);
+    const unsigned mode = static_cast<unsigned>(solid_.modes >> 10) & 3;
+    const bool in_front = z < memory_z;
+    const bool max = memory_z == 0x3FFFF;
+    // Transparent Z never uses DZ. Full opaque pixels also only compare Z, so avoid
+    // looking up hidden DZ bits and calculating a tolerance that cannot affect them.
+    if (mode == 2) return in_front || max;
+    const bool overflow = ((coverage + memory_coverage(x, y, rdram)) & 8) != 0;
+    if (mode == 0 && (overflow || max)) return in_front || max;
     // The DZ code's low two bits live in the RDRAM hidden bits of the same halfword.
     const unsigned memory_dz_code = ((stored & 3) << 2) | hidden_bits(address);
     unsigned memory_dz = 1U << memory_dz_code;
@@ -799,10 +807,7 @@ bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsig
     const std::int64_t pixel = z, memory = memory_z;
     const bool farther = coplanar || pixel + range >= memory;
     const bool nearer = coplanar || pixel - range <= memory;
-    const bool in_front = pixel < memory;
-    const bool max = memory_z == 0x3FFFF;
-    const bool overflow = ((coverage + memory_coverage(x, y, rdram)) & 8) != 0;
-    switch ((solid_.modes >> 10) & 3) {
+    switch (mode) {
         case 1:  // interpenetrating
             // Where a full pixel pierces the stored surface within the DZ range, coverage is
             // scaled by how far in front it is, so intersecting surfaces antialias their seam.

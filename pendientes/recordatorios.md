@@ -4,10 +4,10 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-08_
+_Última actualización: 2026-11-10_
 
 > **Para retomar:** la próxima tarea es la **Etapa 1 de velocidad N64** (sección
-> "Subproyecto 4: velocidad N64" más abajo). Todo lo anterior está mergeado en `main` (PR #14).
+> "Subproyecto 4: velocidad N64" más abajo). Las optimizaciones de CPU/RSP ya están en `main` (PR #15).
 
 ## Estado actual
 
@@ -117,6 +117,11 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         `switch` por carril. MK64 ~9 s → ~7,9 s. Cada op pesa ahora ~1,5 %: SSE a mano no vale la pena.
   - [x] RSP con reloj local (`RspRegs::run`): corre tramos sin pasar por el planificador en cada
         instrucción; relee `others_bound()` porque el propio RSP agenda DMA/RDP. MK64 ~7,9 s → ~7,3 s.
+  - [x] Ruta rápida de profundidad del RDP: los píxeles transparentes y los opacos con overflow
+        o profundidad máxima evitan consultar DZ cuando no afecta al resultado. En esta PC,
+        dos pares de pruebas Release de 300 cuadros: CPU media 15,656 s → 15,164 s (~3 % menos);
+        tiempo real medio 19,706 s → 19,491 s, con variación entre ejecuciones. Imagen final idéntica.
+        Sigue lejos del tiempo real; no confundir estas mediciones con las de la otra PC.
   - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
         (cuidar `Sync Full`, lecturas de RDRAM y save states).
 - [ ] **Etapa 2: decidir según lo medido**:
@@ -144,6 +149,10 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - Runners para probar ROMs: `ezy_gb_runner --screenshot`, `ezy_gba_runner --screenshot`,
   `ezy_n64_runner <rom> --screenshot out.bmp <cuadros>` (usar el de `Release` para medir velocidad).
 - Mario Kart 64 del usuario: `E:\Rom nintendo\Mario Kart 64 (USA).z64` (fuera del repo, no subir).
+  En esta PC: `roms/Mario Kart 64 (USA).z64`, extraída del ZIP que dejó el usuario en la raíz.
+  SHA-1: `579c48e211ae952530ffc8738709f078d5dd215e`, idéntico a la versión USA de
+  https://github.com/n64decomp/mk64. La lentitud no se debe a una ROM corrupta.
+  El ZIP de la raíz también es una ROM: no agregarlo a ningún commit.
   Abrirlo: `build\default\src\frontend\Release\ezyemu.exe "E:\Rom nintendo\Mario Kart 64 (USA).z64"`
   (después de `cmake --build --preset release`). Controles N64: Enter=Start, Z=A, X=B, Q=Z,
   A/S=L/R, IJKL=stick, flechas=cruceta, T/G/F/H=botones C; también gamepad.
@@ -247,3 +256,11 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   154/154 pruebas, n64-systemtest 2984/3721. Siguiente: RSP escalar con reloj local, o RDP en otro hilo.
 - 2026-11-09 — RSP con reloj local: MK64 300 cuadros ~7,3 s (≈41 cuadros/s; empezó el día en 20,1 s), imagen idéntica,
   154/154 pruebas, n64-systemtest 2984/3721. Siguiente: abrir PR de `n64/cpu-decode-cache`; luego RDP en otro hilo o JIT.
+- 2026-11-10 — PC local sincronizada con PR #15. ROM de MK64 extraída a `roms/` y SHA-1 verificado contra
+  n64decomp/mk64: coincide con USA. Compilados frontend y runner Release. Perfil temporal en `build/`:
+  RSP escalar ~13 %, ejecución local RSP ~6 %, depth_test del RDP ~7 %, N64::step ~7 % (tiempo propio).
+  Ruta rápida de Z opaco/transparente: CPU media de 300 cuadros 15,656 → 15,164 s (~3 % menos),
+  tiempo real 19,706 → 19,491 s (~15 cuadros/s en esta PC), comparaciones BMP exactas en todas las ejecuciones.
+  Suite N64 Debug en verde con `ctest --preset debug -R '^ezy_n64_tests$'`.
+  No se volvió a ejecutar n64-systemtest: su ROM no está disponible en esta PC.
+  La lentitud sigue pendiente; siguiente: optimización mayor de RSP/RDP (hilo o HLE/JIT según perfil).
