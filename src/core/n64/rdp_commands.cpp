@@ -1,5 +1,7 @@
 #include "n64/rdp.hpp"
 
+#include <system_error>
+
 namespace ezy::n64 {
 
 namespace {
@@ -23,6 +25,46 @@ unsigned command_words(unsigned op) {
 }
 
 } // namespace
+
+Rdp::~Rdp() = default; // The worker joins before the base raster state is destroyed.
+
+bool Rdp::enable_threaded(std::span<std::uint8_t> rdram) {
+    if (worker_) return true;
+    rebuild_memory_state();
+    try {
+        worker_ = std::make_unique<RdpWorker>([this, rdram](const RdpPacket& packet) {
+            execute_packet(packet, rdram);
+        });
+    } catch (const std::system_error&) {
+        return false; // No thread was started; synchronous rendering remains available.
+    }
+    return true;
+}
+
+void Rdp::rebuild_memory_state() {
+    memory_state_ = {color_address_, color_width_, pixel_size_, mask_address_, scissor_, solid_.modes};
+}
+
+void Rdp::reset_state() {
+    drain();
+    static_cast<RdpRasterizer&>(*this) = RdpRasterizer{};
+    start_ = end_ = current_ = words_to_skip_ = 0;
+    status_ = 0x80;
+    clock_origin_ = last_update_ = 0;
+    command_cycles_ = pipe_cycles_ = draw_words_ = 0;
+    draw_command_ = {};
+    rebuild_memory_state();
+}
+
+void Rdp::dispatch(const RdpPacket& packet, std::span<std::uint8_t> rdram) {
+    if (worker_) {
+        const auto access = memory_state_.access(packet);
+        memory_state_.apply(packet.words[0]);
+        worker_->submit(packet, access);
+    } else {
+        execute_packet(packet, rdram);
+    }
+}
 
 unsigned Rdp::buffered_draw_words(unsigned op) {
     switch (op) {
@@ -112,6 +154,7 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
         const std::span<const std::uint8_t> source = xbus ? std::span<const std::uint8_t>(dmem)
                                                           : std::span<const std::uint8_t>(rdram);
         if (address + 8 <= source.size()) {
+            if (!xbus) prepare_memory(static_cast<std::uint32_t>(address), 8, false);
             for (unsigned i = 0; i < 8; ++i) word = (word << 8) | source[address + i];
         }
         const unsigned op = opcode(word);
@@ -119,7 +162,7 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
             draw_command_[draw_words_++] = word;
             const unsigned draw_op = opcode(draw_command_[0]);
             if (draw_words_ == buffered_draw_words(draw_op)) {
-                execute_packet({draw_command_, draw_words_}, rdram);
+                dispatch({draw_command_, draw_words_}, rdram);
                 draw_words_ = 0;
             }
         } else {
@@ -127,13 +170,14 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
             words_to_skip_ = command_words(op) - 1;
             if (words_to_skip_ == 0) {
                 if (op == 0x29) {
+                    drain();
                     status_ &= ~(kStartClock | kPipeBusy);
                     mi.raise(MiInterrupt::Dp);
                 } else {
                     RdpPacket packet;
                     packet.words[0] = word;
                     packet.count = 1;
-                    execute_packet(packet, rdram);
+                    dispatch(packet, rdram);
                 }
             }
         }
