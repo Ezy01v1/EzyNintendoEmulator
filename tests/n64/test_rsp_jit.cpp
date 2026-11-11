@@ -5,6 +5,15 @@
 #include "common/state.hpp"
 #include <vector>
 
+#if defined(EZY_N64_RSP_JIT) && !EZY_N64_RSP_JIT
+TEST_CASE("RSP JIT excluded build provides the interpreter fallback without AsmJit") {
+    ezy::n64::RspJit jit;
+    CHECK_FALSE(jit.available());
+    ezy::n64::RspRegs requested(ezy::n64::RspMode::Jit);
+    CHECK_FALSE(requested.jit_active());
+}
+#endif
+
 TEST_CASE("RSP bounded memory writes preserve bank wrapping and mirrored offsets") {
     ezy::n64::RspRegs rsp;
     const std::array<std::uint8_t, 4> bytes{0x12, 0x34, 0x56, 0x78};

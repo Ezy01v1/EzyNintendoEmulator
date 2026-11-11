@@ -6,10 +6,11 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-10_
 
-> **Para retomar:** aprobar el diseño de **JIT del RSP** antes de preparar su plan.
-> Perfil y dos ajustes del intérprete evaluados en `codex/n64-rsp-speed`; ambos
-> ajustes retirados por no mejorar el tiempo real. Diseño revisado en
-> `docs/superpowers/specs/2026-11-10-n64-rsp-jit-design.md`; aún sin implementar.
+> **Para retomar:** evaluar reutilización de traducciones entre cargas de microcódigo
+> idéntico. El JIT del RSP está implementado en `codex/n64-rsp-jit`, pero experimental:
+> 45,708 s frente a 11,139 s del intérprete por 300 campos, por recompilaciones.
+> Fallo de memoria reportado corregido y cubierto por regresión. Mantener intérprete
+> y RDP síncrono predeterminados. Diseño/plan JIT documentan pruebas y límites.
 > CPU/RSP optimizados en `main` (PR #15). El RDP en hilo está implementado y validado
 > en `codex/n64-threaded-rdp`, pero quedó experimental: resultó más lento. La rama es local.
 
@@ -138,13 +139,14 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         como pendiente ni confundir estas mediciones locales con las de otra PC u otro momento.
 - [ ] **Etapa 2: decidir según lo medido**:
   - Perfil local actualizado: `execute_scalar` 11,7 %, bucle RSP 6,7 %, memoria vectorial
-    5,9 %, ALU vectorial 5,7 %, más operaciones por carril. Propuesta: **JIT del RSP primero**,
-    conservando el intérprete como referencia y respaldo. AsmJit fijado por SHA, x86-64,
-    invalidación de IMEM y presupuesto de ciclos exacto. Diseño revisado, pendiente de aprobación.
+    5,9 %, ALU vectorial 5,7 %, más operaciones por carril. **JIT del RSP implementado**
+    y validado localmente, con AsmJit fijado por SHA, invalidación y presupuesto exacto.
+    El intérprete sigue predeterminado: JIT 4,10 veces más lento en tres pares fríos.
+    Próxima evaluación: caché que reutilice traducciones de microcódigos idénticos.
   - Experimentos descartados: `/Ob3` (+0,15 % mediano, no significativo) y despacho vectorial
     directo desde `run` (4,9 % más lento). Ambos revertidos; no repetirlos como mejoras.
-  - Dynarec (JIT) MIPS → x86-64 para la CPU (y luego el RSP): la ganancia grande (5–20×), y la
-    misma técnica que exigirán GameCube y Wii.
+  - Dynarec (JIT) MIPS → x86-64 para la CPU: alternativa futura que requiere perfil
+    y medición de juego completo; no asumir un multiplicador de velocidad.
   - O RSP en alto nivel (HLE) de los microcódigos gráficos (F3DEX etc.) si el RSP sigue pesando.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
@@ -308,3 +310,15 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Preparado y revisado diseño JIT del RSP, sin preguntas técnicas importantes pendientes; falta
   aprobación antes de instalar AsmJit o implementar. La ROM histórica de systemtest es `196f542`;
   su repo actual remite a nemu64-test, cuyos nuevos totales no deben confundirse con 3721.
+- 2026-11-10 — JIT opcional del RSP implementado en `codex/n64-rsp-jit` con AsmJit
+  `677a10bac2c24f7e068cf1f9e675bf51c7b534ea`, bloques de hasta 32 instrucciones,
+  fallback y estados compatibles. Corregida la lectura nula de la captura: reset suave
+  del allocator conservaba enlaces obsoletos; reset duro entre bloques nativos y regresión.
+  Cuatro suites Debug: 187 casos / 2857 comprobaciones cada una; OFF: 179 / 1973 en
+  ambos modos RDP, sin AsmJit. ON restaurado y runner/frontend Release recompilados.
+  Imágenes exactas MK64 a 120/300/600 campos y estados entre backends. Tres pares fríos:
+  mediana 11,139 s intérprete vs 45,708 s JIT, CPU 9,500 vs 39,391 s. JIT compila
+  191691 bloques por 300 campos (33,660 s medianos), con 71,2 % de instrucciones nativas.
+  Queda experimental: la lentitud sigue pendiente. Evaluar reutilizar traducciones de
+  microcódigo idéntico; no repetir el JIT actual como mejora demostrada. ROM histórica
+  systemtest ausente, baseline sin verificar. Revisión técnica completada, sin merge/push.

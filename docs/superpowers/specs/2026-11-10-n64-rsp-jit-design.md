@@ -1,6 +1,7 @@
 # JIT por bloques para el RSP de N64
 
-Estado: propuesta para aprobación; sin implementar ni instalar dependencias.
+Estado: aprobado e implementado en `codex/n64-rsp-jit`; experimental. El intérprete
+sigue predeterminado porque no se alcanzó la mejora de rendimiento requerida.
 
 ## Motivo y decisión propuesta
 
@@ -169,6 +170,31 @@ antes de sumar otras optimizaciones. No prometer un multiplicador de velocidad.
 
 ## Entrega y autorización
 
-Esta propuesta no instala AsmJit ni cambia el núcleo. Tras aprobarse, preparar
-el plan de implementación y trabajar en una rama `codex/`, conservando el
-intérprete. No publicar, fusionar a main ni incluir ROMs sin autorización.
+Implementación y validación locales completadas tras la autorización para continuar.
+No publicar, fusionar a main ni incluir ROMs sin autorización.
+
+## Resultado de la primera entrega
+
+- AsmJit fijado en `677a10bac2c24f7e068cf1f9e675bf51c7b534ea`;
+  bloques de hasta 32 instrucciones y caché invalidada por generación de IMEM.
+- Corregida la lectura nula reportada por el usuario: el reset suave del allocator
+  fijado conservaba enlaces de árbol obsoletos al liberar varios bloques. Se usa
+  `ResetPolicy::kHard` fuera del código nativo, con regresión que reproducía el fallo.
+- Debug: 187 casos / 2857 comprobaciones en cada una de las cuatro combinaciones
+  RSP intérprete/JIT y RDP síncrono/hilo. Con JIT desactivado: 179 / 1973 en ambos
+  modos RDP y sin dependencia AsmJit. Release runner y frontend compilados.
+- MK64: imágenes exactas a 120/300/600 campos y continuación de estados entre
+  backends. La ROM histórica `196f542` sigue ausente; no se atribuye su baseline
+  2984/3721 a esta entrega. Sin cargo/rustup local ni binarios oficiales publicados.
+- Tres procesos fríos por modo, alternados, sin otras compilaciones propias:
+  intérprete 11,932 / 11,139 / 10,163 s; JIT 50,500 / 45,708 / 43,917 s.
+  Medianas: 11,139 frente a 45,708 s (4,10 veces el tiempo). CPU mediana:
+  9,500 frente a 39,391 s. Todas las imágenes comparadas fueron idénticas.
+- Por 300 campos: 76.828.052 instrucciones nativas y 31.073.143 interpretadas
+  (71,2 % nativas), 191.691 bloques compilados y 33,660 s medianos de compilación.
+  La recompilación domina; este JIT no resuelve la lentitud. El siguiente alcance
+  a evaluar es reutilizar traducciones de microcódigos idénticos entre generaciones
+  IMEM, manteniendo la invalidación correcta. No se implementó esa nueva caché.
+
+Los datos locales reproducibles están en `build/rsp-jit-benchmark.json` y
+`build/jit-game-validation.log` (ignorados). No activar el JIT por defecto.
