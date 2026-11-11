@@ -6,7 +6,12 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-11_
 
-> **Para retomar:** perfilar el coste de ejecución del JIT frente al intérprete.
+> **Para retomar:** medir frecuencia y coste de opcodes vectoriales del RSP para
+> elegir un primer grupo a especializar o emitir nativamente. El perfil de ejecución
+> ya está hecho: RSP ~42 % de las muestras en ambos modos; RDP ~25–28 %.
+> Omitir entradas JIT para opcodes no soportados se probó y retiró: 12 ejecuciones,
+> CPU favorable solo en 3/6 parejas; no hay mejora consistente. Informe en
+> `docs/performance/2026-11-11-rsp-execution.md`. No repetir ese ajuste.
 > La caché de traducciones idénticas ya está implementada en `codex/n64-rsp-jit`:
 > 191.691 → 1.316 compilaciones por 300 campos de MK64, con 190.375 reutilizaciones.
 > Sigue experimental: mediana local 17,029 s JIT frente a 13,716 s intérprete,
@@ -146,8 +151,11 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
     El intérprete sigue predeterminado. La primera entrega del JIT fue 4,10 veces
     más lenta por compilaciones. La caché de traducciones idénticas ya está hecha
     (2026-11-11): reduce las compilaciones a 1.316, pero no demuestra mejora global
-    frente al intérprete en tres pares fríos. Siguiente: perfilar ejecución nativa,
-    helpers y salidas de bloque; no repetir la caché como trabajo pendiente.
+    frente al intérprete en tres pares fríos. Perfil posterior completado: RSP ~42 %
+    de muestras, con código nativo ~6,3 %, entrada JIT ~3,3 % y thunk vectorial ~3,8 %.
+    Omitir entradas no soportadas no mejoró de forma consistente y se retiró.
+    Siguiente: frecuencia/coste vectorial y selección de opcodes para especialización;
+    no repetir la caché ni la omisión de entradas como trabajo pendiente.
   - Experimentos descartados: `/Ob3` (+0,15 % mediano, no significativo) y despacho vectorial
     directo desde `run` (4,9 % más lento). Ambos revertidos; no repetirlos como mejoras.
   - Dynarec (JIT) MIPS → x86-64 para la CPU: alternativa futura que requiere perfil
@@ -349,3 +357,26 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   comprobaciones por combinación. OFF: 179 / 1973 en ambos modos RDP, sin AsmJit.
   ON restaurado y runner/frontend Release recompilados. La rama sigue local;
   `git pull --ff-only` no aplicó cambios porque no tiene upstream configurado.
+- 2026-11-11 — Rama `codex/n64-rsp-jit` publicada hasta `e7cc68f` con autorización
+  del usuario y upstream configurado; sigue sin merge a main. `git pull --ff-only`
+  al retomar confirmó que estaba al día. Perfil RIP comparativo de 300 campos MK64:
+  intérprete 1595 muestras / JIT 1783; sin resolver 2,0 / 2,5 %. RSP agrupado
+  41,6 / 41,9 %, RDP 28,3 / 25,4 %, CPU VR4300/COP0/COP1/TLB 10,1 / 9,5 %.
+  Los tiempos del muestreador no son benchmarks; porcentajes propios, no inclusivos.
+  Experimento: clasificación compartida de opcodes para evitar entrar al JIT antes
+  de fallback. Pasó las siete suites y revisión independiente sin hallazgos.
+  Base/candidato compilados con LTCG completo, mismo preset y sin cambios de flags.
+  Seis ejecuciones frías alternadas favorecieron al candidato, pero el lote de orden
+  complementario invirtió el resultado real. Doce imágenes exactas, mismos contadores
+  de instrucciones y compilaciones. CPU mejor solo en 3/6 parejas, mediana emparejada
+  +1,42 % de CPU; tiempo real −5,28 %, con cambios de −31 % a +89 %. No hay ganancia
+  consistente: cambios de producción retirados, conservada la caché de `e7cc68f`.
+  Informe y método en `docs/performance/2026-11-11-rsp-execution.md`; datos y scripts
+  locales en `build/rsp-execution-*.json`, `build/rsp-entry-benchmark*.json` y
+  `build/rsp-entry-analysis.json`. Siguiente: trabajo vectorial del RSP; no ampliar
+  CPU JIT ni repetir omisión de entradas como mejora demostrada. Intérprete y RDP
+  síncrono siguen predeterminados. ROM histórica systemtest aún ausente.
+  Verificación final tras retirar el experimento: `ctest --preset debug` 7/7;
+  189 casos / 3562 comprobaciones por combinación N64. Runner y frontend Release
+  recompilados. Revisión independiente de las conclusiones sin hallazgos. Se
+  conservan informe y notas; ningún cambio nuevo de producción.
