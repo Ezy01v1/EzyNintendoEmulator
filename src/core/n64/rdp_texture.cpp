@@ -1,4 +1,4 @@
-#include "n64/rdp.hpp"
+#include "n64/rdp_rasterizer.hpp"
 
 #include <algorithm>
 
@@ -80,7 +80,7 @@ unsigned expand_5_to_8(unsigned value) {
 
 }  // namespace
 
-void Rdp::load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram) {
+void RdpRasterizer::load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram) {
     auto& tile = texture_.tiles[(word >> 24) & 7];
     tile.bounds = word;  // Loads also latch the tile coordinates.
     const unsigned size = texture_size(texture_.image);
@@ -129,7 +129,7 @@ void Rdp::load_texture(std::uint64_t word, bool block, std::span<const std::uint
     }
 }
 
-void Rdp::load_palette(std::uint64_t word, std::span<const std::uint8_t> rdram) {
+void RdpRasterizer::load_palette(std::uint64_t word, std::span<const std::uint8_t> rdram) {
     auto& tile = texture_.tiles[(word >> 24) & 7];
     tile.bounds = word;
     const unsigned base = (static_cast<unsigned>(tile.descriptor >> 32) & 0x1FF) * kHalfwordsPerWord;
@@ -148,7 +148,7 @@ void Rdp::load_palette(std::uint64_t word, std::span<const std::uint8_t> rdram) 
     }
 }
 
-std::uint16_t Rdp::read_texel(const Tile& tile, unsigned s, unsigned t, unsigned bank) const {
+std::uint16_t RdpRasterizer::read_texel(const Tile& tile, unsigned s, unsigned t, unsigned bank) const {
     const unsigned size = texture_size(tile.descriptor);
     const bool indexed = (solid_.modes & (1ULL << 47)) != 0;
     const unsigned stride = static_cast<unsigned>(tile.descriptor >> 41) & 0x1FF;
@@ -166,7 +166,7 @@ std::uint16_t Rdp::read_texel(const Tile& tile, unsigned s, unsigned t, unsigned
     return texture_.tmem[kTlutBase + entry * kHalfwordsPerWord + bank];
 }
 
-Rdp::Rgba Rdp::sample_texture_rgba(const Tile& tile, int s, int t) const {
+RdpRasterizer::Rgba RdpRasterizer::sample_texture_rgba(const Tile& tile, int s, int t) const {
     const unsigned sampler_s = static_cast<unsigned>(tile.descriptor);
     const unsigned sampler_t = static_cast<unsigned>(tile.descriptor >> 10);
     const int s0 = wrap_texture_coord(s >> 5, sampler_s);
@@ -210,7 +210,7 @@ Rdp::Rgba Rdp::sample_texture_rgba(const Tile& tile, int s, int t) const {
     return result;
 }
 
-bool Rdp::can_sample_texture(const Tile& tile, bool allow_lod) const {
+bool RdpRasterizer::can_sample_texture(const Tile& tile, bool allow_lod) const {
     constexpr std::uint64_t texture_lod = 1ULL << 48;
     constexpr std::uint64_t texture_filter_path = 1ULL << 43;  // TEXEL0 uses sampling instead of color conversion.
     // Callers that pick tiles by LOD pass allow_lod.
@@ -220,7 +220,7 @@ bool Rdp::can_sample_texture(const Tile& tile, bool allow_lod) const {
     return supported_texture(tile.descriptor, (solid_.modes & (1ULL << 47)) != 0);
 }
 
-Rdp::Rgba Rdp::sample_texel(const Tile& tile, int s, int t) const {
+RdpRasterizer::Rgba RdpRasterizer::sample_texel(const Tile& tile, int s, int t) const {
     s = clamp_texture_coord(s, field12(tile.bounds, 44), field12(tile.bounds, 12),
                             static_cast<unsigned>(tile.descriptor));
     t = clamp_texture_coord(t, field12(tile.bounds, 32), field12(tile.bounds, 0),
@@ -228,9 +228,9 @@ Rdp::Rgba Rdp::sample_texel(const Tile& tile, int s, int t) const {
     return sample_texture_rgba(tile, s, t);
 }
 
-void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
+void RdpRasterizer::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
     if (solid_.modes & kTexturePerspective) return;  // Rectangles do not supply W.
-    const auto header = draw_command_[0], coefficients = draw_command_[1];
+    const auto header = raster_command_[0], coefficients = raster_command_[1];
     const unsigned base_tile = static_cast<unsigned>(header >> 24) & 7;
     const unsigned texels = texels_read();
     const int ds_coefficient = static_cast<std::int16_t>(coefficients >> 16);
@@ -288,8 +288,8 @@ void Rdp::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
     }
 }
 
-void Rdp::copy_rectangle(std::span<std::uint8_t> rdram) const {
-    const std::uint64_t header = draw_command_[0], coefficients = draw_command_[1];
+void RdpRasterizer::copy_rectangle(std::span<std::uint8_t> rdram) const {
+    const std::uint64_t header = raster_command_[0], coefficients = raster_command_[1];
     const auto& tile = texture_.tiles[(header >> 24) & 7];
     const bool indexed = (solid_.modes & (1ULL << 47)) != 0;
     if (pixel_size_ != 2 || solid_.format != 0 || color_width_ == 0 ||
