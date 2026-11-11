@@ -24,7 +24,9 @@ public:
     }
 
 private:
+    friend class RspRegs; // supplies a register pointer to the transient native execution view
     using Vector = std::array<std::uint16_t, 8>;
+    static_assert(sizeof(Vector)==16); // native execution view has 16-byte rows
 
     static std::uint8_t byte(const Vector& vector, unsigned index);
     static void set_byte(Vector& vector, unsigned index, std::uint8_t value);

@@ -1,6 +1,6 @@
 add_executable(ezy_n64_tests test_main.cpp test_scheduler.cpp test_cartridge.cpp test_cpu.cpp test_cop0.cpp test_tlb.cpp test_cop1.cpp test_bus.cpp test_vi.cpp test_pif.cpp test_ai.cpp test_state.cpp test_rdp_worker.cpp)
 target_link_libraries(ezy_n64_tests PRIVATE ezy_n64 doctest::doctest ezy_warnings)
-target_sources(ezy_n64_tests PRIVATE test_rsp_jit.cpp)
+target_sources(ezy_n64_tests PRIVATE test_rsp_jit.cpp test_rsp_vector_native.cpp)
 if(TARGET asmjit::asmjit)
     target_link_libraries(ezy_n64_tests PRIVATE asmjit::asmjit)
 endif()

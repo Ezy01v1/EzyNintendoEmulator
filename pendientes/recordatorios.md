@@ -6,16 +6,20 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-11_
 
-> **Para retomar:** medir frecuencia y coste de opcodes vectoriales del RSP para
-> elegir un primer grupo a especializar o emitir nativamente. El perfil de ejecución
-> ya está hecho: RSP ~42 % de las muestras en ambos modos; RDP ~25–28 %.
+> **Para retomar:** evaluar VMADN/VMADH/VMADM: suman 15.617.211 instrucciones en
+> el histograma de 300 campos de MK64. La frecuencia vectorial ya se midió y el
+> primer grupo está implementado: transferencias LBV/LSV/LLV/LDV y stores nativos
+> con accesos agrupados. CPU favorable en 5/6 parejas, reducción mediana emparejada
+> 8,77 % frente al JIT anterior. Tiempo real muy variable; no comparar esos segundos
+> entre lotes. Informe: `docs/performance/2026-11-11-rsp-vector-memory.md`.
+> El perfil previo mostraba RSP ~42 % de muestras; RDP ~25–28 %.
 > Omitir entradas JIT para opcodes no soportados se probó y retiró: 12 ejecuciones,
 > CPU favorable solo en 3/6 parejas; no hay mejora consistente. Informe en
 > `docs/performance/2026-11-11-rsp-execution.md`. No repetir ese ajuste.
 > La caché de traducciones idénticas ya está implementada en `codex/n64-rsp-jit`:
 > 191.691 → 1.316 compilaciones por 300 campos de MK64, con 190.375 reutilizaciones.
-> Sigue experimental: mediana local 17,029 s JIT frente a 13,716 s intérprete,
-> con mucha variación de tiempo real y CPU mediana casi igual (11,406 / 11,531 s).
+> Sigue experimental: la mejora vectorial compara versiones JIT, no el intérprete.
+> La ROM histórica systemtest sigue ausente; no activar por defecto ni fusionar a main.
 > Fallo de memoria reportado corregido y cubierto por regresión. Mantener intérprete
 > y RDP síncrono predeterminados. Diseño/plan JIT documentan pruebas y límites.
 > CPU/RSP optimizados en `main` (PR #15). El RDP en hilo está implementado y validado
@@ -154,8 +158,12 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
     frente al intérprete en tres pares fríos. Perfil posterior completado: RSP ~42 %
     de muestras, con código nativo ~6,3 %, entrada JIT ~3,3 % y thunk vectorial ~3,8 %.
     Omitir entradas no soportadas no mejoró de forma consistente y se retiró.
-    Siguiente: frecuencia/coste vectorial y selección de opcodes para especialización;
-    no repetir la caché ni la omisión de entradas como trabajo pendiente.
+    Frecuencia vectorial medida: primer grupo nativo LBV/LSV/LLV/LDV y stores,
+    con accesos agrupados y respaldo por bytes/helper. Conservado tras 12 procesos
+    fríos: CPU favorable en 5/6 parejas, reducción mediana emparejada 8,77 % frente
+    al JIT anterior; el tiempo real varía mucho. No demuestra mejora frente al
+    intérprete. Siguiente: evaluar VMADN/VMADH/VMADM según coste; no repetir
+    frecuencia, caché ni omisión de entradas como trabajo pendiente.
   - Experimentos descartados: `/Ob3` (+0,15 % mediano, no significativo) y despacho vectorial
     directo desde `run` (4,9 % más lento). Ambos revertidos; no repetirlos como mejoras.
   - Dynarec (JIT) MIPS → x86-64 para la CPU: alternativa futura que requiere perfil
@@ -380,3 +388,27 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   189 casos / 3562 comprobaciones por combinación N64. Runner y frontend Release
   recompilados. Revisión independiente de las conclusiones sin hallazgos. Se
   conservan informe y notas; ningún cambio nuevo de producción.
+- 2026-11-11 — Perfil de frecuencia vectorial MK64 (300 campos): histogramas
+  intérprete/JIT idénticos, con imágenes exactas. VMADN 6.713.927, VMADH 5.313.818,
+  VMADM 3.589.466. Transferencias simples de 2/4/8 bytes: 16.066.225 en conjunto.
+  Se emiten LBV/LSV/LLV/LDV y sus stores desde la vista actual de registros, con
+  respaldo al helper sin vista, DMEM con máscara 4095 y semántica exacta de elementos.
+  Primera prueba RED: sin helper retiraba 0 en vez de 1; GREEN tras implementación.
+  4096 combinaciones, helper C++ real y cambio de puntero en caché con registro 31.
+  La primera versión solo por bytes no mejoró (CPU mediana 9,688 → 9,844 s);
+  se refinó con word/dword para tramos que caben, guardando los cruces por bytes.
+  Las siete suites pasan: N64 192 casos / 36344 comprobaciones por combinación.
+  OFF: 179 / 1973 en ambos modos RDP; ON restaurado y runner/frontend Release
+  recompilados. Imágenes exactas a 120/300/600 campos y estados completos entre
+  backends, en ambas direcciones tras 300+120. Revisión técnica sin hallazgos.
+  Dos lotes complementarios (12 procesos fríos), base y candidato JIT con LTCG
+  completo, sin contadores ni compilaciones simultáneas: CPU favorable en 5/6
+  parejas, reducción mediana emparejada 8,77 %. Medianas agrupadas CPU 15,172 /
+  13,891 s; reales 26,623 / 20,490 s. Tiempo real muy variable: no prometer su
+  reducción emparejada del 25,37 % como aceleración general. Mismos 1316 bloques,
+  190375 reutilizaciones y cero vaciados. Se conserva la variante agrupada en el
+  JIT experimental; intérprete/RDP síncrono predeterminados, sin merge a main.
+  Informe: `docs/performance/2026-11-11-rsp-vector-memory.md`; datos locales en
+  `build/vector-frequency-*.log`, `build/vector-native-jit*.json` y
+  `build/vector-native-analysis.json`. Contadores temporales retirados. Siguiente:
+  medir coste del grupo VMADN/VMADH/VMADM antes de ampliar la emisión nativa.

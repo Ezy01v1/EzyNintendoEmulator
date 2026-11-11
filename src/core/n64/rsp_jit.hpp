@@ -16,6 +16,7 @@ struct RspJitView {
     bool* phase;
     void* opaque;
     void (*vector_helper)(void*, std::uint32_t) noexcept; // no exceptions across native frames
+    void* vpr = nullptr; // 32 rows of eight host-endian uint16 lanes; optional native memory view
 };
 struct RspJitRun {
     std::uint64_t when, limit; // limit is exclusive

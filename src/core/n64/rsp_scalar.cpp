@@ -40,7 +40,8 @@ std::optional<std::uint64_t> RspRegs::run(Mi& mi, Rdp& rdp, Scheduler& scheduler
                 jit_generation_ = imem_generation_;
             }
             const auto limit = std::min(scheduler.now() + 1, scheduler.others_bound());
-            RspJitView view{gpr_.data(),mem_.data(),&sp_pc_,&next_pc_,&short_step_,this,&RspRegs::jit_vector};
+            RspJitView view{gpr_.data(),mem_.data(),&sp_pc_,&next_pc_,&short_step_,this,&RspRegs::jit_vector,
+                           vector_.registers_.data()};
             RspJitRun native{when,limit,stop_on_line && mi.line() ? 1U : ~std::uint32_t{0},0};
             jit_->run(view,std::span(mem_).subspan<0x1000,0x1000>(),native);
             if (native.retired != 0) {

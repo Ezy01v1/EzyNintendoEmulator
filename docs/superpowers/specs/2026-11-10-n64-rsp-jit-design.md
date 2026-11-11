@@ -268,3 +268,23 @@ Datos locales en `build/rsp-cache-benchmark.json`, script
 `build/benchmark-rsp-cache.ps1`; validación con `build/validate-rsp-cache.ps1`.
 La ROM histórica sigue ausente. Conservar el intérprete predeterminado y el JIT
 opcional; no se ha demostrado una solución de tiempo real ni se publica la rama.
+
+## Transferencias vectoriales nativas (2026-11-11)
+
+Continuación autorizada tras publicar la rama experimental: se emiten directamente
+LBV/LSV/LLV/LDV y sus stores. Una vista opcional de los registros vectoriales
+conserva el acceso a datos actuales sin offsets del objeto privado; las vistas
+antiguas siguen usando el helper. Accesos agrupados de word/dword, con ruta por
+bytes para cruces, preservan endianness, truncamiento y envolturas. No se cambian
+acumuladores, banderas, reloj ni estados serializados.
+
+El histograma de 300 campos encontró 16.066.225 transferencias de 2/4/8 bytes.
+La versión solo por bytes no mejoró y se refinó antes de conservarla. La versión
+agrupada pasa siete suites, 4096 combinaciones de transferencias y equivalencia
+de imágenes/estados. Doce procesos fríos contra el JIT anterior, con orden
+complementario: CPU favorable en 5/6 parejas, reducción mediana emparejada 8,77 %.
+Los tiempos reales varían mucho. Esto apoya una mejora incremental del backend
+experimental; no demuestra la mejora requerida frente al intérprete. La ROM
+histórica sigue pendiente. Mantener intérprete y RDP síncrono predeterminados.
+
+Informe, método y límites: `docs/performance/2026-11-11-rsp-vector-memory.md`.

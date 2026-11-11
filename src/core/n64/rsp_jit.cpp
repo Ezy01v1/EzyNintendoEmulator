@@ -110,6 +110,21 @@ struct RspJit::Impl {
         const auto store = [&](unsigned reg, const x86::Gp& value) {
             if (reg != 0) cc.mov(x86::dword_ptr(gpr,reg*4),value);
         };
+        const auto vector_helper = [&](std::uint32_t word) {
+            auto helper=cc.new_gp_ptr(), opaque=cc.new_gp_ptr();
+            cc.mov(helper,x86::qword_ptr(view,offsetof(RspJitView,vector_helper)));
+            // A missing thunk is a safe early exit, never a null native call.
+            cc.test(helper,helper); cc.jz(exit);
+            cc.mov(opaque,x86::qword_ptr(view,offsetof(RspJitView,opaque)));
+            InvokeNode* call = nullptr;
+            cc.invoke(Out(call),helper,FuncSignature::build<void,void*,std::uint32_t>());
+            if (!call) { enabled=false; return false; }
+            call->set_arg(0,opaque); call->set_arg(1,Imm(word));
+            cc.mov(limit,x86::qword_ptr(run,offsetof(RspJitRun,limit)));
+            cc.mov(maximum,x86::dword_ptr(run,offsetof(RspJitRun,maximum)));
+            cc.movzx(phase,x86::byte_ptr(phase_ptr));
+            return true;
+        };
         for (unsigned n=0, at=pc; n<32 && at<4096; ++n,at+=4) {
             const auto word = word_at(at);
             if (!supported(word)) break;
@@ -117,19 +132,69 @@ struct RspJit::Impl {
             cc.cmp(retired,maximum); cc.jae(exit);
             const unsigned op=word>>26, rs=(word>>21)&31, rt=(word>>16)&31;
             const auto immediate=static_cast<std::int32_t>(static_cast<std::int16_t>(word));
-            if (op==0x12 || op==0x32 || op==0x3A) {
-                auto helper=cc.new_gp_ptr(), opaque=cc.new_gp_ptr();
-                cc.mov(helper,x86::qword_ptr(view,offsetof(RspJitView,vector_helper)));
-                // A missing thunk is a safe early exit, never a null native call.
-                cc.test(helper,helper); cc.jz(exit);
-                cc.mov(opaque,x86::qword_ptr(view,offsetof(RspJitView,opaque)));
-                InvokeNode* call = nullptr;
-                cc.invoke(Out(call),helper,FuncSignature::build<void,void*,std::uint32_t>());
-                if (!call) { enabled=false; return nullptr; }
-                call->set_arg(0,opaque); call->set_arg(1,Imm(word));
-                cc.mov(limit,x86::qword_ptr(run,offsetof(RspJitRun,limit)));
-                cc.mov(maximum,x86::dword_ptr(run,offsetof(RspJitRun,maximum)));
-                cc.movzx(phase,x86::byte_ptr(phase_ptr));
+            if ((op==0x32 || op==0x3A) && ((word>>11)&31)<=3) {
+                const unsigned width=1U<<((word>>11)&31), element=(word>>7)&15;
+                const bool writing=op==0x3A;
+                const int offset=(static_cast<int>(word&63)-static_cast<int>(word&64))*static_cast<int>(width);
+                auto vpr=cc.new_gp_ptr();
+                const auto helper=cc.new_label(), done=cc.new_label();
+                cc.mov(vpr,x86::qword_ptr(view,offsetof(RspJitView,vpr)));
+                cc.test(vpr,vpr); cc.jz(helper);
+                auto address=load(rs);
+                if(offset) cc.add(address,offset);
+                const unsigned count=writing?width:std::min(width,16-element);
+                if(count>=2 && !(element&1) && element+count<=16) {
+                    // Whole host lanes can move in words/dwords. At a DMEM wrap
+                    // boundary, use the byte path below instead of overreading.
+                    const auto byte_path=cc.new_label();
+                    auto index=cc.new_gp32();
+                    cc.mov(index,address); cc.and_(index,4095);
+                    cc.cmp(index,4096-count); cc.ja(byte_path);
+                    for(unsigned byte=0;byte<count;) {
+                        const unsigned chunk=count-byte>=4?4:2;
+                        const unsigned vector_offset=rt*16+element+byte;
+                        auto value=cc.new_gp32();
+                        if(writing) {
+                            if(chunk==4) cc.mov(value,x86::dword_ptr(vpr,vector_offset));
+                            else cc.movzx(value,x86::word_ptr(vpr,vector_offset));
+                        } else {
+                            if(chunk==4) cc.mov(value,x86::dword_ptr(dmem,index.r64()));
+                            else cc.movzx(value,x86::word_ptr(dmem,index.r64()));
+                        }
+                        if(chunk==4) { cc.bswap(value); cc.ror(value,16); }
+                        else cc.ror(value.r16(),8);
+                        if(writing) {
+                            if(chunk==4) cc.mov(x86::dword_ptr(dmem,index.r64()),value);
+                            else cc.mov(x86::word_ptr(dmem,index.r64()),value.r16());
+                        } else {
+                            if(chunk==4) cc.mov(x86::dword_ptr(vpr,vector_offset),value);
+                            else cc.mov(x86::word_ptr(vpr,vector_offset),value.r16());
+                        }
+                        byte+=chunk;
+                        if(byte<count) cc.add(index,chunk);
+                    }
+                    cc.jmp(done);
+                    cc.bind(byte_path);
+                }
+                for(unsigned byte=0;byte<width && (writing || element+byte<16);++byte) {
+                    auto index=cc.new_gp32(), value=cc.new_gp32();
+                    cc.mov(index,address); if(byte) cc.add(index,byte); cc.and_(index,4095);
+                    // Vector bytes are big-endian within uint16 lanes on little-endian x64.
+                    const unsigned vbyte=rt*16+(((element+byte)&15)^1);
+                    if(writing) {
+                        cc.movzx(value,x86::byte_ptr(vpr,vbyte));
+                        cc.mov(x86::byte_ptr(dmem,index.r64()),value.r8());
+                    } else {
+                        cc.movzx(value,x86::byte_ptr(dmem,index.r64()));
+                        cc.mov(x86::byte_ptr(vpr,vbyte),value.r8());
+                    }
+                }
+                cc.jmp(done);
+                cc.bind(helper);
+                if(!vector_helper(word)) return nullptr;
+                cc.bind(done);
+            } else if (op==0x12 || op==0x32 || op==0x3A) {
+                if(!vector_helper(word)) return nullptr;
             } else if (op==0) {
                 const unsigned fn=word&63, rd=(word>>11)&31, shift=(word>>6)&31;
                 auto a=load(rs), b=load(rt);
