@@ -6,8 +6,9 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-10_
 
-> **Para retomar:** la próxima tarea es la **Etapa 1 de velocidad N64** (sección
-> "Subproyecto 4: velocidad N64" más abajo). Las optimizaciones de CPU/RSP ya están en `main` (PR #15).
+> **Para retomar:** evaluar la **Etapa 2 de velocidad N64** con un nuevo perfil.
+> CPU/RSP optimizados en `main` (PR #15). El RDP en hilo está implementado y validado
+> en `codex/n64-threaded-rdp`, pero quedó experimental: resultó más lento. La rama es local.
 
 ## Estado actual
 
@@ -122,12 +123,16 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         dos pares de pruebas Release de 300 cuadros: CPU media 15,656 s → 15,164 s (~3 % menos);
         tiempo real medio 19,706 s → 19,491 s, con variación entre ejecuciones. Imagen final idéntica.
         Sigue lejos del tiempo real; no confundir estas mediciones con las de la otra PC.
-  - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
-        (cuidar `Sync Full`, lecturas de RDRAM y save states).
-        Diseño propuesto y revisado: `docs/superpowers/specs/2026-11-10-n64-threaded-rdp-design.md`.
-        Pendiente de aprobación antes de implementar. Un trabajador FIFO, barreras de RDRAM
-        por página y comparación con modo síncrono; activarlo por defecto solo si mejora
-        al menos 10 % el tiempo real mediano sin regresiones. No promete 60 cuadros/s.
+  - [x] RDP en otro hilo, **experimental** en `codex/n64-threaded-rdp`: FIFO, captura de
+        comandos por valor y barreras de RDRAM por página, también en CPU directa, DMA y VI.
+        `Sync Full` y estados v11 conservados. 176/176 pruebas en cada modo; MK64 con imágenes
+        idénticas a 120/300/600 cuadros y continuación de estado cruzada 300+120.
+        Tres mediciones por modo: mediana síncrona **11,311 s**, hilo **12,961 s** por 300 cuadros
+        (**14,6 % más lento**); CPU mediana 10,281 s vs 14,031 s, incluyendo ambos hilos.
+        No cumplió el umbral de mejora del 10 %: frontend y core siguen síncronos por defecto.
+        Runner: `--rdp-threaded`, `--rdp-sync`, `--state-check 300`.
+        Diseño y plan en `docs/superpowers/`, con fecha 2026-11-10. No repetir esta implementación
+        como pendiente ni confundir estas mediciones locales con las de otra PC u otro momento.
 - [ ] **Etapa 2: decidir según lo medido**:
   - Dynarec (JIT) MIPS → x86-64 para la CPU (y luego el RSP): la ganancia grande (5–20×), y la
     misma técnica que exigirán GameCube y Wii.
@@ -273,3 +278,13 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   trabajador dueño del rasterizador, con reservas por página y barreras también en la RAM directa
   del VR4300, DMA, VI y estados guardados. No se implementó todavía: falta aprobar el diseño.
   La autorización para publicar en `main` continúa pendiente; no se reintentó el push rechazado.
+- 2026-11-10 — Implementado el RDP en hilo en `codex/n64-threaded-rdp`: trabajador ordenado,
+  reservas por páginas y separación de DPC/rasterizador. Revisión técnica detectó un borde inclusivo
+  de COPY/fill que podía dejar una página sin reservar; corregido con regresión RED→GREEN.
+  176 casos y 1594 comprobaciones pasan tanto en síncrono como con hilo. MK64: BMP exactos a
+  120/300/600 cuadros y estados cruzados con continuación 300+120 idénticos.
+  Medición alternada (tres por modo): 11,311 s síncrono vs 12,961 s hilo; el hilo tarda 14,6 % más.
+  141724 paquetes y ~62000–65000 esperas por 300 cuadros, sin saturar la cola. Se conserva síncrono
+  por defecto y el hilo queda experimental. No se ejecutaron n64-systemtest (ROM ausente) ni TSan
+  (sin toolchain compatible preparado). Siguiente: nuevo perfil y decisión de Etapa 2, no cambiar ROM.
+  Sin merge ni push; la publicación sigue requiriendo autorización explícita.

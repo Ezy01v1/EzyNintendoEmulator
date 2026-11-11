@@ -1,6 +1,6 @@
 # Threaded N64 RDP Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Run the existing N64 rasterizer concurrently without changing observable memory, interrupt, or save-state behavior.
 
@@ -33,9 +33,9 @@
 
 **Interfaces:** `RdpPacket` owns `array<uint64_t,22>` plus word count. `RdpAccess` contains up to two exclusive-end ranges, each read or write. `RdpWorker(callback, capacity=1024)` exposes `submit(packet,access)`, `wait_memory(address,bytes,write)`, `drain()`, `pending()`. Sequence IDs and reservations stay internal.
 
-- [ ] Add deterministic tests using promises/latches for FIFO, conflicting/nonconflicting reads/writes, cross-page ranges, capacity exhaustion and callback exceptions; run and observe RED.
-- [ ] Implement the bounded queue and release/acquire completion fences; callbacks cannot call producer APIs; destructor joins without throwing.
-- [ ] Run worker tests GREEN; commit independently.
+- [x] Add deterministic tests using promises/latches for FIFO, conflicting/nonconflicting reads/writes, cross-page ranges, capacity exhaustion and callback exceptions; run and observe RED.
+- [x] Implement the bounded queue and release/acquire completion fences; callbacks cannot call producer APIs; destructor joins without throwing.
+- [x] Run worker tests GREEN; commit independently.
 
 ### Task 2: Isolate raster state without changing execution
 
@@ -43,9 +43,9 @@
 
 **Interfaces:** `RdpRasterizer::execute_packet(const RdpPacket&, span<uint8_t>)` executes full non-SyncFull packets. `Rdp` privately derives from rasterizer so existing serialization can preserve exact field order. Raster draw coefficients are separate from the front-end partial-command array.
 
-- [ ] Capture baseline Debug tests and existing 300-field MK64 BMP before extraction.
-- [ ] Move drawing methods/state into rasterizer, front-end methods into command interface; synchronous dispatch uses the packet executor. SyncFull stays on main thread.
-- [ ] Run all existing N64 tests and exact BMP comparison GREEN; commit.
+- [x] Capture baseline Debug tests and existing 300-field MK64 BMP before extraction.
+- [x] Move drawing methods/state into rasterizer, front-end methods into command interface; synchronous dispatch uses the packet executor. SyncFull stays on main thread.
+- [x] Run all existing N64 tests and exact BMP comparison GREEN; commit.
 
 ### Task 3: Connect worker and conservative reservations
 
@@ -53,10 +53,10 @@
 
 **Interfaces:** `Rdp::enable_threaded(span<uint8_t>) -> bool`, `drain() const`, `prepare_memory(address,bytes,write) const`, `threaded() const`; worker ownership is a unique_ptr. Access shadow tracks framebuffer address/stride/size, Z address, scissor and modes independently of raster state.
 
-- [ ] Add tests for value-owned packet capture, XBUS, partial END, SyncFull visibility and reservation endpoints; observe RED for threaded activation.
-- [ ] Publish ordered state/draw packets; reserve all RAM for texture reads and conservative clipped framebuffer/Z ranges for drawing. Include the last row's X extent even when X exceeds stride. SyncFull drains before MI DP is raised.
-- [ ] Add reset/legacy-load helpers that drain and reset data without replacing a running worker; serialization drains and rebuilds access shadow on load.
-- [ ] Run tests GREEN; commit.
+- [x] Add tests for value-owned packet capture, XBUS, partial END, SyncFull visibility and reservation endpoints; observe RED for threaded activation.
+- [x] Publish ordered state/draw packets; reserve all RAM for texture reads and conservative clipped framebuffer/Z ranges for drawing. Include the last row's X extent even when X exceeds stride. SyncFull drains before MI DP is raised.
+- [x] Add reset/legacy-load helpers that drain and reset data without replacing a running worker; serialization drains and rebuilds access shadow on load.
+- [x] Run tests GREEN; commit.
 
 ### Task 4: Protect every memory observer
 
@@ -64,10 +64,10 @@
 
 **Interfaces:** CpuBus gains a cheap optional memory-guard flag and virtual guarded-range hook, no-op for flat test buses. `N64::create(rom,pif,rdp_mode)` retains default synchronous mode. Bus owns bounded `image()` extraction instead of publicly exposing raw RDRAM spans.
 
-- [ ] Add CPU instruction-fetch/load/store/idle-loop overlap tests and DMA/VI observers with pending work; observe RED.
-- [ ] Guard CPU direct access, bus memory paths, RDP command source reads; drain for PI/SI and SP/AI DMA paths before RAM use. Guard both immediate register-triggered transfers and completion events.
-- [ ] Drain before save/load serialization and console destruction; ensure worker dies before RAM and reset recreates selected execution mode.
-- [ ] Run tests GREEN; commit.
+- [x] Add CPU instruction-fetch/load/store/idle-loop overlap tests and DMA/VI observers with pending work; observe RED.
+- [x] Guard CPU direct access, bus memory paths, RDP command source reads; drain for PI/SI and SP/AI DMA paths before RAM use. Guard both immediate register-triggered transfers and completion events.
+- [x] Drain before save/load serialization and console destruction; ensure worker dies before RAM and reset recreates selected execution mode.
+- [x] Run tests GREEN; commit.
 
 ### Task 5: Differential validation and runner selection
 
@@ -75,19 +75,65 @@
 
 **Interfaces:** test executable and runner accept `--rdp-threaded` and `--rdp-sync`; tests select the creation default in their own process so all existing test cases run in both modes. Runner can execute a save/reload continuation check for differential validation.
 
-- [ ] Add cross-mode state, rollback, reset/destruction and queue-pending differential tests; observe RED.
-- [ ] Implement mode selection and preserve mode through reload/reset. Register both full N64 suites in CTest.
-- [ ] Run Debug CTest for both modes, plus exact Release MK64 images at 120/300/600 fields and save-state continuation equality.
-- [ ] Benchmark at least three alternating runs per mode, no parallel builds/tests, recording elapsed and all-thread CPU time. Enable default only if the 10% threshold and all correctness criteria pass.
-- [ ] Record missing systemtest ROM and unavailable race-detector coverage accurately; commit.
+- [x] Add cross-mode state, rollback, reset/destruction and queue-pending differential tests; observe RED.
+- [x] Implement mode selection and preserve mode through reload/reset. Register both full N64 suites in CTest.
+- [x] Run Debug CTest for both modes, plus exact Release MK64 images at 120/300/600 fields and save-state continuation equality.
+- [x] Benchmark at least three alternating runs per mode, no parallel builds/tests, recording elapsed and all-thread CPU time. Enable default only if the 10% threshold and all correctness criteria pass.
+- [x] Record missing systemtest ROM and unavailable race-detector coverage accurately; commit.
 
 ### Task 6: Whole-change review and delivery
 
-- [ ] Request a fresh technical review of memory ownership, reservation bounds, exception paths and serialization compatibility.
-- [ ] Fix actionable findings with regression coverage and rerun affected suites.
-- [ ] Update recordatorios and this checklist, commit code/documentation locally on `codex/`; do not publish to main.
+- [x] Request a fresh technical review of memory ownership, reservation bounds, exception paths and serialization compatibility.
+- [x] Fix actionable findings with regression coverage and rerun affected suites.
+- [x] Update recordatorios and this checklist, commit code/documentation locally on `codex/`; do not publish to main.
 
 ## Execution ledger
 
 - Ruling: implement inline in the existing checkout on a dedicated branch, reusing this machine's build tree. The user requested continued execution; no extra worktree or execution-method approval is necessary. Cost: no simultaneous independent checkout; protect the pre-existing untracked ZIP by explicit staging.
 - Ruling: the approved design is the implementation authority; finish the plan and execute without another planning approval loop, following the user's instruction to continue.
+
+
+## Verification ledger and outcome
+
+- Baseline: 166 original N64 cases passed before extraction. New suite: 176 cases,
+  1594 assertions, all green in both synchronous and worker CTest registrations.
+- Worker tests went RED for the missing interface, then GREEN. CPU direct-access
+  and cross-mode state tests went RED for missing guards/mode API, then GREEN.
+- Review found an inclusive COPY/fill right edge crossing a reservation page.
+  The regression failed with end 4096 < required 4098; floor(right/4)+1 fixed it.
+  The reviewer subsequently reported no outstanding actionable findings.
+- Exact MK64 BMPs at 120, 300 and 600 fields. The 300-field synchronous BMP also
+  matches the pre-refactor reference SHA-256
+  `58f97e8061e7b69739cc69989ac679148be087e402ea9a6c5a9ae5c36e1512fb`.
+- Release `--rdp-threaded --state-check 300` passed: version-11 state loads into
+  the other mode, then both produce identical state and image after 120 fields.
+- Three alternating Release runs per mode, 300 fields each, all exact compares:
+
+| Mode | Elapsed seconds | CPU seconds (all process threads) |
+| --- | ---: | ---: |
+| sync | 12.031 | 10.844 |
+| threaded | 13.508 | 14.016 |
+| threaded | 12.961 | 14.453 |
+| sync | 11.311 | 9.859 |
+| sync | 11.286 | 10.281 |
+| threaded | 12.893 | 14.031 |
+
+Median elapsed: sync 11.311 s, threaded 12.961 s (14.6% slower).
+141724 packets and 62296/64572/63916 waits; queue capacity never exhausted.
+Raw local results: `build/rdp-thread-benchmark.json`; reproduction script:
+`build/benchmark-threaded-rdp.ps1` (both intentionally ignored build artifacts).
+
+- Ruling: retain synchronous default. The worker is an explicit experimental
+  runner mode because it failed the approved 10% elapsed-time improvement gate.
+  Do not interpret the older local 19.49 s measurement as a speedup: system load
+  and host throughput varied across sessions. No additional speculative tuning.
+- Memory lifetime detail: worker RAM binding is refreshed only after draining on
+  state loads; raw public Bus::rdram spans were replaced by bounded image access.
+- n64-systemtest and ThreadSanitizer remain unverified here: no test ROM and no
+  compatible race-detector toolchain prepared, respectively.
+- All implementation commits remain local. No merge or publication was attempted.
+- Additional default-path regression control against the saved `abaaebd` runner
+  (which predates the depth fast path): previous elapsed 11.982/12.026 s, current
+  synchronous elapsed 11.154/12.046 s. No material synchronous slowdown observed
+  within that variation; this is not an isolated measurement of the refactor.
+  Raw control data: `build/rdp-sync-regression-check.json`.

@@ -1,6 +1,7 @@
 # RDP en un hilo de trabajo
 
-Estado: propuesta técnica para revisión y aprobación; no implementada.
+Estado: aprobado e implementado en `codex/n64-threaded-rdp`. Modo experimental;
+se conserva el modo síncrono por defecto porque el hilo fue más lento al medirlo.
 
 ## Objetivo y contexto
 
