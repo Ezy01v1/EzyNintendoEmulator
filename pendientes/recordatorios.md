@@ -124,6 +124,10 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
         Sigue lejos del tiempo real; no confundir estas mediciones con las de la otra PC.
   - [ ] RDP en otro hilo: la CPU encola comandos y el RDP dibuja en paralelo
         (cuidar `Sync Full`, lecturas de RDRAM y save states).
+        Diseño propuesto y revisado: `docs/superpowers/specs/2026-11-10-n64-threaded-rdp-design.md`.
+        Pendiente de aprobación antes de implementar. Un trabajador FIFO, barreras de RDRAM
+        por página y comparación con modo síncrono; activarlo por defecto solo si mejora
+        al menos 10 % el tiempo real mediano sin regresiones. No promete 60 cuadros/s.
 - [ ] **Etapa 2: decidir según lo medido**:
   - Dynarec (JIT) MIPS → x86-64 para la CPU (y luego el RSP): la ganancia grande (5–20×), y la
     misma técnica que exigirán GameCube y Wii.
@@ -264,3 +268,8 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Suite N64 Debug en verde con `ctest --preset debug -R '^ezy_n64_tests$'`.
   No se volvió a ejecutar n64-systemtest: su ROM no está disponible en esta PC.
   La lentitud sigue pendiente; siguiente: optimización mayor de RSP/RDP (hilo o HLE/JIT según perfil).
+- 2026-11-10 — Preparado el diseño de RDP en otro hilo tras el visto bueno para continuar.
+  Revisión técnica sin preguntas importantes pendientes. CPU conserva DPC, tiempo e interrupciones;
+  trabajador dueño del rasterizador, con reservas por página y barreras también en la RAM directa
+  del VR4300, DMA, VI y estados guardados. No se implementó todavía: falta aprobar el diseño.
+  La autorización para publicar en `main` continúa pendiente; no se reintentó el push rechazado.
