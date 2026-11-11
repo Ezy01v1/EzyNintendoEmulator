@@ -6,7 +6,19 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-11_
 
-> **Para retomar:** evaluar VMADN/VMADH/VMADM: suman 15.617.211 instrucciones en
+> **PAUSADO por petición del usuario tras un cierre de la PC (2026-11-11).**
+> El trabajo VMADN/AVX2 se publica como checkpoint WIP por petición explícita para
+> continuar desde otra PC, todavía sin validación final. Instrucciones y scripts:
+> `docs/performance/2026-11-11-vmadn-handoff.md`.
+> Solo pasó la prueba aislada del kernel (20480 comprobaciones); el despacho final
+> y la comparación de rendimiento posterior NO quedaron verificados. Las últimas
+> compilaciones fallaron por memoria y escritura del PDB. El último CTest completo
+> es anterior a estos cambios. Al retomar: una sola compilación o prueba pesada
+> a la vez, sin Debug/Release en paralelo, y revisar recursos antes de ejecutarla.
+> `f22e0a7` es el último punto validado anterior; no hubo merge. Conservar las referencias
+> `build/vmad-before-{120,300,600}.bin` y `build/vmad-before.csv`.
+>
+> **Contexto del siguiente trabajo:** evaluar VMADN/VMADH/VMADM: suman 15.617.211 instrucciones en
 > el histograma de 300 campos de MK64. La frecuencia vectorial ya se midió y el
 > primer grupo está implementado: transferencias LBV/LSV/LLV/LDV y stores nativos
 > con accesos agrupados. CPU favorable en 5/6 parejas, reducción mediana emparejada
@@ -412,3 +424,30 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   `build/vector-frequency-*.log`, `build/vector-native-jit*.json` y
   `build/vector-native-analysis.json`. Contadores temporales retirados. Siguiente:
   medir coste del grupo VMADN/VMADH/VMADM antes de ampliar la emisión nativa.
+- 2026-11-11 — Trabajo VMADN interrumpido por cierre de la PC y pausado explícitamente
+  por el usuario. Se añadió una microprueba reproducible por opcode y se eligió
+  VMADN por frecuencia/coste. Hay una implementación AVX2 local con comprobación
+  CPU/OS, objeto separado sin LTCG, respaldo escalar y pruebas nuevas; no está
+  completada su validación ni se ha publicado. Prueba aislada RED contra kernel
+  vacío y GREEN con implementación: 20480 comprobaciones. El despacho público y
+  sus pruebas completas son cambios posteriores, aún sin ejecución verificada.
+  Se guardaron estados escalares de referencia a 120/300/600 campos antes de
+  conectar el despacho acelerado y datos sintéticos en `build/vmad-before.csv`.
+  Últimas compilaciones: Debug falló con Lib.exe 1102 y aviso OutOfMemory;
+  Release con LNK1201 al escribir el PDB. En ese momento C: tenía menos de 10 MB
+  libres; se retiraron 145,5 MiB de caches regenerables .iobj/.ipdb dentro de
+  build/default. No se repitió la compilación después ni se midió el candidato.
+  Comprobación ligera tras la petición de pausa: archivos locales conservados,
+  último commit/remoto `f22e0a7`; LastTest.log completo es anterior al trabajo
+  VMADN. No atribuirle esas siete suites previas a la implementación nueva.
+  Reanudar con recursos controlados, una tarea pesada a la vez. Pendientes:
+  compilar y ejecutar pruebas públicas de selectores/alias/flags/división,
+  verificar respaldo escalar y AVX2 desactivado, comparar los estados completos
+  contra las referencias y medir el efecto global antes de conservar/publicar.
+- 2026-11-11 — El usuario pidió publicar los cambios pendientes en la rama para
+  continuar desde otra PC. Checkpoint WIP explícito, sin ejecutar nuevas pruebas
+  ni compilaciones. Se incluyen kernel, despacho, pruebas, microbenchmark, scripts
+  portables por ruta y guía `docs/performance/2026-11-11-vmadn-handoff.md`, con los
+  errores y validaciones pendientes. Las referencias binarias se regeneran en la
+  otra PC con AVX2=OFF; no se publican ROMs ni estados con memoria del juego.
+  La pausa de trabajo pesado continúa; publicar no implica validar ni mergear.

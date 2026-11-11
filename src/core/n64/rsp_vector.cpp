@@ -1,5 +1,6 @@
 ﻿#include "n64/rsp_vector.hpp"
 
+#include "n64/rsp_vector_simd.hpp"
 #include <algorithm>
 #include <bit>
 #include <utility>
@@ -175,7 +176,13 @@ constexpr std::array<RspVector::LaneOp, 64> RspVector::lane_ops(std::index_seque
     return {&RspVector::run_lanes<static_cast<unsigned>(ops)>...};
 }
 
-const std::array<RspVector::LaneOp, 64> RspVector::kLaneOps = RspVector::lane_ops(std::make_index_sequence<64>{});
+const std::array<RspVector::LaneOp, 64> RspVector::kLaneOps = [] {
+    auto ops=lane_ops(std::make_index_sequence<64>{});
+#if EZY_N64_VECTOR_AVX2
+    if(detail::vmadn_avx2_available()) ops[VMADN]=&RspVector::run_vmadn_avx2;
+#endif
+    return ops;
+}();
 
 template <unsigned op>
 std::uint16_t RspVector::multiply(unsigned source, unsigned lane, std::uint16_t lhs, std::uint16_t rhs) {

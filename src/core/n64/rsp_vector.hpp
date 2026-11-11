@@ -38,6 +38,7 @@ private:
     std::uint16_t alu_lane(unsigned lane, std::uint16_t lhs, std::uint16_t rhs);
     template <unsigned op>
     void run_lanes(Vector& dest, const Vector& vs, const Vector& selected, unsigned source);
+    void run_vmadn_avx2(Vector& dest,const Vector& vs,const Vector& selected,unsigned source);
     using LaneOp = void (RspVector::*)(Vector&, const Vector&, const Vector&, unsigned);
     template <std::size_t... ops>
     static constexpr std::array<LaneOp, 64> lane_ops(std::index_sequence<ops...>);

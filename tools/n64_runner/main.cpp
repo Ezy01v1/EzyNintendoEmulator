@@ -164,6 +164,7 @@ int main(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --compare <reference.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --isviewer [seconds]\n"
                      "       ezy_n64_runner <rom> --state-check [frames]\n"
+                     "       ezy_n64_runner <rom> --dump-state <out.bin> [frames]\n"
                      "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter\n";
         return 2;
     }
@@ -183,6 +184,18 @@ int main(int raw_argc, char* raw_argv[]) {
         const std::vector<char> bmp = encode_bmp(n64->image());
         std::ofstream(args[3], std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         std::cout << "Saved " << args[3] << " (" << n64->image().width << "x" << n64->image().height << ")\n";
+        print_rdp_stats(*n64);
+        return 0;
+    }
+    if (mode == "--dump-state" && argc >= 4) {
+        const int frames=argc>4?std::atoi(args[4]):120;
+        for(int i=0;i<frames;++i) n64->run_frame();
+        const auto state=n64->save_state();
+        std::ofstream file(args[3],std::ios::binary);
+        file.write(reinterpret_cast<const char*>(state.data()),static_cast<std::streamsize>(state.size()));
+        file.close();
+        if(!file) { std::cerr<<"Could not write "<<args[3]<<'\n'; return 2; }
+        std::cout<<"Saved state after "<<frames<<" frames\n";
         print_rdp_stats(*n64);
         return 0;
     }
