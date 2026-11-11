@@ -139,7 +139,8 @@ void print_rdp_stats(N64& n64) {
     const auto jit=n64.bus().rsp().jit_stats();
     std::cout << "RSP backend: " << (n64.bus().rsp().jit_active() ? "JIT" : "interpreter")
               << ", native: " << jit.native_instructions << ", fallback: " << jit.fallback_instructions
-              << ", blocks: " << jit.compiled_blocks << ", compile ms: " << jit.compile_ns/1e6 << '\n';
+              << ", blocks: " << jit.compiled_blocks << ", compile ms: " << jit.compile_ns/1e6
+              << ", reused: " << jit.reused_blocks << ", cache flushes: " << jit.cache_flushes << '\n';
 }
 
 }  // namespace

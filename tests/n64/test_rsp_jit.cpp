@@ -223,7 +223,10 @@ TEST_CASE("RSP JIT invalidation remains safe after multiple executable allocator
     std::uint32_t pc=0,next=4;
     bool phase=false;
     RspJitView view{gpr.data(),dmem.data(),&pc,&next,&phase,nullptr,nullptr};
-    RspJit jit;
+    std::size_t budget=16*1024*1024;
+    SUBCASE("reuse across IMEM generations") {}
+    SUBCASE("hard reset after multiple executable allocations") { budget=256*1024; }
+    RspJit jit(false,budget);
     for(unsigned generation=0;generation<3;++generation) {
         for(unsigned entry=0;entry<224;++entry) {
             pc=entry*4; next=pc+4;
@@ -233,6 +236,73 @@ TEST_CASE("RSP JIT invalidation remains safe after multiple executable allocator
         }
         jit.invalidate();
     }
-    CHECK(jit.stats().compiled_blocks==3*224);
+    if(budget==256*1024) {
+        CHECK(jit.stats().cache_flushes>0);
+        CHECK(jit.stats().compiled_blocks>224);
+    } else {
+        CHECK(jit.stats().compiled_blocks==224);
+        CHECK(jit.stats().reused_blocks==448);
+    }
+}
+
+TEST_CASE("RSP JIT reuses identical microcode after switching programs at the same PC") {
+    using namespace ezy::n64;
+    RspRegs rsp(RspMode::Jit);
+    REQUIRE(rsp.jit_active());
+    Mi mi; Rdp rdp; Scheduler scheduler;
+    const auto execute = [&](unsigned value, std::uint64_t bound) {
+        // Only the second instruction changes: matching just the entry word is unsafe.
+        const std::array words{mips::addiu(1,0,7),mips::addiu(2,0,static_cast<int>(value)),
+                              mips::sw(2,0,0),mips::r(0,0,0,0,0,13)};
+        std::vector<std::uint8_t> bytes;
+        for(auto word:words) for(unsigned b=0;b<4;++b)
+            bytes.push_back(static_cast<std::uint8_t>(word>>(24-b*8)));
+        rsp.write_memory(0x1000,bytes);
+        rsp.write_sp(0x40000,0,mi,scheduler,scheduler.now());
+        rsp.write_sp(0x10,5,mi,scheduler,scheduler.now());
+        scheduler.advance_to(bound);
+        while(auto due=scheduler.pop_due()) rsp.run(mi,rdp,scheduler,due->when,false);
+        CHECK(rsp.read_memory8(3)==value);
+    };
+    execute(17,100);
+    execute(42,200);
+    REQUIRE(rsp.jit_stats().compiled_blocks==2);
+    execute(17,300);
+    execute(42,400);
+    CHECK(rsp.jit_stats().compiled_blocks==2);
+}
+
+TEST_CASE("RSP JIT content identity includes the final opcode and the entry PC") {
+    using namespace ezy::n64;
+    std::array<std::uint8_t,4096> imem{},dmem{};
+    std::array<std::uint32_t,32> gpr{};
+    std::uint32_t pc=0,next=4;
+    bool phase=false;
+    RspJit jit;
+    RspJitView view{gpr.data(),dmem.data(),&pc,&next,&phase,nullptr,nullptr};
+    const auto execute = [&](unsigned at, unsigned count, unsigned end) {
+        pc=at; next=(at+4)&0xFFC;
+        RspJitRun run{0,10000,32,0};
+        jit.run(view,imem,run);
+        CHECK(run.retired==count);
+        CHECK(pc==end);
+        CHECK(next==((end+4)&0xFFC));
+    };
+    execute(0,32,128);
+    execute(4,32,132); // Identical NOP bytes, but absolute PC stores differ.
+    imem[127]=13; // Turn the 32nd NOP into BREAK, which must be interpreted.
+    jit.invalidate();
+    execute(0,31,124);
+    CHECK(jit.stats().compiled_blocks==3);
+    imem[127]=0;
+    jit.invalidate();
+    execute(0,32,128);
+    CHECK(jit.stats().compiled_blocks==3);
+    CHECK(jit.stats().reused_blocks==1);
+    execute(0xFFC,1,0); // Key construction must not read beyond IMEM.
+    jit.invalidate();
+    execute(0xFFC,1,0);
+    CHECK(jit.stats().compiled_blocks==4);
+    CHECK(jit.stats().reused_blocks==2);
 }
 #endif

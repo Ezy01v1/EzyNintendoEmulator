@@ -28,6 +28,7 @@ public:
     struct Stats {
         std::uint64_t compiled_blocks = 0, native_instructions = 0, fallback_instructions = 0;
         std::uint64_t compile_ns = 0, invalidations = 0;
+        std::uint64_t reused_blocks = 0, cache_flushes = 0;
     };
     explicit RspJit(bool deny_execution = false, std::size_t code_budget = 16 * 1024 * 1024);
     ~RspJit();

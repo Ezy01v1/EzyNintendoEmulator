@@ -1,7 +1,10 @@
 #include "n64/rsp_jit.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <unordered_map>
+#include <utility>
 
 #if EZY_N64_RSP_JIT
 #include <asmjit/x86.h>
@@ -18,6 +21,21 @@ struct RspJit::Impl {
     struct Entry { Function function = nullptr; bool attempted = false; };
     asmjit::JitRuntime runtime;
     std::array<Entry, 1024> entries{};
+    // PC is part of the identity because native blocks materialize PC/next-PC.
+    // Keep all bytes the compiler could inspect, including the terminating opcode.
+    struct Key {
+        unsigned pc = 0;
+        std::array<std::uint8_t, 128> code{};
+        bool operator==(const Key&) const = default;
+    };
+    struct Hash {
+        std::size_t operator()(const Key& key) const noexcept {
+            std::size_t hash = 14695981039346656037ULL;
+            for (auto byte : key.code) hash = (hash ^ byte) * 1099511628211ULL;
+            return (hash ^ key.pc) * 1099511628211ULL;
+        }
+    };
+    std::unordered_map<Key, Function, Hash> translations;
 
     struct Errors final : asmjit::ErrorHandler {
         bool failed = false;
@@ -26,11 +44,13 @@ struct RspJit::Impl {
 
     void flush() {
         // The pinned allocator's soft reset can retain tree links from freed
-        // executable blocks. Invalidation must discard those blocks as well.
+        // executable blocks. A full flush must discard allocator metadata too.
         runtime.reset(asmjit::ResetPolicy::kHard);
         entries = {};
+        translations.clear();
         bytes = 0;
         ++stats.invalidations;
+        ++stats.cache_flushes;
     }
 
     static bool supported(std::uint32_t word) {
@@ -211,7 +231,10 @@ RspJit::~RspJit()=default;
 bool RspJit::available() const { return impl_->enabled; }
 void RspJit::invalidate() {
 #if EZY_N64_RSP_JIT
-    impl_->flush();
+    // Detach this generation's fast lookup table. Historical translations are
+    // selected again by exact content, never by a stale PC or hash alone.
+    impl_->entries = {};
+    ++impl_->stats.invalidations;
 #endif
 }
 void RspJit::record_fallback() { ++impl_->stats.fallback_instructions; }
@@ -224,9 +247,21 @@ void RspJit::run(RspJitView& view,std::span<const std::uint8_t,4096> imem,RspJit
     try {
         const auto index=*view.pc/4;
         if(!impl_->entries[index].attempted) {
-            const auto function=impl_->compile(*view.pc,imem);
+            Impl::Key key;
+            key.pc=*view.pc;
+            std::copy_n(imem.begin()+key.pc,std::min<std::size_t>(key.code.size(),4096-key.pc),key.code.begin());
+            Impl::Function compiled=nullptr;
+            if(const auto found=impl_->translations.find(key); found!=impl_->translations.end()) {
+                compiled=found->second;
+                ++impl_->stats.reused_blocks;
+            } else {
+                compiled=impl_->compile(*view.pc,imem);
+                // Unsupported entry opcodes stay in the per-generation table;
+                // don't accumulate unbounded metadata without executable code.
+                if(compiled) impl_->translations.emplace(std::move(key),compiled);
+            }
             // compile may flush the table; assign only after it returns.
-            impl_->entries[index]={function,true};
+            impl_->entries[index]={compiled,true};
         }
         function=impl_->entries[index].function;
     } catch (...) {

@@ -4,11 +4,13 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-10_
+_Última actualización: 2026-11-11_
 
-> **Para retomar:** evaluar reutilización de traducciones entre cargas de microcódigo
-> idéntico. El JIT del RSP está implementado en `codex/n64-rsp-jit`, pero experimental:
-> 45,708 s frente a 11,139 s del intérprete por 300 campos, por recompilaciones.
+> **Para retomar:** perfilar el coste de ejecución del JIT frente al intérprete.
+> La caché de traducciones idénticas ya está implementada en `codex/n64-rsp-jit`:
+> 191.691 → 1.316 compilaciones por 300 campos de MK64, con 190.375 reutilizaciones.
+> Sigue experimental: mediana local 17,029 s JIT frente a 13,716 s intérprete,
+> con mucha variación de tiempo real y CPU mediana casi igual (11,406 / 11,531 s).
 > Fallo de memoria reportado corregido y cubierto por regresión. Mantener intérprete
 > y RDP síncrono predeterminados. Diseño/plan JIT documentan pruebas y límites.
 > CPU/RSP optimizados en `main` (PR #15). El RDP en hilo está implementado y validado
@@ -141,8 +143,11 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
   - Perfil local actualizado: `execute_scalar` 11,7 %, bucle RSP 6,7 %, memoria vectorial
     5,9 %, ALU vectorial 5,7 %, más operaciones por carril. **JIT del RSP implementado**
     y validado localmente, con AsmJit fijado por SHA, invalidación y presupuesto exacto.
-    El intérprete sigue predeterminado: JIT 4,10 veces más lento en tres pares fríos.
-    Próxima evaluación: caché que reutilice traducciones de microcódigos idénticos.
+    El intérprete sigue predeterminado. La primera entrega del JIT fue 4,10 veces
+    más lenta por compilaciones. La caché de traducciones idénticas ya está hecha
+    (2026-11-11): reduce las compilaciones a 1.316, pero no demuestra mejora global
+    frente al intérprete en tres pares fríos. Siguiente: perfilar ejecución nativa,
+    helpers y salidas de bloque; no repetir la caché como trabajo pendiente.
   - Experimentos descartados: `/Ob3` (+0,15 % mediano, no significativo) y despacho vectorial
     directo desde `run` (4,9 % más lento). Ambos revertidos; no repetirlos como mejoras.
   - Dynarec (JIT) MIPS → x86-64 para la CPU: alternativa futura que requiere perfil
@@ -322,3 +327,25 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Queda experimental: la lentitud sigue pendiente. Evaluar reutilizar traducciones de
   microcódigo idéntico; no repetir el JIT actual como mejora demostrada. ROM histórica
   systemtest ausente, baseline sin verificar. Revisión técnica completada, sin merge/push.
+- 2026-11-11 — Continuación autorizada: caché histórica del JIT por PC y ventana exacta
+  de hasta 32 instrucciones, además de la tabla rápida por generación. Invalidar IMEM
+  desconecta la tabla rápida; agotar los 16 MiB de código hace reset duro y limpia
+  ambas tablas. Las claves no se serializan y solo se retienen compilaciones exitosas.
+  Regresión RED: A/B/A/B compilaba 4 bloques en vez de 2; múltiples generaciones,
+  672 en vez de 224. GREEN tras el cambio. Cobertura de cambios internos y del último
+  opcode, PC distinto con bytes iguales, final de IMEM, presupuesto y allocator.
+  Revisión técnica independiente sin hallazgos. Imágenes MK64 exactas a 120/300/600
+  campos y estados completos cruzados en ambas direcciones tras 300+120 campos.
+  Tres procesos fríos por backend, alternados y sin compilaciones simultáneas:
+  intérprete 16,678 / 11,164 / 13,716 s; JIT 30,099 / 17,029 / 12,182 s.
+  Medianas de tiempo real 13,716 / 17,029 s (JIT 24,16 % más lento en este lote);
+  CPU 11,531 / 11,406 s. La variación es alta: no demuestra ganancia global del 10 %.
+  Por 300 campos: 1.316 compilaciones, 190.375 reutilizaciones, ningún vaciado;
+  compilación mediana 0,750 s, mismas 76.828.052 instrucciones nativas / 31.073.143
+  interpretadas. Datos en `build/rsp-cache-benchmark.json`; script local de medición
+  `build/benchmark-rsp-cache.ps1`. Mantener intérprete y RDP síncrono por defecto.
+  La ROM histórica systemtest sigue ausente. Sin merge/push ni ROMs en commits.
+  Verificación final: `ctest --preset debug` 7/7 suites; N64 189 casos / 3562
+  comprobaciones por combinación. OFF: 179 / 1973 en ambos modos RDP, sin AsmJit.
+  ON restaurado y runner/frontend Release recompilados. La rama sigue local;
+  `git pull --ff-only` no aplicó cambios porque no tiene upstream configurado.

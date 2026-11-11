@@ -198,3 +198,73 @@ No publicar, fusionar a main ni incluir ROMs sin autorización.
 
 Los datos locales reproducibles están en `build/rsp-jit-benchmark.json` y
 `build/jit-game-validation.log` (ignorados). No activar el JIT por defecto.
+
+## Reutilización de traducciones (2026-11-11)
+
+Continuación autorizada por el usuario: conservar traducciones entre generaciones
+de IMEM para reducir el coste de recompilar los mismos microcódigos.
+
+Se conserva la tabla rápida de 1024 entradas de la generación actual. Invalidar
+desconecta esa tabla, pero conserva una segunda caché privada de la consola.
+Su clave contiene el PC y hasta 128 bytes desde esa dirección (32 instrucciones,
+sin cruzar el final de IMEM, con el resto de la clave inicializado a cero).
+La comparación exige igualdad exacta de clave, incluso si colisiona el hash.
+Incluir bytes posteriores al primer opcode no soportado es conservador: puede
+provocar una compilación innecesaria, pero nunca reutilizar instrucciones distintas.
+
+La consulta de contenido ocurre solo al fallar la tabla rápida. Los bloques
+reciben la vista actual de registros, DMEM y helpers en cada llamada; no capturan
+punteros al estado de una generación anterior. No hay cambios al presupuesto de
+ciclos, a los opcodes soportados ni al formato de estados. Cargar o revertir un
+estado desconecta la tabla rápida y vuelve a seleccionar por contenido actual.
+
+El límite de código nativo sigue siendo 16 MiB por consola. Al agotarse se hace
+reset duro del allocator y se vacían ambas tablas antes de instalar la nueva
+traducción, fuera de ejecución nativa. Solo se conservan claves históricas para
+bloques compilados con éxito: los opcodes no soportados no acumulan metadatos.
+Destruir la consola libera ambas cachés y el runtime. Se añaden contadores de
+reutilizaciones y vaciados completos al diagnóstico del runner.
+
+Validación: alternancia A/B/A/B en el mismo PC, cambio dentro del bloque y en su
+último opcode, PC distinto con bytes idénticos, final de IMEM y vaciados bajo
+presupuesto pequeño. Repetir suites N64 en los cuatro modos, comparar imágenes
+MK64 a 120/300/600 campos y continuación de estados en ambas direcciones, y medir
+tres procesos fríos por backend en orden alternado. Mantener el intérprete como
+predeterminado mientras no se cumpla el criterio completo de aceptación original.
+
+### Resultado de la reutilización
+
+Las regresiones reprodujeron 4 compilaciones en vez de 2 al alternar A/B/A/B,
+y 672 en vez de 224 al repetir tres generaciones idénticas. Pasan con la caché.
+`ctest --preset debug`: 7/7 suites; N64 189 casos / 3562 comprobaciones en cada
+combinación RSP/RDP. Sin JIT: 179 / 1973 en ambos modos RDP, sin AsmJit. ON
+restaurado y runner/frontend Release recompilados. Advertencias preexistentes
+de sombreado en RDP y truncamiento en una prueba GB; ninguna nueva en la caché.
+Revisión independiente sin hallazgos de coherencia, límites o vida útil.
+Imágenes MK64 exactas a 120/300/600 campos, más estados completos e imágenes
+coincidentes en ambas direcciones de continuación entre backends (300+120).
+
+Tres procesos fríos por backend, orden intérprete/JIT/JIT/intérprete/intérprete/JIT,
+RDP síncrono y sin otras compilaciones propias durante la medición:
+
+| Backend | Tiempo real (s), tres ejecuciones | Mediana real (s) | Mediana CPU (s) |
+| --- | --- | --- | --- |
+| Intérprete | 16,678 / 11,164 / 13,716 | 13,716 | 11,531 |
+| JIT con caché | 30,099 / 17,029 / 12,182 | 17,029 | 11,406 |
+
+Los seis procesos compararon exactamente la imagen de 300 campos. El tiempo
+real varía mucho; no se atribuye esa variación a la caché. En este lote el JIT
+tarda un 24,16 % más de mediana real y consume casi la misma CPU. No se demuestra
+la mejora global requerida. No comparar estos tiempos con los de otra fecha
+como una medición controlada del cambio.
+
+El efecto sobre compilaciones sí es directo y reproducible: de 191.691 en la
+primera entrega a 1.316 compilaciones y 190.375 reutilizaciones por 300 campos,
+sin vaciados del presupuesto. Compilación mediana 0,750 s; instrucciones nativas
+76.828.052 y fallback 31.073.143, sin cambio. La recompilación ya no domina;
+queda perfilar el coste de ejecución nativa, sus helpers y salidas de bloque.
+
+Datos locales en `build/rsp-cache-benchmark.json`, script
+`build/benchmark-rsp-cache.ps1`; validación con `build/validate-rsp-cache.ps1`.
+La ROM histórica sigue ausente. Conservar el intérprete predeterminado y el JIT
+opcional; no se ha demostrado una solución de tiempo real ni se publica la rama.
