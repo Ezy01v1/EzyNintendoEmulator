@@ -2,7 +2,7 @@ add_library(ezy_n64 STATIC scheduler.cpp cartridge.cpp cpu/vr4300.cpp cpu/vr4300
 target_include_directories(ezy_n64 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(ezy_n64 PRIVATE ezy_warnings)
 
-target_sources(ezy_n64 PRIVATE rdp_worker.cpp rdp_commands.cpp)
+target_sources(ezy_n64 PRIVATE rdp_worker.cpp rdp_commands.cpp rsp_jit.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(ezy_n64 PRIVATE Threads::Threads)
 
