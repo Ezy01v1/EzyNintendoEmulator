@@ -33,6 +33,8 @@ override the default 1500/1900/3. Each process boots independently; the warm-up
 still runs outside the measurement window to warm its JIT translations. Do not
 run builds or other emulator workloads simultaneously. Keep adjacent paired
 CPU/wall results as well as medians, and distinguish evidence from noisy runs.
+Use `-Reverse` with a separate output directory for a complementary batch that
+starts with candidate/baseline instead of baseline/candidate.
 
 ## Optional statistical profile (Windows x64)
 

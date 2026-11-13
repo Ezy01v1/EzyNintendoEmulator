@@ -3,6 +3,7 @@ target_link_libraries(ezy_n64_tests PRIVATE ezy_n64 doctest::doctest ezy_warning
 target_sources(ezy_n64_tests PRIVATE test_rsp_jit.cpp test_rsp_vector_native.cpp)
 target_sources(ezy_n64_tests PRIVATE test_rsp_vector_multiply.cpp)
 target_sources(ezy_n64_tests PRIVATE test_rdp_hidden_bits.cpp)
+target_sources(ezy_n64_tests PRIVATE test_rdp_combiner.cpp)
 if(TARGET asmjit::asmjit)
     target_link_libraries(ezy_n64_tests PRIVATE asmjit::asmjit)
 endif()

@@ -6,7 +6,17 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-12_
 
-> **Último avance (2026-11-12), rama `codex/n64-rsp-jit`: carrera de MK64 y RDP.**
+> **Última revisión (2026-11-12): dos experimentos del combinador descartados.**
+> Tabla de entradas: CPU favorable 4/6 parejas, mediana de reducción 0,94 %.
+> Productos nulos: 4/6, mediana 0,86 %, con regresiones hasta 7,32 %. Ambos
+> correctos pero sin ganancia consistente; no repetirlos. Los 24 estados completos
+> e imágenes de carrera son idénticos. Se restauró el renderizador de `70e5e64`;
+> quedan pruebas de selectores y `benchmark-race.ps1 -Reverse`. Compilación final
+> Debug + siete suites en verde: N64 200 casos / 62762 comprobaciones por modo.
+> Runner/frontend Release recompilados y estado final idéntico a la referencia.
+> Informe: `docs/performance/2026-11-12-n64-combiner.md`.
+>
+> **Mejora previa conservada, rama `codex/n64-rsp-jit`: carrera de MK64 y RDP.**
 > Medición real del tramo 1500–1900 con `--benchmark` (arranque excluido): el JIT
 > no gana de forma consistente. El perfil señaló el RDP y su mapa de bits DZ.
 > Se reemplazó por acceso directo de 4 MiB, manteniendo el formato sparse v11.
@@ -17,7 +27,10 @@ _Última actualización: 2026-11-12_
 > Informe: `docs/performance/2026-11-12-n64-race.md`; reproducción:
 > `tools/n64_runner/README.md` y `benchmark-race.ps1`.
 >
-> **Siguiente foco:** combinador, escritura de píxeles y texturas del RDP. En el
+> **Siguiente experimento:** predecodificar selectores/colores uniformes al cambiar
+> las órdenes del RDP, en vez de extraerlos por píxel. Cubrir actualización de
+> estado, reset y restauración antes de dibujar. También siguen pendientes la
+> escritura de píxeles y texturas del RDP. En el
 > perfil posterior de carrera: RDP ~35,7 %, RSP ~29,4 %, CPU ~16,5 %; mapas y
 > `RtlAllocateHeap` ya no aparecen. Son muestras exclusivas aproximadas, no tiempos
 > inclusivos ni prueba de una futura ganancia. Medir cada cambio en parejas, con
@@ -483,3 +496,18 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   foco medible: combinador, escritura de píxeles y texturas del RDP. Runner y
   frontend Release recompilados. Informe `docs/performance/2026-11-12-n64-race.md`;
   herramientas en `tools/n64_runner/README.md`. Valores predeterminados sin cambios.
+- 2026-11-12 — Continuación del combinador: probadas tabla de referencias y
+  simplificación de productos nulos. Dos lotes complementarios por candidato,
+  seis parejas cada uno (24 procesos fríos, tramo 1500–1900). Ambos conservan
+  imagen/estado, pero solo 4/6 parejas favorables: medianas CPU 0,94 % y 0,86 %,
+  menores que la variación observada. Se retiran ambos cambios de producción;
+  el código del renderer queda en `70e5e64`, con su mejora DZ previa intacta.
+  Quedan tres pruebas de conformidad (274 comprobaciones): RGB/alfa, selectores
+  especiales, dos ciclos, productos nulos y avance incondicional de ruido.
+  `benchmark-race.ps1` añade `-Reverse` para el lote complementario. Restaurado
+  el motor y recompilado: siete suites pasan, N64 200 / 62762 por combinación;
+  runner/frontend Release reconstruidos y estado a 120 idéntico a la referencia.
+  No se repitió systemtest porque el core final no cambia; su baseline verificado
+  sigue siendo el de `70e5e64` (2984/3721). Informe y datos locales documentados
+  en `docs/performance/2026-11-12-n64-combiner.md`. Siguiente hipótesis: decodificar
+  parámetros uniformes por cambio de estado, con pruebas de invalidación/restore.

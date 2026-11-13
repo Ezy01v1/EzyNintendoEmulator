@@ -4,6 +4,7 @@ param(
     [string]$BaselineRunner,
     [ValidateSet('interpreter','jit')][string]$Backend='interpreter',
     [ValidateRange(1,20)][int]$Pairs=3,
+    [switch]$Reverse,
     [ValidateRange(0,1000000)][int]$First=1500,
     [ValidateRange(1,1000000)][int]$End=1900,
     [string]$OutputDirectory
@@ -27,7 +28,9 @@ $raceCases=if($BaselineRunner){
 }
 $raceRows=@()
 for($racePair=0;$racePair -lt $Pairs;++$racePair){
-    $raceOrder=if($racePair%2 -eq 0){@(0,1)}else{@(1,0)}
+    $raceForward=$racePair%2 -eq 0
+    if($Reverse){$raceForward=!$raceForward}
+    $raceOrder=if($raceForward){@(0,1)}else{@(1,0)}
     foreach($raceIndex in $raceOrder){
         $raceCase=$raceCases[$raceIndex]
         $raceStem=Join-Path $OutputDirectory "$($raceCase.Label)-$racePair"
