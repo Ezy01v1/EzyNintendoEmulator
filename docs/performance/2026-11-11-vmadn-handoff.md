@@ -1,5 +1,10 @@
 # VMADN SIMD — punto de trabajo incompleto para otra PC
 
+Actualización 2026-11-12: se retomó y validó en la otra PC. Los resultados y la
+decisión de dejar AVX2 desactivado por defecto están en
+[`2026-11-12-vmadn-validation.md`](2026-11-12-vmadn-validation.md).
+El resto de este documento conserva el contexto histórico del checkpoint.
+
 Estado: **WIP, sin validación final**. Se publica para trasladar el trabajo;
 no es una entrega validada ni una autorización para fusionar a `main`.
 Último punto validado anterior: `f22e0a7`.

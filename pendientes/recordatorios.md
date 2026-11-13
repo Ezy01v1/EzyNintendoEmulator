@@ -4,22 +4,25 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-11_
+_Última actualización: 2026-11-12_
 
-> **PAUSADO por petición del usuario tras un cierre de la PC (2026-11-11).**
-> El trabajo VMADN/AVX2 se publica como checkpoint WIP por petición explícita para
-> continuar desde otra PC, todavía sin validación final. Instrucciones y scripts:
-> `docs/performance/2026-11-11-vmadn-handoff.md`.
-> Solo pasó la prueba aislada del kernel (20480 comprobaciones); el despacho final
-> y la comparación de rendimiento posterior NO quedaron verificados. Las últimas
-> compilaciones fallaron por memoria y escritura del PDB. El último CTest completo
-> es anterior a estos cambios. Al retomar: una sola compilación o prueba pesada
-> a la vez, sin Debug/Release en paralelo, y revisar recursos antes de ejecutarla.
-> `f22e0a7` es el último punto validado anterior; no hubo merge. Conservar las referencias
-> `build/vmad-before-{120,300,600}.bin` y `build/vmad-before.csv`.
+> **Retomado el 2026-11-12 en la otra PC, rama `codex/n64-rsp-jit`.**
+> VMADN/AVX2 ya pasó la suite completa (7/7; 194 casos / 69112 comprobaciones por
+> combinación N64), los estados completos de MK64 a 120/300/600 campos y doce
+> imágenes exactas en ejecuciones alternadas. No demostró mejora de rendimiento:
+> mediana CPU +0,42 % intérprete / +1,86 % JIT. `EZY_N64_VECTOR_AVX2` queda OFF
+> por defecto, disponible para experimentos. No ampliar a VMADM/VMADH sin medir
+> primero un kernel mejor. Informe: `docs/performance/2026-11-12-vmadn-validation.md`.
 >
-> **Contexto del siguiente trabajo:** evaluar VMADN/VMADH/VMADM: suman 15.617.211 instrucciones en
-> el histograma de 300 campos de MK64. La frecuencia vectorial ya se midió y el
+> El checkpoint WIP `00ca4e6` y los errores de recursos de la PC anterior están
+> descritos en `docs/performance/2026-11-11-vmadn-handoff.md`. En esta PC compilar
+> de forma secuencial también funcionó: una sola compilación o prueba pesada
+> a la vez, sin Debug/Release en paralelo. Las referencias escalares de `build/`
+> se regeneraron aquí; no comparar tiempos entre PCs.
+>
+> **Contexto del siguiente trabajo:** VMADN/VMADH/VMADM suman 15.617.211 instrucciones en
+> el histograma de 300 campos de MK64. VMADN AVX2 ya fue evaluado sin ganancia.
+> La frecuencia vectorial ya se midió y el
 > primer grupo está implementado: transferencias LBV/LSV/LLV/LDV y stores nativos
 > con accesos agrupados. CPU favorable en 5/6 parejas, reducción mediana emparejada
 > 8,77 % frente al JIT anterior. Tiempo real muy variable; no comparar esos segundos
@@ -31,7 +34,9 @@ _Última actualización: 2026-11-11_
 > La caché de traducciones idénticas ya está implementada en `codex/n64-rsp-jit`:
 > 191.691 → 1.316 compilaciones por 300 campos de MK64, con 190.375 reutilizaciones.
 > Sigue experimental: la mejora vectorial compara versiones JIT, no el intérprete.
-> La ROM histórica systemtest sigue ausente; no activar por defecto ni fusionar a main.
+> La ROM histórica systemtest está disponible en esta PC y ya terminó con JIT/AVX2:
+> conserva 2984/3721 (737 fallos conocidos). Sigue faltando una ganancia de rendimiento
+> consistente frente al intérprete; no activar JIT por defecto ni fusionar a main.
 > Fallo de memoria reportado corregido y cubierto por regresión. Mantener intérprete
 > y RDP síncrono predeterminados. Diseño/plan JIT documentan pruebas y límites.
 > CPU/RSP optimizados en `main` (PR #15). El RDP en hilo está implementado y validado
@@ -451,3 +456,18 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   errores y validaciones pendientes. Las referencias binarias se regeneran en la
   otra PC con AVX2=OFF; no se publican ROMs ni estados con memoria del juego.
   La pausa de trabajo pesado continúa; publicar no implica validar ni mergear.
+- 2026-11-12 — Retomada la rama `codex/n64-rsp-jit` en la otra PC. Validado el
+  checkpoint VMADN: OFF pasa las cuatro suites N64 (193 casos / 48632
+  comprobaciones cada una); ON pasa las siete suites, con 194 / 69112 en cada
+  combinación N64. Despacho AVX2 confirmado, 30 checksums del microbenchmark
+  iguales y comparación automática añadida al script (incluida prueba de rechazo
+  de un checksum alterado). Estados completos de MK64 iguales a 120/300/600,
+  también JIT/AVX2 frente a intérprete escalar a 600; continuidad cruzada en ambos
+  sentidos a 300+120 e imágenes de doce ejecuciones alternadas exactas. ROM
+  histórica systemtest encontrada aquí: termina con JIT/AVX2 y conserva 2984/3721.
+  Sin ganancia de CPU: medianas +0,42 % intérprete / +1,86 % JIT. AVX2 queda como
+  experimento OFF por defecto; no ampliar a VMADM/VMADH ni activar JIT por defecto
+  con este resultado. Informe `docs/performance/2026-11-12-vmadn-validation.md`.
+  Configuración local restaurada a AVX2=OFF con frontend habilitado; runner,
+  benchmark y ezyemu Release recompilados. Prueba final: kernel escalar y captura
+  de MK64 exacta a 300 campos. Los ejecutables de ambas variantes siguen en build/.
