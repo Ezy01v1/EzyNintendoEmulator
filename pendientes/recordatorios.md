@@ -4,8 +4,19 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-12_
+_Última actualización: 2026-11-13_
 
+> **Última revisión (2026-11-12): dos candidatos RDP adicionales descartados.**
+> Sustituir las divisiones RGB del mezclador por recíprocos exactos empeoró la
+> mediana CPU 3,58 %; compartir la decodificación entre taps de textura filtrada
+> empeoró la mediana 1,08 %. Los 12 estados completos e imágenes coincidieron.
+> Ambas modificaciones de producción se retiraron; el core sigue en `70e5e64`.
+> Informe: `docs/performance/2026-11-12-n64-pixel-texture.md`. Próximo paso:
+> medir frecuencias de modos y ramas reales del RDP para escoger una ruta con
+> coste evitable, antes de probar otra microoptimización.
+> Verificación final: siete suites aprobadas, N64 202 casos / 62774 comprobaciones
+> por modo; runner y frontend Release reconstruidos, estado MK64 a 120 idéntico.
+>
 > **Última revisión (2026-11-12): precodificación del combinador descartada.**
 > Precargar selectores, colores, clave y K4/K5 al cambiar órdenes del RDP fue
 > correcto (seis imágenes y estados completos idénticos), pero empeoró CPU en
@@ -15,9 +26,9 @@ _Última actualización: 2026-11-12_
 > con el core restaurado: N64 202 casos / 62774 comprobaciones por modo. Runner y
 > frontend Release reconstruidos; estado a 120 idéntico a la referencia. Informe:
 > `docs/performance/2026-11-12-n64-combiner-predecode.md`.
-> **Siguiente área medible:** escritura de píxeles opacos (~8,23 % de muestras
-> exclusivas) y después muestreo de textura (~5,62 %). Mantener el mismo método
-> de parejas y hashes completos; no repetir esta caché sin evidencia nueva.
+> **Perfil previo:** escritura de píxeles opacos ~8,23 % de muestras exclusivas,
+> muestreo de textura ~5,62 %. Mantener el mismo método de parejas y hashes
+> completos; no repetir esta caché sin evidencia nueva.
 >
 > **Última revisión (2026-11-12): dos experimentos del combinador descartados.**
 > Tabla de entradas: CPU favorable 4/6 parejas, mediana de reducción 0,94 %.
@@ -533,3 +544,16 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   coincide con el baseline que obtuvo 2984/3721. Informe
   `docs/performance/2026-11-12-n64-combiner-predecode.md`; siguiente foco:
   escritura de píxeles opacos, luego muestreo de textura.
+- 2026-11-13 — Cerrada la continuación iniciada el 12: probado recíproco exacto en la división final del
+  mezclador (denominadores 1..62; numeradores posibles comprobados exhaustivamente).
+  CPU por pareja -3,86 / -3,58 / +0,96 % de reducción: retirado. Probado compartir
+  parámetros de lectura entre taps de una textura filtrada; CPU +11,20 / -1,08 /
+  -1,29 %, con una primera referencia atípicamente lenta: retirado. Ambos
+  candidatos pasaron las siete suites Debug y las doce imágenes y estados
+  completos de MK64 coincidieron. Core de producción restaurado al de `70e5e64`.
+  Verificación final con core restaurado: siete suites, N64 202 / 62774 por modo;
+  runner/frontend Release reconstruidos y estado a 120 idéntico a la referencia.
+  Systemtest no repetido: core de producción sin cambios desde el baseline
+  verificado (2984/3721).
+  Informe `docs/performance/2026-11-12-n64-pixel-texture.md`. Próximo paso:
+  instrumentar distribución de modos/ramas del RDP antes de otra optimización.
