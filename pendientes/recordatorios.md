@@ -6,6 +6,19 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-12_
 
+> **Última revisión (2026-11-12): precodificación del combinador descartada.**
+> Precargar selectores, colores, clave y K4/K5 al cambiar órdenes del RDP fue
+> correcto (seis imágenes y estados completos idénticos), pero empeoró CPU en
+> dos de tres parejas: -4,50 %, +0,27 %, -2,15 % de reducción; mediana -2,15 %.
+> Se restauró el código de producción de `70e5e64`. Quedan pruebas de cambios
+> sucesivos de selectores, colores, clave, conversión y LOD. Siete suites pasan
+> con el core restaurado: N64 202 casos / 62774 comprobaciones por modo. Runner y
+> frontend Release reconstruidos; estado a 120 idéntico a la referencia. Informe:
+> `docs/performance/2026-11-12-n64-combiner-predecode.md`.
+> **Siguiente área medible:** escritura de píxeles opacos (~8,23 % de muestras
+> exclusivas) y después muestreo de textura (~5,62 %). Mantener el mismo método
+> de parejas y hashes completos; no repetir esta caché sin evidencia nueva.
+>
 > **Última revisión (2026-11-12): dos experimentos del combinador descartados.**
 > Tabla de entradas: CPU favorable 4/6 parejas, mediana de reducción 0,94 %.
 > Productos nulos: 4/6, mediana 0,86 %, con regresiones hasta 7,32 %. Ambos
@@ -27,10 +40,7 @@ _Última actualización: 2026-11-12_
 > Informe: `docs/performance/2026-11-12-n64-race.md`; reproducción:
 > `tools/n64_runner/README.md` y `benchmark-race.ps1`.
 >
-> **Siguiente experimento:** predecodificar selectores/colores uniformes al cambiar
-> las órdenes del RDP, en vez de extraerlos por píxel. Cubrir actualización de
-> estado, reset y restauración antes de dibujar. También siguen pendientes la
-> escritura de píxeles y texturas del RDP. En el
+> **Siguiente experimento:** escritura de píxeles y texturas del RDP. En el
 > perfil posterior de carrera: RDP ~35,7 %, RSP ~29,4 %, CPU ~16,5 %; mapas y
 > `RtlAllocateHeap` ya no aparecen. Son muestras exclusivas aproximadas, no tiempos
 > inclusivos ni prueba de una futura ganancia. Medir cada cambio en parejas, con
@@ -511,3 +521,15 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   sigue siendo el de `70e5e64` (2984/3721). Informe y datos locales documentados
   en `docs/performance/2026-11-12-n64-combiner.md`. Siguiente hipótesis: decodificar
   parámetros uniformes por cambio de estado, con pruebas de invalidación/restore.
+- 2026-11-12 — Continuación: precodificación de selectores y uniformes del
+  combinador implementada experimentalmente, con reconstrucción al recibir
+  órdenes y al cargar estado. Seis procesos fríos de MK64 (1500–1900) conservaron
+  exactamente imágenes y estados completos; CPU por pareja -4,50 %, +0,27 % y
+  -2,15 % de reducción, mediana -2,15 %. Se retiró la caché de producción; el
+  renderizador vuelve al de `70e5e64`. Quedan dos pruebas nuevas de cambios
+  sucesivos de selectores, colores, clave, conversión y LOD. Las siete suites
+  pasan con el core restaurado: N64 202 / 62774 por modo. Runner y frontend
+  Release reconstruidos; estado a 120 idéntico a la referencia. No se repitió systemtest porque el core final
+  coincide con el baseline que obtuvo 2984/3721. Informe
+  `docs/performance/2026-11-12-n64-combiner-predecode.md`; siguiente foco:
+  escritura de píxeles opacos, luego muestreo de textura.

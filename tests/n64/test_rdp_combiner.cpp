@@ -28,6 +28,8 @@ public:
         return combine(texel0, texel1, shade, 85, &next);
     }
     [[nodiscard]] std::uint32_t noise_state() const { return noise_state_; }
+    void command(std::uint64_t word) { execute(word, {}); }
+    [[nodiscard]] Rgba pixel() const { return combine(texel0, texel1, shade, 85, &next); }
 };
 constexpr Combiner::Selectors zero{15, 15, 31, 7, 7, 7, 7, 7};
 constexpr unsigned scaled(unsigned value) { return (255 * value + 128) >> 8; }
@@ -114,4 +116,45 @@ TEST_CASE("RDP zero combiner products preserve D and advance noise in both cycle
         selectors[2] = 4; selectors[3] = selectors[7] = 3;
         CHECK(combiner.run(selectors, two) == Combiner::primitive);
     }
+}
+
+TEST_CASE("RDP combiner uses successive color and combine commands immediately") {
+    Combiner combiner;
+    auto selectors = zero;
+    selectors[3] = selectors[7] = 5;  // ENV
+    CHECK(combiner.run(selectors) == Combiner::environment);
+    combiner.command(0x3B00000010203040ULL);
+    const Combiner::Rgba new_environment{16, 32, 48, 64};
+    CHECK(combiner.pixel() == new_environment);
+
+    selectors[3] = selectors[7] = 3;  // PRIMITIVE
+    CHECK(combiner.run(selectors) == Combiner::primitive);
+    combiner.command(0x3A00000050607080ULL);
+    const Combiner::Rgba new_primitive{80, 96, 112, 128};
+    CHECK(combiner.pixel() == new_primitive);
+
+    // Switching the selector while keeping the colors must immediately change the result.
+    combiner.command(0x3C00000000000000ULL);
+    const auto changed = combiner.pixel();
+    CHECK(changed[0] == 0);
+    CHECK(changed[3] == 0);  // The previous PRIMITIVE D selector no longer applies.
+}
+
+TEST_CASE("RDP combiner uses updated key, conversion and primitive LOD uniforms") {
+    Combiner combiner;
+    auto selectors = zero;
+    selectors[0] = 6; selectors[1] = 6; selectors[2] = 13;  // (ONE - KEY_CENTER) * LOD
+    CHECK(combiner.run(selectors)[0] == ((255 - 7) * 85 + 128) >> 8);
+    combiner.command(0x2B00000000006411ULL);  // R center 100
+    CHECK(combiner.pixel()[0] == ((255 - 100) * 85 + 128) >> 8);
+
+    selectors[1] = 7; selectors[2] = 15;  // (ONE - K4) * K5
+    CHECK(combiner.run(selectors)[0] == ((255 - 51) * 113 + 128) >> 8);
+    combiner.command(0x2C00000000000080ULL);  // K4=0, K5=128
+    CHECK(combiner.pixel()[0] == 128);
+
+    selectors[1] = 8; selectors[2] = 14;  // ONE * primitive LOD fraction
+    CHECK(combiner.run(selectors)[0] == ((255 * 27 + 128) >> 8));
+    combiner.command(0x3A000080C1C7D3DFULL);  // primitive LOD fraction 128
+    CHECK(combiner.pixel()[0] == 128);
 }
