@@ -460,8 +460,7 @@ void RdpRasterizer::fill_span(unsigned y, unsigned left, unsigned right, std::sp
     // Fills clear the hidden bits they cover. Hardware copies each halfword's low bit into them;
     // only depth reads use them here, and depth clears (0xFFFC) have that bit clear.
     if (first < end) {
-        hidden_.erase(hidden_.lower_bound(static_cast<std::uint32_t>(first >> 1)),
-                      hidden_.lower_bound(static_cast<std::uint32_t>((end + 1) >> 1)));
+        hidden_.clear(first >> 1, (end + 1) >> 1);
     }
 }
 
@@ -707,14 +706,11 @@ bool RdpRasterizer::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned
 }
 
 unsigned RdpRasterizer::hidden_bits(std::size_t address) const {
-    const auto found = hidden_.find(static_cast<std::uint32_t>(address >> 1));
-    return found == hidden_.end() ? 0 : found->second;
+    return hidden_.read(address >> 1);
 }
 
 void RdpRasterizer::set_hidden_bits(std::size_t address, unsigned bits) const {
-    const auto key = static_cast<std::uint32_t>(address >> 1);
-    if (bits & 3) hidden_[key] = static_cast<std::uint8_t>(bits & 3);
-    else hidden_.erase(key);
+    hidden_.write(address >> 1, bits);
 }
 
 void RdpRasterizer::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const {

@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstdint>
-#include <map>
 #include <optional>
 #include <span>
 #include <memory>
@@ -67,20 +66,7 @@ public:
         if (version >= 10) ar(key_gb_), ar(key_r_), ar(noise_state_), ar(convert_), ar(prim_lod_);
         else key_gb_ = 0, key_r_ = 0, noise_state_ = 1, convert_ = 0, prim_lod_ = 0;
         if (version >= 11) {
-            auto count = static_cast<std::uint32_t>(hidden_.size());
-            ar(count);
-            if constexpr (Ar::kLoading) {
-                hidden_.clear();
-                for (std::uint32_t i = 0; i < count; ++i) {
-                    std::uint32_t halfword = 0;
-                    std::uint8_t bits = 0;
-                    ar(halfword), ar(bits);
-                    if (bits > 3) ar.fail();
-                    else if (bits != 0) hidden_[halfword] = bits;
-                }
-            } else {
-                for (auto [halfword, bits] : hidden_) ar(halfword), ar(bits);
-            }
+            hidden_.serialize(ar);
         } else {
             hidden_.clear();
         }

@@ -16,6 +16,7 @@
 // --rdp-threaded / --rdp-sync selects host execution without changing emulated timing.
 // --state-check [frames] compares a cross-mode save/load continuation for 120 frames.
 #include <cstdint>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include "n64/n64.hpp"
+#include "benchmark.hpp"
 
 namespace {
 
@@ -150,12 +152,24 @@ int main(int raw_argc, char* raw_argv[]) {
     std::vector<std::uint8_t> pif;
     auto rdp_mode = ezy::n64::RdpMode::Synchronous;
     auto rsp_mode = ezy::n64::RspMode::Interpreter;
+    int time_from = 0;
+    const char* profile_path = nullptr;
+    const char* final_state_path = nullptr;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--rdp-threaded") == 0) rdp_mode = ezy::n64::RdpMode::Threaded;
         else if (std::strcmp(raw_argv[i], "--rdp-sync") == 0) rdp_mode = ezy::n64::RdpMode::Synchronous;
         else if (std::strcmp(raw_argv[i], "--rsp-jit") == 0) rsp_mode = ezy::n64::RspMode::Jit;
         else if (std::strcmp(raw_argv[i], "--rsp-interpreter") == 0) rsp_mode = ezy::n64::RspMode::Interpreter;
+        else if (std::strcmp(raw_argv[i], "--time-from") == 0 && i + 1 < raw_argc) {
+            const std::string value = raw_argv[++i];
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), time_from);
+            if (error != std::errc{} || end != value.data() + value.size() || time_from < 0) {
+                std::cerr << "--time-from requires a nonnegative field index\n"; return 2;
+            }
+        }
+        else if (std::strcmp(raw_argv[i], "--profile") == 0 && i + 1 < raw_argc) profile_path = raw_argv[++i];
+        else if (std::strcmp(raw_argv[i], "--dump-final-state") == 0 && i + 1 < raw_argc) final_state_path = raw_argv[++i];
         else args.push_back(raw_argv[i]);
     }
     const int argc = static_cast<int>(args.size());
@@ -165,6 +179,8 @@ int main(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --isviewer [seconds]\n"
                      "       ezy_n64_runner <rom> --state-check [frames]\n"
                      "       ezy_n64_runner <rom> --dump-state <out.bin> [frames]\n"
+                     "       ezy_n64_runner <rom> --benchmark <out.bmp> <end> --time-from <first>\n"
+                     "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>\n"
                      "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter\n";
         return 2;
     }
@@ -178,6 +194,32 @@ int main(int raw_argc, char* raw_argv[]) {
     std::cout << "RDP: " << (n64->bus().rdp_threaded() ? "threaded" : "synchronous") << '\n';
     std::cout << "RSP: " << (n64->bus().rsp().jit_active() ? "JIT available" : "interpreter") << '\n';
     const std::string mode = args[2];
+    if (mode != "--benchmark" && (time_from != 0 || profile_path || final_state_path)) {
+        std::cerr << "--time-from, --profile and --dump-final-state require --benchmark\n"; return 2;
+    }
+    if (mode == "--benchmark" && argc == 5) {
+        int end_frame = 0;
+        const std::string value = args[4];
+        const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), end_frame);
+        if (error != std::errc{} || end != value.data() + value.size() || end_frame <= time_from) {
+            std::cerr << "Benchmark end must be greater than --time-from\n"; return 2;
+        }
+        if (!benchmark_frames(*n64, time_from, end_frame, profile_path)) return 2;
+        const auto bmp = encode_bmp(n64->image());
+        std::ofstream image(args[3], std::ios::binary);
+        image.write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
+        image.close();
+        if (!image) return 2;
+        if (final_state_path) {
+            const auto state = n64->save_state();
+            std::ofstream file(final_state_path, std::ios::binary);
+            file.write(reinterpret_cast<const char*>(state.data()), static_cast<std::streamsize>(state.size()));
+            file.close();
+            if (!file) return 2;
+        }
+        print_rdp_stats(*n64);
+        return 0;
+    }
     if (mode == "--screenshot" && argc >= 4) {
         const int frames = argc > 4 ? std::atoi(args[4]) : 120;
         for (int i = 0; i < frames; ++i) n64->run_frame();

@@ -6,41 +6,37 @@ Responder siempre en español; código, commits y PRs en inglés.
 
 _Última actualización: 2026-11-12_
 
-> **Retomado el 2026-11-12 en la otra PC, rama `codex/n64-rsp-jit`.**
-> VMADN/AVX2 ya pasó la suite completa (7/7; 194 casos / 69112 comprobaciones por
-> combinación N64), los estados completos de MK64 a 120/300/600 campos y doce
-> imágenes exactas en ejecuciones alternadas. No demostró mejora de rendimiento:
-> mediana CPU +0,42 % intérprete / +1,86 % JIT. `EZY_N64_VECTOR_AVX2` queda OFF
-> por defecto, disponible para experimentos. No ampliar a VMADM/VMADH sin medir
-> primero un kernel mejor. Informe: `docs/performance/2026-11-12-vmadn-validation.md`.
+> **Último avance (2026-11-12), rama `codex/n64-rsp-jit`: carrera de MK64 y RDP.**
+> Medición real del tramo 1500–1900 con `--benchmark` (arranque excluido): el JIT
+> no gana de forma consistente. El perfil señaló el RDP y su mapa de bits DZ.
+> Se reemplazó por acceso directo de 4 MiB, manteniendo el formato sparse v11.
+> Tres parejas alternadas mejoran CPU en 13,1–15,2 % (mediana 13,61 %); velocidad
+> mediana **22,91 → 26,53 campos/s**, con imágenes y estados completos idénticos.
+> Suite completa 7/7; cada combinación N64 pasa 197 casos / 62488 comprobaciones.
+> Continuidad cruzada intérprete/JIT y RDP síncrono/en hilo pasa a 1900+120 campos.
+> Informe: `docs/performance/2026-11-12-n64-race.md`; reproducción:
+> `tools/n64_runner/README.md` y `benchmark-race.ps1`.
 >
-> El checkpoint WIP `00ca4e6` y los errores de recursos de la PC anterior están
-> descritos en `docs/performance/2026-11-11-vmadn-handoff.md`. En esta PC compilar
-> de forma secuencial también funcionó: una sola compilación o prueba pesada
-> a la vez, sin Debug/Release en paralelo. Las referencias escalares de `build/`
-> se regeneraron aquí; no comparar tiempos entre PCs.
+> **Siguiente foco:** combinador, escritura de píxeles y texturas del RDP. En el
+> perfil posterior de carrera: RDP ~35,7 %, RSP ~29,4 %, CPU ~16,5 %; mapas y
+> `RtlAllocateHeap` ya no aparecen. Son muestras exclusivas aproximadas, no tiempos
+> inclusivos ni prueba de una futura ganancia. Medir cada cambio en parejas, con
+> intérprete y RDP síncrono, manteniendo la misma imagen y estado. No comparar
+> tiempos entre lotes/PCs ni usar el tiempo de una ejecución perfilada como benchmark.
 >
-> **Contexto del siguiente trabajo:** VMADN/VMADH/VMADM suman 15.617.211 instrucciones en
-> el histograma de 300 campos de MK64. VMADN AVX2 ya fue evaluado sin ganancia.
-> La frecuencia vectorial ya se midió y el
-> primer grupo está implementado: transferencias LBV/LSV/LLV/LDV y stores nativos
-> con accesos agrupados. CPU favorable en 5/6 parejas, reducción mediana emparejada
-> 8,77 % frente al JIT anterior. Tiempo real muy variable; no comparar esos segundos
-> entre lotes. Informe: `docs/performance/2026-11-11-rsp-vector-memory.md`.
-> El perfil previo mostraba RSP ~42 % de muestras; RDP ~25–28 %.
-> Omitir entradas JIT para opcodes no soportados se probó y retiró: 12 ejecuciones,
-> CPU favorable solo en 3/6 parejas; no hay mejora consistente. Informe en
+> **Experimentos ya evaluados:** VMADN/AVX2 correcto pero sin ganancia (CPU mediana
+> +0,42 % intérprete / +1,86 % JIT); queda OFF. No ampliar a VMADM/VMADH sin medir
+> primero un kernel mejor. Informe `docs/performance/2026-11-12-vmadn-validation.md`.
+> Omitir entradas JIT no soportadas también se descartó, sin mejora consistente:
 > `docs/performance/2026-11-11-rsp-execution.md`. No repetir ese ajuste.
-> La caché de traducciones idénticas ya está implementada en `codex/n64-rsp-jit`:
-> 191.691 → 1.316 compilaciones por 300 campos de MK64, con 190.375 reutilizaciones.
-> Sigue experimental: la mejora vectorial compara versiones JIT, no el intérprete.
-> La ROM histórica systemtest está disponible en esta PC y ya terminó con JIT/AVX2:
-> conserva 2984/3721 (737 fallos conocidos). Sigue faltando una ganancia de rendimiento
-> consistente frente al intérprete; no activar JIT por defecto ni fusionar a main.
-> Fallo de memoria reportado corregido y cubierto por regresión. Mantener intérprete
-> y RDP síncrono predeterminados. Diseño/plan JIT documentan pruebas y límites.
-> CPU/RSP optimizados en `main` (PR #15). El RDP en hilo está implementado y validado
-> en `codex/n64-threaded-rdp`, pero quedó experimental: resultó más lento. La rama es local.
+> La caché de traducciones y las transferencias vectoriales nativas ya están hechas;
+> detalles en `docs/performance/2026-11-11-rsp-vector-memory.md`.
+>
+> Mantener intérprete y RDP síncrono predeterminados; JIT y RDP en hilo siguen
+> experimentales. No fusionar a main sin demostrar una ganancia consistente.
+> La ROM histórica systemtest está en esta PC y la nueva ejecución con JIT/AVX2=OFF
+> conserva 2984/3721 (737 fallos conocidos), sin regresiones tras el cambio del RDP.
+> Una sola compilación o prueba pesada a la vez, sin Debug/Release en paralelo.
 
 ## Estado actual
 
@@ -471,3 +467,19 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Configuración local restaurada a AVX2=OFF con frontend habilitado; runner,
   benchmark y ezyemu Release recompilados. Prueba final: kernel escalar y captura
   de MK64 exacta a 300 campos. Los ejecutables de ambas variantes siguen en build/.
+- 2026-11-12 — Medición en carrera de MK64 (1500–1900) con nueva ventana del runner,
+  CPU/tiempo real y script de parejas alternadas. JIT sin ventaja consistente:
+  medianas 21,84 campos/s intérprete / 21,13 JIT en el primer lote. Perfilador
+  opcional por muestreo Windows x64, ejecutado aparte del benchmark: RDP ~32 %,
+  mapa DZ/árbol ~6,7 % y `RtlAllocateHeap` ~2,1 %. Bits DZ ahora en arreglo directo
+  de 4 MiB, con contador y formato sparse v11 idéntico. Las tres parejas de
+  comparación mejoran CPU en 15,25 / 13,61 / 13,06 %; medianas 22,91 → 26,53
+  campos/s (+15,77 % de velocidad en esa escena). Imágenes y estados completos
+  exactos a 1900 en todos los procesos y perfiles. Suite completa 7/7, N64
+  197 casos / 62488 comprobaciones por combinación; referencias sparse antiguas,
+  rangos, límites y estados malformados cubiertos. Continuidad cruzada a
+  1900+120 pasa. Systemtest con JIT y AVX2=OFF termina y conserva 2984/3721.
+  Perfil posterior sin muestras de mapa/árbol ni `RtlAllocateHeap`; siguiente
+  foco medible: combinador, escritura de píxeles y texturas del RDP. Runner y
+  frontend Release recompilados. Informe `docs/performance/2026-11-12-n64-race.md`;
+  herramientas en `tools/n64_runner/README.md`. Valores predeterminados sin cambios.

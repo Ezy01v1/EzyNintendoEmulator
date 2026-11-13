@@ -2,7 +2,7 @@
 
 #include <array>
 #include <cstdint>
-#include <map>
+#include "n64/rdp_hidden_bits.hpp"
 #include <span>
 #include "n64/rdp_worker.hpp"
 
@@ -87,9 +87,8 @@ protected:
     std::uint64_t convert_ = 0;   // Set Convert: K0..K5, 9 bits each
     std::uint32_t prim_lod_ = 0;  // Set Primitive Color: min level and LOD fraction
     mutable std::uint32_t noise_state_ = 1;
-    // RDRAM hidden bits (two per halfword), kept sparse: only nonzero entries, keyed by
-    // halfword index. Only depth writes set them; fills clear them.
-    mutable std::map<std::uint32_t, std::uint8_t> hidden_;  // combiner noise generator, advanced per pixel
+    // Only depth writes set the hidden bits; fills clear them.
+    mutable RdpHiddenBits hidden_;
     SolidState solid_;
     TextureState texture_;
 };
