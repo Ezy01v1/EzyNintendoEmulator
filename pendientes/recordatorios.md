@@ -4,7 +4,75 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-13_
+_Última actualización: 2026-11-15_
+
+> **Perfil actualizado y SHADE (2026-11-15): nuevo atajo descartado.**
+> Con rectángulos constantes ya activos: 8258 muestras, 0 errores de captura;
+> combinador y ecuación ~11,02 % de muestras. La atribución por triángulo revela
+> el mismo combinador SHADE en 800 triángulos/15,36 M de píxeles, pero la mitad
+> tienen sombreado variable. Se probó devolver SHADE con saturación de 9 bits y
+> avance de ruido preservado; excluidos chroma key y dos ciclos.
+> Seis parejas: favorable 3/6, mediana CPU +0,86 %, peor regresión 13,33 %;
+> primer lote +2,74 %, complementario -2,30 %. No hay ganancia repetible:
+> atajo retirado, mejora de rectángulos **conservada**. Doce imágenes y estados
+> completos de carrera idénticos. Quedan las pruebas (N64 206/65381 por modo),
+> el perfil y los contadores opcionales de atribución por opcode/gradientes.
+> Informe: `docs/performance/2026-11-15-n64-shade-only.md`.
+> Próximo paso: mejorar controles de medición (evaluar parejas fijadas al mismo
+> núcleo) antes de repetir microoptimizaciones con ganancias pequeñas y variables.
+> Cierre: contadores OFF; siete suites aprobadas con combinador restaurado;
+> runner/frontend Release reconstruidos y arranque a 120 con imagen/estado idénticos.
+
+> **Mejora conservada (2026-11-15): rectángulos planos de color constante.**
+> La medición conjunta identifica 200 rectángulos con 15.248.200 píxeles sin
+> lectura de framebuffer/profundidad ni dither. Se evalúa el primer píxel con
+> el escritor original y se replica su resultado cuando bordes enteros y modos
+> garantizan que todos serán idénticos. Alfa aleatorio, dither, profundidad,
+> lectura de memoria y bordes fraccionarios conservan la ruta general.
+> Seis parejas sin contadores: mejora CPU 5/6, mediana **5,28 %**; medianas de
+> lote +4,42 % y +6,15 %, complementario 3/3 favorable. Hay una regresión de
+> 3,63 % y ruido en el primer lote; no presentar el mejor +17,14 % como típico.
+> Doce imágenes y doce estados completos de carrera idénticos. Contadores
+> opcionales ampliados a modos conjuntos, primitiva, bordes y píxeles replicados.
+> Nuevas pruebas: N64 204 casos / 64330 comprobaciones por modo; siete suites
+> pasan. Intérprete y RDP síncrono siguen predeterminados. Informe:
+> `docs/performance/2026-11-15-n64-constant-rectangle.md`.
+> Siguiente paso: actualizar el perfil con esta mejora antes de elegir otro
+> objetivo; no extrapolar frecuencias ni porcentajes de lotes anteriores.
+> Cierre: contadores OFF; runner/frontend Release reconstruidos; siete suites
+> pasan. Systemtest conserva 2984/3721 (737 fallos conocidos) y continuación
+> cruzada intérprete/síncrono → JIT/hilo a 1900+120 aprobada, estado e imagen iguales.
+
+> **Especialización del blender (2026-11-15): dos variantes descartadas.**
+> Despacho por primitiva de un ciclo/RGBA5551/P=pixel: llamada indirecta por
+> píxel empeora las tres parejas, mediana CPU -2,49 %. Variante de llamadas
+> directas mediante plantillas de los bucles: seis parejas en dos órdenes,
+> mejora 3/6, mediana +0,45 %, regresión máxima 5,65 %; no confirma ganancia.
+> Las 18 imágenes y los 18 estados completos de carrera son idénticos.
+> Ambas variantes pasan las siete suites (N64 202/62774 por modo), pero se
+> retiraron las modificaciones de producción. Intérprete/RDP síncrono y
+> contadores OFF siguen como antes. Informe:
+> `docs/performance/2026-11-15-n64-blender-dispatch.md`.
+> Próximo paso: medir modos conjuntos y tipo de primitiva (rectángulos planos
+> incluidos) para buscar trabajo aritmético/de memoria evitable; no repetir
+> estas variantes de despacho sin evidencia nueva.
+> Cierre: Debug reconstruido y siete suites aprobadas con la ruta restaurada;
+> runner/frontend Release reconstruidos, imagen/estado a 120 idénticos.
+
+> **Medición RDP (2026-11-14): frecuencias reales de la carrera MK64.**
+> Contadores opcionales `EZY_N64_RDP_COUNTERS` (OFF por defecto): campos
+> 1500–1900, intérprete y RDP síncrono. 50.536.845 intentos de píxel, todos de
+> un ciclo/RGBA5551; 19.810.425 muestras de textura, todas filtradas (88,72 %
+> RGBA16, 11,28 % CI8). Tras rechazos, force blend 64,50 % y bypass 34,61 %;
+> la entrada P final siempre es pixel. Imagen y estado completos idénticos a
+> la referencia. No hay nueva optimización ni ganancia de velocidad afirmada.
+> Próxima hipótesis: despacho de una ruta común del blender de un ciclo desde
+> la primitiva, comprobando código generado y parejas sin contadores. No repetir
+> las cachés del combinador ni los experimentos ya descartados.
+> El runner rechaza medir contadores con RDP en hilo; el script de parejas
+> rechaza sus tiempos. Informe: `docs/performance/2026-11-14-n64-rdp-frequency.md`.
+> Cierre: contadores OFF, Debug y siete suites aprobadas (N64 202/62774 por modo),
+> runner/frontend Release reconstruidos; imagen y estado a 120 campos idénticos.
 
 > **Última revisión (2026-11-12): dos candidatos RDP adicionales descartados.**
 > Sustituir las divisiones RGB del mezclador por recíprocos exactos empeoró la
@@ -557,3 +625,27 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   verificado (2984/3721).
   Informe `docs/performance/2026-11-12-n64-pixel-texture.md`. Próximo paso:
   instrumentar distribución de modos/ramas del RDP antes de otra optimización.
+- 2026-11-14 — Añadidos contadores RDP opcionales, OFF por defecto; medidos modos,
+  textura y blender en la carrera MK64 1500–1900 con imagen/estado completos
+  idénticos. Informe `docs/performance/2026-11-14-n64-rdp-frequency.md`.
+- 2026-11-15 — Descartadas dos variantes de despacho del blender por primitiva:
+  indirecta -2,49 % de reducción CPU; directa +0,45 %, solo 3/6 parejas favorables.
+  Dieciocho imágenes y estados idénticos. Informe
+  `docs/performance/2026-11-15-n64-blender-dispatch.md`.
+- 2026-11-15 — Medición conjunta: 200 rectángulos planos generan 15.248.200
+  píxeles de resultado constante. Conservada ruta que evalúa un píxel y replica
+  sus bytes con guardas de modos, bordes, campos y memoria. Seis parejas: 5/6
+  favorables, reducción CPU mediana 5,28 % (complementario 3/3, mediana 6,15 %).
+  Doce imágenes y estados completos idénticos. Nuevas pruebas de equivalencia
+  y fallback: siete suites, N64 204 / 64330 por modo. Informe
+  `docs/performance/2026-11-15-n64-constant-rectangle.md`.
+  Cierre validado: contadores OFF, ejecutables Release reconstruidos; systemtest
+  2984/3721 sin regresiones y continuación cruzada de estado a 1900+120 aprobada.
+- 2026-11-15 — Actualizado perfil tras rectángulos constantes: 8258 muestras y
+  0 errores; combinador/ecuación ~11,02 %. Medida atribución por opcode, texels y
+  gradientes. Descartado atajo de fórmula SHADE: 3/6 parejas favorables, mediana
+  CPU +0,86 %, regresiones hasta 13,33 %. Doce imágenes/estados iguales. Se conserva
+  la mejora de rectángulos y se amplían pruebas de saturación, ruido y key:
+  N64 206/65381 por modo. Informe `docs/performance/2026-11-15-n64-shade-only.md`.
+  Cierre: contadores OFF, siete suites aprobadas con el combinador restaurado,
+  runner/frontend Release reconstruidos y comparación a 120 idéntica.

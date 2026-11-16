@@ -1,5 +1,6 @@
 #include "benchmark.hpp"
 #include "n64/n64.hpp"
+#include "n64/rdp_counters.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -137,6 +138,12 @@ private:
 
 bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profile_path) {
     if (first < 0 || first >= end) return false;
+#if EZY_N64_RDP_COUNTERS
+    if (n64.bus().rdp_threaded()) {
+        std::cerr << "RDP counters require --rdp-sync\n";
+        return false;
+    }
+#endif
     Sampler sampler;
     for (int frame = 0; frame < first; ++frame) n64.run_frame();
     n64.bus().drain_rdp();
@@ -145,17 +152,24 @@ bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profil
         return false;
     }
     const auto cpu_start = process_cpu_seconds();
+#if EZY_N64_RDP_COUNTERS
+    ezy::n64::rdp_counters::reset();
+#endif
     const auto started = std::chrono::steady_clock::now();
     for (int frame = first; frame < end; ++frame) n64.run_frame();
     n64.bus().drain_rdp();
     const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     const double cpu_end = process_cpu_seconds();
     sampler.stop();
+#if EZY_N64_RDP_COUNTERS
+    ezy::n64::rdp_counters::write(std::cout);
+#endif
     if (cpu_start < 0 || cpu_end < 0) { std::cerr << "Could not read process CPU time\n"; return false; }
     const double cpu = cpu_end - cpu_start;
     std::cout << std::setprecision(9) << "Benchmark: {\"first\":" << first << ",\"end\":" << end
               << ",\"fields\":" << end - first << ",\"wall_seconds\":" << wall
               << ",\"cpu_seconds\":" << cpu << ",\"fields_per_second\":" << (end - first) / wall
+              << ",\"rdp_counters\":" << (EZY_N64_RDP_COUNTERS ? "true" : "false")
               << ",\"profiled\":" << (profile_path ? "true" : "false") << "}\n";
     return !profile_path || sampler.write(profile_path);
 }

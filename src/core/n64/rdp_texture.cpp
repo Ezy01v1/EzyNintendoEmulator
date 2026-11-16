@@ -1,4 +1,5 @@
 #include "n64/rdp_rasterizer.hpp"
+#include "n64/rdp_counters.hpp"
 
 #include <algorithm>
 
@@ -167,6 +168,10 @@ std::uint16_t RdpRasterizer::read_texel(const Tile& tile, unsigned s, unsigned t
 }
 
 RdpRasterizer::Rgba RdpRasterizer::sample_texture_rgba(const Tile& tile, int s, int t) const {
+    EZY_RDP_COUNT(texture_filter, (solid_.modes >> 45) & 1);
+    EZY_RDP_COUNT(texture_palette, (solid_.modes >> 46) & 1);
+    EZY_RDP_COUNT(texture_format, (tile.descriptor >> 53) & 7);
+    EZY_RDP_COUNT(texture_size, (tile.descriptor >> 51) & 3);
     const unsigned sampler_s = static_cast<unsigned>(tile.descriptor);
     const unsigned sampler_t = static_cast<unsigned>(tile.descriptor >> 10);
     const int s0 = wrap_texture_coord(s >> 5, sampler_s);
@@ -229,6 +234,7 @@ RdpRasterizer::Rgba RdpRasterizer::sample_texel(const Tile& tile, int s, int t) 
 }
 
 void RdpRasterizer::draw_textured_rectangle(std::span<std::uint8_t> rdram) const {
+    EZY_RDP_PRIMITIVE(3);
     if (solid_.modes & kTexturePerspective) return;  // Rectangles do not supply W.
     const auto header = raster_command_[0], coefficients = raster_command_[1];
     const unsigned base_tile = static_cast<unsigned>(header >> 24) & 7;

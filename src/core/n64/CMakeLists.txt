@@ -2,6 +2,9 @@ add_library(ezy_n64 STATIC scheduler.cpp cartridge.cpp cpu/vr4300.cpp cpu/vr4300
 target_include_directories(ezy_n64 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(ezy_n64 PRIVATE ezy_warnings)
 
+option(EZY_N64_RDP_COUNTERS "Instrument RDP branch frequencies (invalidates benchmark timings)" OFF)
+target_compile_definitions(ezy_n64 PUBLIC EZY_N64_RDP_COUNTERS=$<BOOL:${EZY_N64_RDP_COUNTERS}>)
+
 target_sources(ezy_n64 PRIVATE rdp_worker.cpp rdp_commands.cpp rsp_jit.cpp)
 target_sources(ezy_n64 PRIVATE rsp_vector_simd.cpp)
 find_package(Threads REQUIRED)

@@ -41,7 +41,7 @@ for($racePair=0;$racePair -lt $Pairs;++$racePair){
         $raceMeasurements=@($raceLog | Where-Object {$_ -like 'Benchmark: *'})
         if($raceMeasurements.Count -ne 1){throw 'Missing or ambiguous benchmark result'}
         $raceMeasurement=$raceMeasurements[0].Substring(11) | ConvertFrom-Json
-        if($raceMeasurement.profiled -or $raceMeasurement.first -ne $First -or $raceMeasurement.end -ne $End -or
+        if($raceMeasurement.profiled -or $raceMeasurement.rdp_counters -or $raceMeasurement.first -ne $First -or $raceMeasurement.end -ne $End -or
            $raceMeasurement.fields -ne ($End-$First) -or $raceMeasurement.wall_seconds -le 0 -or
            $raceMeasurement.cpu_seconds -lt 0){throw 'Invalid measurement window or timers'}
         $raceRow=[pscustomobject]@{

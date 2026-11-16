@@ -30,6 +30,8 @@ public:
     [[nodiscard]] std::uint32_t noise_state() const { return noise_state_; }
     void command(std::uint64_t word) { execute(word, {}); }
     [[nodiscard]] Rgba pixel() const { return combine(texel0, texel1, shade, 85, &next); }
+    [[nodiscard]] Rgba shade_pixel(const Rgba& value) const { return combine(texel0, texel1, value, 85, &next); }
+    void change_unused_cycle() { solid_.combine ^= (15ULL << 52) | (31ULL << 47) | (7ULL << 15); }
 };
 constexpr Combiner::Selectors zero{15, 15, 31, 7, 7, 7, 7, 7};
 constexpr unsigned scaled(unsigned value) { return (255 * value + 128) >> 8; }
@@ -157,4 +159,45 @@ TEST_CASE("RDP combiner uses updated key, conversion and primitive LOD uniforms"
     CHECK(combiner.run(selectors)[0] == ((255 * 27 + 128) >> 8));
     combiner.command(0x3A000080C1C7D3DFULL);  // primitive LOD fraction 128
     CHECK(combiner.pixel()[0] == 128);
+}
+
+TEST_CASE("RDP shade-only combiner preserves nine-bit saturation and noise across changing pixels") {
+    Combiner combiner;
+    auto selectors = zero;
+    selectors[3] = selectors[7] = 4;
+    CHECK(combiner.run(selectors) == Combiner::shade);
+    auto expected_noise = combiner.noise_state();
+    const auto clamp = [](unsigned value) { return value < 256 ? value : ((value & 128) ? 0U : 255U); };
+    for (unsigned value = 0; value < 512; ++value) {
+        CAPTURE(value);
+        if ((value & 31) == 0) combiner.change_unused_cycle();
+        const Combiner::Rgba shade{value, (value * 3) & 511, (value * 5) & 511, (value * 7) & 511};
+        const Combiner::Rgba expected{clamp(shade[0]), clamp(shade[1]), clamp(shade[2]), clamp(shade[3])};
+        expected_noise = expected_noise * 1103515245U + 12345U;
+        CHECK(combiner.shade_pixel(shade) == expected);
+        CHECK(combiner.noise_state() == expected_noise);
+    }
+}
+
+TEST_CASE("RDP shade-only selectors retain key alpha and immediate selector changes") {
+    Combiner direct, reference;
+    auto selectors = zero;
+    selectors[3] = selectors[7] = 4;
+    auto equivalent = selectors;
+    // Equal COMBINED inputs also produce zero, through the general equation.
+    equivalent[0] = equivalent[1] = equivalent[4] = equivalent[5] = 0;
+    for (bool two : {false, true}) for (bool key : {false, true}) {
+        direct.run(selectors, two);
+        reference.run(equivalent, two);
+        const auto modes = 0x2F00000000000000ULL | (std::uint64_t{two} << 52) | (std::uint64_t{key} << 40);
+        direct.command(modes); reference.command(modes);
+        for (const auto& shade : {Combiner::Rgba{7,13,19,179}, Combiner::shade, Combiner::Rgba{0,255,128,0}}) {
+            CHECK(direct.shade_pixel(shade) == reference.shade_pixel(shade));
+            CHECK(direct.noise_state() == reference.noise_state());
+        }
+    }
+    selectors[3] = selectors[7] = 3; // switching both addends must leave the shade path immediately
+    CHECK(direct.run(selectors) == Combiner::primitive);
+    selectors[3] = selectors[7] = 4;
+    CHECK(direct.run(selectors) == Combiner::shade);
 }

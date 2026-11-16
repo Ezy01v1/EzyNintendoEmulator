@@ -61,3 +61,43 @@ API constraints: [GetThreadContext](https://learn.microsoft.com/en-us/windows/wi
 requires a suspended target thread;
 [SymFromAddr](https://learn.microsoft.com/en-us/windows/win32/api/dbghelp/nf-dbghelp-symfromaddr)
 and other DbgHelp calls require single-threaded access.
+
+## Optional RDP branch frequencies
+
+Configure `cmake --preset default -DEZY_N64_RDP_COUNTERS=ON`, then rebuild the
+Release runner through its preset. The benchmark command above prints
+`RdpCount,<metric>,<bin>,<count>` rows for the measured fields only, after draining
+warm-up work and resetting counters. Use `--rsp-interpreter --rdp-sync` and save
+the image and complete state for comparison with a preserved uninstrumented
+runner. Threaded benchmark mode is rejected because counters are thread-local.
+
+This is a diagnostic build: its JSON has `rdp_counters:true`, and
+`benchmark-race.ps1` rejects its timings. Counts measure frequencies, not CPU
+costs. They cover opaque pixel writes, tested depth modes and RGBA texture
+samples, rather than all RDP work. `image_read`, `force_blend` and final-cycle
+`blend_bypass` are Boolean bins after alpha/coverage rejection. The final blend
+source is pixel/memory/blend/fog (0/1/2/3); `pixel_exit` bins are attempts (0),
+alpha rejection (1), zero-coverage rejection (2), not disjoint outcomes.
+Texture format/size and cycle/size bins use the raw RDP encodings;
+`texture_palette` is other-modes bit 46 (palette type), not palette enable.
+
+`RdpJoint` rows additionally group primitive dispatches and generic pixel-writer
+events by primitive kind (1 flat rectangle, 2 triangle, 3 textured rectangle),
+cycle, pixel size and the complete decimal other-modes word. `Primitives` counts
+dispatch attempts, including empty/unsupported primitives; `Attempts` counts
+generic opaque-writer calls; `Survived` counts calls after bounds/alpha/coverage
+rejection; `FullCoverage` counts surviving calls whose effective coverage is 8.
+These counts do not measure time or constitute a full rasterization profile.
+Optimized constant rectangles have separate `constant_rectangle` bins: eligible
+primitives (0) and stamped pixel events (1). Their representative writer call
+also appears in generic counts; do not add the categories as unique pixel totals.
+`RdpBounds` groups clipped 10.2 flat-rectangle bounds passed to the constant-path
+eligibility check, including rectangles that fall back to generic rendering.
+`RdpTriangle` groups triangles that reach gradient setup after early validation
+and clipping by opcode, texel-usage mask, zero shade gradients, combine word and
+other modes. Zero shade gradients do not imply that texture samples or other
+inputs are constant.
+
+Restore `cmake --preset default -DEZY_N64_RDP_COUNTERS=OFF` and rebuild before
+collecting performance results or using the regular frontend. The default OFF
+build compiles out counters, storage and output entirely.

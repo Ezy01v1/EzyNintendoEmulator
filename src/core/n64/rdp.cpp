@@ -1,4 +1,5 @@
 #include "n64/rdp_rasterizer.hpp"
+#include "n64/rdp_counters.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -219,6 +220,7 @@ void RdpRasterizer::fill_rectangle(std::uint64_t word, std::span<std::uint8_t> r
 }
 
 void RdpRasterizer::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const {
+    EZY_RDP_PRIMITIVE(1);
     // In one- and two-cycle modes, Fill Rectangle goes through the combiner and blender like a
     // rectangle with no texture or shade, excluding its lower-right edge. Depth, if enabled,
     // can only come from the primitive depth.
@@ -235,6 +237,7 @@ void RdpRasterizer::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8
     const unsigned dz = highest_power_of_two(prim_depth_ & 0xFFFF);
     const auto covers_x = [left, right](unsigned sample) { return left <= sample && sample < right; };
     const Rgba color = combine(Rgba{}, Rgba{}, Rgba{});
+    if (try_constant_rectangle(left, top, right, bottom, color, rdram)) return;
     for (unsigned y = top >> 2; 4 * y < bottom; ++y) {
         if (!field_matches(y)) continue;
         for (unsigned x = left >> 2; 4 * x < right; ++x) {
@@ -252,7 +255,46 @@ void RdpRasterizer::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8
     }
 }
 
+bool RdpRasterizer::try_constant_rectangle(unsigned left, unsigned top, unsigned right, unsigned bottom,
+                                          const Rgba& color, std::span<std::uint8_t> rdram) const {
+    EZY_RDP_RECT_BOUNDS(left, top, right, bottom);
+    // Aligned bounds give every pixel coverage 8. Without framebuffer/depth reads,
+    // RGB dither or random alpha compare, the existing writer gives the same result
+    // everywhere. Evaluate it once, preserving all blend/alpha/coverage arithmetic.
+    if (((left | top | right | bottom) & 3) != 0 ||
+        (solid_.modes & ((1U << 4) | (1U << 5) | (1U << 6))) != 0 ||
+        ((solid_.modes >> 38) & 3) != 3 || (solid_.modes & 3) == 3) return false;
+    EZY_RDP_COUNT(constant_rectangle, 0);
+    const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
+    const std::size_t base = color_address_ & ~(bytes - 1);
+    std::array<std::uint8_t, 4> pattern{};
+    bool ready = false;
+    for (unsigned y = top >> 2; y < (bottom >> 2); ++y) {
+        if (!field_matches(y)) continue;
+        const auto address = base + (static_cast<std::size_t>(y) * color_width_ + (left >> 2)) * bytes;
+        if (address >= rdram.size()) continue;
+        const auto count = std::min<std::size_t>((right - left) >> 2, (rdram.size() - address) / bytes);
+        if (count == 0) continue;
+        if (!ready) {
+            if (!write_opaque_pixel(left >> 2, y, color, Rgba{}, 8, rdram)) return true;
+            std::copy_n(rdram.begin() + static_cast<std::ptrdiff_t>(address), bytes, pattern.begin());
+            ready = true;
+        }
+        EZY_RDP_ADD(constant_rectangle, 1, count);
+        for (std::size_t pixel = 0, at = address; pixel < count; ++pixel, at += bytes) {
+            rdram[at] = pattern[0];
+            rdram[at + 1] = pattern[1];
+            if (bytes == 4) {
+                rdram[at + 2] = pattern[2];
+                rdram[at + 3] = pattern[3];
+            }
+        }
+    }
+    return true;
+}
+
 void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
+    EZY_RDP_PRIMITIVE(2);
     const std::uint64_t header = raster_command_[0];
     const unsigned op = opcode(header);
     const bool textured = (op & 2) != 0, shaded = (op & 4) != 0;
@@ -317,6 +359,9 @@ void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
         }
     }
     TextureGradient z;
+    EZY_RDP_TRIANGLE(op, texels, std::all_of(shade.begin(), shade.end(), [](const auto& channel) {
+        return channel.dx == 0 && channel.de == 0 && channel.dy == 0;
+    }));
     const bool use_depth = !fill && (solid_.modes & ((1U << 4) | (1U << 5)));
     if (use_depth && (op & 1)) {
         const auto word = [this](unsigned i, unsigned shift) {
@@ -668,6 +713,7 @@ bool RdpRasterizer::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned
     const unsigned stored = (unsigned{rdram[address]} << 8) | rdram[address + 1];
     const std::uint32_t memory_z = decompress_depth(stored >> 2);
     const unsigned mode = static_cast<unsigned>(solid_.modes >> 10) & 3;
+    EZY_RDP_COUNT(depth_mode, mode);
     const bool in_front = z < memory_z;
     const bool max = memory_z == 0x3FFFF;
     // Transparent Z never uses DZ. Full opaque pixels also only compare Z, so avoid
@@ -727,6 +773,10 @@ void RdpRasterizer::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigne
 
 bool RdpRasterizer::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
                              std::span<std::uint8_t> rdram) const {
+    EZY_RDP_COUNT(pixel_cycle, cycle_type_);
+    EZY_RDP_COUNT(pixel_size, pixel_size_);
+    EZY_RDP_COUNT(pixel_exit, 0);
+    EZY_RDP_OBSERVE(false, coverage);
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t address = (color_address_ & ~(bytes - 1)) +
         (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
@@ -744,9 +794,12 @@ bool RdpRasterizer::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combi
     // With dither alpha the threshold is random instead of the blend color alpha.
     if (solid_.modes & 1) {
         const unsigned threshold = (solid_.modes & 2) ? next_noise() & 255 : solid_.blend & 255;
-        if (alpha < threshold) return false;
+        if (alpha < threshold) { EZY_RDP_COUNT(pixel_exit, 1); return false; }
     }
-    if (coverage == 0) return false;
+    if (coverage == 0) { EZY_RDP_COUNT(pixel_exit, 2); return false; }
+    EZY_RDP_COUNT(image_read, (solid_.modes >> 6) & 1);
+    EZY_RDP_COUNT(force_blend, (solid_.modes >> 14) & 1);
+    EZY_RDP_OBSERVE(true, coverage);
 
     // Memory color and coverage. Without image reads, memory coverage reads as full (7).
     // RGBA5551 keeps only the top coverage bit; the two hidden low bits are taken as set.
@@ -783,6 +836,10 @@ bool RdpRasterizer::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combi
             }
         };
         const auto first = input(p_shift);
+        if (final) {
+            EZY_RDP_COUNT(blend_bypass, !force_blend && overflow);
+            EZY_RDP_COUNT(final_blend_source, (solid_.modes >> p_shift) & 3);
+        }
         if (final && !force_blend && overflow) return first;
         const unsigned factor = [&] {
             switch ((solid_.modes >> a_shift) & 3) {
