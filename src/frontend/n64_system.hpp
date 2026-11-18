@@ -17,9 +17,11 @@ public:
     static constexpr int kCanvasHeight = 480;
     static constexpr int kAudioRate = 44100;
 
-    // nullptr if the file isn't an N64 ROM. Save states go next to the ROM (<rom>.ss1).
+    // nullptr if the file isn't an N64 ROM. Save states go next to the ROM (<rom>.ss1), and
+    // so does the cartridge's EEPROM (<rom>.eep), loaded at start and written when it changes.
     [[nodiscard]] static std::unique_ptr<N64System> create(std::span<const std::uint8_t> rom,
                                                            std::filesystem::path rom_path = {});
+    ~N64System() override { flush_eeprom(); }
 
     [[nodiscard]] std::string_view name() const override { return "Nintendo 64"; }
     [[nodiscard]] int screen_width() const override { return kCanvasWidth; }
@@ -50,6 +52,9 @@ private:
     void collect_audio();
     void save_state();
     void load_state();
+    [[nodiscard]] std::filesystem::path eeprom_path() const;
+    void load_eeprom();
+    void flush_eeprom();  // writes the .eep if the game wrote the EEPROM since the last write
 
     std::vector<std::uint8_t> rom_;
     std::unique_ptr<n64::N64> n64_;
@@ -62,6 +67,7 @@ private:
     std::int16_t pad_x_ = 0, pad_y_ = 0;  // left stick, SDL range
     std::vector<float> audio_;
     double resample_phase_ = 0;
+    int frames_since_flush_ = 0;
 };
 
 }  // namespace ezy::frontend

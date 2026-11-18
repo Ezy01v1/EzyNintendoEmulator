@@ -171,3 +171,28 @@ TEST_CASE("EEPROM blocks written are read back, and 4 Kbit has 64 blocks") {
     CHECK(pif.ram()[8] == 1);
     CHECK(pif.eeprom()[3 * 8 + 7] == 8);
 }
+
+TEST_CASE("EEPROM writes mark it dirty, and a .eep image of 512 bytes loads") {
+    Pif pif;
+    CHECK_FALSE(pif.eeprom_dirty());
+    // Reading does not dirty it.
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x04, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE});
+    pif.run_commands();
+    CHECK_FALSE(pif.eeprom_dirty());
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x0A, 0x01, 0x05, 0x01, 9, 9, 9, 9, 9, 9, 9, 9, 0xFF, 0xFE});
+    pif.run_commands();
+    CHECK(pif.eeprom_dirty());
+    pif.clear_eeprom_dirty();
+    CHECK_FALSE(pif.eeprom_dirty());
+
+    std::vector<std::uint8_t> image(512);
+    for (std::size_t i = 0; i < image.size(); ++i) image[i] = static_cast<std::uint8_t>(i);
+    CHECK_FALSE(pif.load_eeprom(std::span(image).first(511)));  // wrong size: unchanged
+    CHECK(pif.eeprom()[8] == 9);
+    REQUIRE(pif.load_eeprom(image));
+    CHECK_FALSE(pif.eeprom_dirty());
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x04, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE});
+    pif.run_commands();
+    CHECK(std::vector<std::uint8_t>(pif.ram().begin() + 8, pif.ram().begin() + 16) ==
+          std::vector<std::uint8_t>{16, 17, 18, 19, 20, 21, 22, 23});
+}

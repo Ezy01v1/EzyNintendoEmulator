@@ -18,6 +18,9 @@ namespace ezy::frontend {
 
 namespace {
 
+// How often the EEPROM is flushed to disk while running, if the game wrote it (~1 s).
+constexpr int kFlushIntervalFrames = 60;
+
 // Controller buttons (joybus read order): A B Z Start Up Down Left Right, -, -, L R,
 // C-Up C-Down C-Left C-Right.
 struct KeyBinding {
@@ -148,7 +151,33 @@ std::unique_ptr<n64::N64> create_n64(std::span<const std::uint8_t> rom) {
 std::unique_ptr<N64System> N64System::create(std::span<const std::uint8_t> rom, std::filesystem::path rom_path) {
     auto n64 = create_n64(rom);
     if (!n64) return nullptr;
-    return std::unique_ptr<N64System>(new N64System({rom.begin(), rom.end()}, std::move(n64), std::move(rom_path)));
+    std::unique_ptr<N64System> system(new N64System({rom.begin(), rom.end()}, std::move(n64), std::move(rom_path)));
+    system->load_eeprom();
+    return system;
+}
+
+std::filesystem::path N64System::eeprom_path() const {
+    return rom_path_.empty() ? std::filesystem::path{} : std::filesystem::path(rom_path_).replace_extension(".eep");
+}
+
+void N64System::load_eeprom() {
+    const std::filesystem::path path = eeprom_path();
+    if (path.empty()) return;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return;  // first run: no save yet
+    const std::vector<std::uint8_t> data(std::istreambuf_iterator<char>(file), {});
+    if (!n64_->bus().pif().load_eeprom(data)) {
+        std::cerr << "Warning: " << path.string() << " has " << data.size()
+                  << " bytes, not the 512 of a 4 Kbit EEPROM; ignoring it\n";
+    }
+}
+
+void N64System::flush_eeprom() {
+    frames_since_flush_ = 0;
+    n64::Pif& pif = n64_->bus().pif();
+    const std::filesystem::path path = eeprom_path();
+    if (path.empty() || !pif.eeprom_dirty()) return;
+    if (write_file_atomically(path, pif.eeprom())) pif.clear_eeprom_dirty();
 }
 
 double N64System::frame_seconds() const {
@@ -158,6 +187,7 @@ double N64System::frame_seconds() const {
 void N64System::run_frame() {
     n64_->run_frame();
     collect_audio();
+    if (++frames_since_flush_ >= kFlushIntervalFrames) flush_eeprom();
 }
 
 void N64System::collect_audio() {
@@ -178,7 +208,9 @@ void N64System::collect_audio() {
 }
 
 void N64System::reset() {
+    flush_eeprom();
     n64_ = create_n64(rom_);
+    load_eeprom();
     resample_phase_ = 0;
     update_controller();
 }

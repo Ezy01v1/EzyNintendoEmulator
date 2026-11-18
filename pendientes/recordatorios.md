@@ -746,3 +746,9 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   horizontales sueltas mientras gira el logo (triángulos casi degenerados, quizá el recorte), no es
   bit a bit (decisión del 9-nov), `G_LOAD_UCODE` no traduce el segmento, y que el usuario lo pruebe
   jugando antes de activarlo en `ezyemu`. También en esta rama: el salto del bucle de DMA de arriba.
+- 2026-11-18 (2) — EEPROM del N64 en disco: `ezyemu` carga `<rom>.eep` (512 bytes, mismo formato
+  crudo que otros emuladores) al abrir y al reiniciar, y lo escribe de forma atómica cada ~60 cuadros
+  si el juego escribió algún bloque, y al cerrar (`Pif::eeprom_dirty`, como los `.sav` del GBA).
+  Probado en `ezyemu` con una copia de MK64: la primera vez el juego inicializa su EEPROM y se crea el
+  `.eep`; la segunda lo encuentra válido y no lo reescribe. Los récords ya no se pierden al cerrar.
+  Prueba nueva en `test_pif.cpp`; siete suites aprobadas.

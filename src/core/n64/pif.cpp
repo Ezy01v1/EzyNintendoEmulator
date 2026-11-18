@@ -1,5 +1,6 @@
 #include "n64/pif.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace ezy::n64 {
@@ -75,10 +76,18 @@ void Pif::run_eeprom(std::uint8_t cmd, std::size_t data, std::size_t tx_len, std
     } else if (cmd == 0x05 && tx_len >= 10 && rx_len >= 1) {  // write a block
         const std::size_t block = (ram_[data + 1] % kBlocks) * 8;
         for (std::size_t k = 0; k < 8; ++k) eeprom_[block + k] = ram_[data + 2 + k];
+        eeprom_dirty_ = true;
         ram_[resp] = 0x00;  // not busy
     } else {
         rx_byte |= 0x80;
     }
+}
+
+bool Pif::load_eeprom(std::span<const std::uint8_t> data) {
+    if (data.size() != eeprom_.size()) return false;
+    std::copy(data.begin(), data.end(), eeprom_.begin());
+    eeprom_dirty_ = false;
+    return true;
 }
 
 void Pif::after_write() {

@@ -32,7 +32,13 @@ public:
     void before_read() { if (joybus_armed_) run_commands(); }
     // Port 0..3: A B Z Start Up Down Left Right, -, -, L R, C-Up C-Down C-Left C-Right.
     void set_buttons(int port, std::uint16_t buttons, std::int8_t x, std::int8_t y);
-    [[nodiscard]] std::span<std::uint8_t, 512> eeprom() { return eeprom_; }
+    // The 4 Kbit EEPROM, as a .eep file holds it (512 bytes in bus order).
+    [[nodiscard]] std::span<const std::uint8_t, 512> eeprom() const { return eeprom_; }
+    // Replaces the contents; false (and nothing changed) unless data is exactly 512 bytes.
+    bool load_eeprom(std::span<const std::uint8_t> data);
+    // Set by every block write the game makes, so the frontend knows to write the file.
+    [[nodiscard]] bool eeprom_dirty() const { return eeprom_dirty_; }
+    void clear_eeprom_dirty() { eeprom_dirty_ = false; }
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {
@@ -55,6 +61,7 @@ private:
         blank.fill(0xFF);
         return blank;
     }();
+    bool eeprom_dirty_ = false;  // host bookkeeping, not saved
 };
 
 }  // namespace ezy::n64
