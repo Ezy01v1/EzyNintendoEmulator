@@ -132,6 +132,8 @@ void Rdp::dispatch(const RdpPacket& packet, std::span<std::uint8_t> rdram) {
     }
 }
 
+unsigned Rdp::words_in_command(unsigned op) { return command_words(op & 63); }
+
 unsigned Rdp::buffered_draw_words(unsigned op) {
     switch (op) {
         case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E: case 0x0F:
@@ -211,7 +213,7 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
                std::span<const std::uint8_t, 0x1000> dmem, std::uint64_t when) {
     if ((status_ & (kFreeze | kFlush)) || current_ >= end_) return;
     update_counters(when);
-    if (words_to_skip_) {
+    if (words_to_skip_ && !trace_) {
         --words_to_skip_;
     } else {
         std::uint64_t word = 0;
@@ -223,34 +225,72 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
             if (!xbus) prepare_memory(static_cast<std::uint32_t>(address), 8, false);
             for (unsigned i = 0; i < 8; ++i) word = (word << 8) | source[address + i];
         }
-        const unsigned op = opcode(word);
-        if (draw_words_ != 0 || buffered_draw_words(op) != 0) {
-            draw_command_[draw_words_++] = word;
-            const unsigned draw_op = opcode(draw_command_[0]);
-            if (draw_words_ == buffered_draw_words(draw_op)) {
-                dispatch({draw_command_, draw_words_}, rdram);
-                draw_words_ = 0;
-            }
+        if (words_to_skip_) {  // only fetched to trace it
+            trace_->push_back(word);
+            --words_to_skip_;
         } else {
-            // Preserve packet framing for unsupported commands across END extensions.
-            words_to_skip_ = command_words(op) - 1;
-            if (words_to_skip_ == 0) {
-                if (op == 0x29) {
-                    // No drain: every RDRAM observer (CPU, DMA, VI image, save state) waits
-                    // for the packets it overlaps, so the CPU can run ahead of the worker.
-                    status_ &= ~(kStartClock | kPipeBusy);
-                    mi.raise(MiInterrupt::Dp);
-                } else {
-                    RdpPacket packet;
-                    packet.words[0] = word;
-                    packet.count = 1;
-                    dispatch(packet, rdram);
-                }
-            }
+            consume_word(word, mi, rdram);
         }
     }
     current_ += 8;
     schedule_word(scheduler, when);
+}
+
+void Rdp::submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram,
+                       bool defer_sync_full) {
+    if (words.empty()) return;
+    status_ |= kStartClock | kPipeBusy;  // as if the words had come through DPC
+    deferring_sync_full_ = defer_sync_full;
+    for (const std::uint64_t word : words) {
+        if (words_to_skip_) {
+            if (trace_) trace_->push_back(word);
+            --words_to_skip_;
+        } else {
+            consume_word(word, mi, rdram);
+        }
+    }
+    deferring_sync_full_ = false;
+}
+
+void Rdp::finish_deferred_sync(Mi& mi) {
+    if (!pending_sync_full_) return;
+    pending_sync_full_ = false;
+    status_ &= ~(kStartClock | kPipeBusy);
+    mi.raise(MiInterrupt::Dp);
+}
+
+// The first word of a command, or one of a buffered draw command, from DPC or the graphics
+// HLE (the words a skipped command still has are dropped before this).
+void Rdp::consume_word(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
+    if (trace_) trace_->push_back(word);
+    const unsigned op = opcode(word);
+    if (draw_words_ != 0 || buffered_draw_words(op) != 0) {
+        draw_command_[draw_words_++] = word;
+        const unsigned draw_op = opcode(draw_command_[0]);
+        if (draw_words_ == buffered_draw_words(draw_op)) {
+            dispatch({draw_command_, draw_words_}, rdram);
+            draw_words_ = 0;
+        }
+        return;
+    }
+    // Preserve packet framing for unsupported commands across END extensions.
+    words_to_skip_ = command_words(op) - 1;
+    if (words_to_skip_ != 0) return;
+    if (op == 0x29) {
+        // No drain: every RDRAM observer (CPU, DMA, VI image, save state) waits for the
+        // packets it overlaps, so the CPU can run ahead of the worker.
+        if (deferring_sync_full_) {  // the graphics HLE raises DP when its task's drawing ends
+            pending_sync_full_ = true;
+            return;
+        }
+        status_ &= ~(kStartClock | kPipeBusy);
+        mi.raise(MiInterrupt::Dp);
+    } else {
+        RdpPacket packet;
+        packet.words[0] = word;
+        packet.count = 1;
+        dispatch(packet, rdram);
+    }
 }
 
 

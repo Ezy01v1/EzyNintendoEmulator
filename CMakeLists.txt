@@ -35,6 +35,7 @@ add_subdirectory(src/core/n64)
 add_subdirectory(tools/gb_runner)
 add_subdirectory(tools/gba_runner)
 add_subdirectory(tools/n64_runner)
+add_subdirectory(tools/rdp_trace_diff)
 
 if(EZY_BUILD_FRONTEND)
     # Static SDL avoids having to copy SDL3.dll next to the executable.

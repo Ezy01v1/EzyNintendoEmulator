@@ -88,6 +88,9 @@ public:
     [[nodiscard]] Mi& mi() { return mi_; }
     [[nodiscard]] Pi& pi() { return pi_; }
     [[nodiscard]] RspRegs& rsp() { return rsp_; }
+    [[nodiscard]] Rdp& rdp() { return rdp_; }
+    // Raw RDRAM, for code that already waits for the RDP itself (HLE, tests).
+    [[nodiscard]] std::span<std::uint8_t> rdram() { return rdram_; }
     [[nodiscard]] Vi& vi() { return vi_; }
     [[nodiscard]] Si& si() { return si_; }
     [[nodiscard]] Ai& ai() { return ai_; }

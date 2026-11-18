@@ -48,6 +48,16 @@ public:
     void write(std::uint32_t offset, std::uint32_t value, Scheduler& scheduler, std::uint64_t when);
     void step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
               std::span<const std::uint8_t, 0x1000> dmem, std::uint64_t when);
+    // Command words that skip DPC (the graphics HLE): same framing as words fetched from
+    // RDRAM or DMEM, without touching START/END/CURRENT. With defer_sync_full, a Sync Full
+    // among them raises DP only at finish_deferred_sync(), when the task's drawing would end.
+    void submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram,
+                      bool defer_sync_full = false);
+    void finish_deferred_sync(Mi& mi);
+    // When set, every command word the RDP consumes is appended here (for comparing runs).
+    void set_trace(std::vector<std::uint64_t>* trace) { trace_ = trace; }
+    // How many 64-bit words the command with this opcode (bits 61:56) takes.
+    [[nodiscard]] static unsigned words_in_command(unsigned op);
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {
@@ -85,6 +95,8 @@ public:
         } else {
             hidden_->clear();
         }
+        if (version >= 13) ar(pending_sync_full_);
+        else pending_sync_full_ = false;
         if constexpr (Ar::kLoading) {
             rebuild_memory_state();
             sync_bands();
@@ -109,6 +121,7 @@ private:
     void sync_bands();
     [[nodiscard]] bool needs_barrier(const RdpPacket& packet, const RdpAccess& access);
     static unsigned buffered_draw_words(unsigned op);
+    void consume_word(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram);
     void update_counters(std::uint64_t when);
     void schedule_word(Scheduler& scheduler, std::uint64_t when);
     std::uint32_t start_ = 0, end_ = 0, current_ = 0, status_ = 0x80;
@@ -125,6 +138,9 @@ private:
     std::array<RdpAccess::Range, 8> drawn_{};
     unsigned drawn_count_ = 0;
     std::unique_ptr<RdpWorker> worker_;
+    std::vector<std::uint64_t>* trace_ = nullptr;  // not saved: a debugging aid
+    bool deferring_sync_full_ = false;  // inside a deferred submit_words
+    bool pending_sync_full_ = false;    // a deferred Sync Full not delivered yet
 };
 
 } // namespace ezy::n64

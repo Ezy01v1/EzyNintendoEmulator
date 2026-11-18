@@ -15,6 +15,8 @@
 // Option, anywhere after the ROM: --pif <file> (a real PIF ROM).
 // --rdp-threaded / --rdp-sync selects host execution without changing emulated timing.
 // --state-check [frames] compares a cross-mode save/load continuation for 120 frames.
+// --rdp-trace <file> [--trace-from <frame>] (with --screenshot): writes every RDP command word
+// consumed from that frame on, as little-endian uint64, for tools/rdp_trace_diff.
 #include <cstdint>
 #include <charconv>
 #include <cstdio>
@@ -160,6 +162,8 @@ int main(int raw_argc, char* raw_argv[]) {
     int time_from = 0;
     const char* profile_path = nullptr;
     const char* final_state_path = nullptr;
+    const char* trace_path = nullptr;
+    int trace_from = 0;
     bool audio_hle = false, audio_hle_check = false;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
@@ -178,6 +182,14 @@ int main(int raw_argc, char* raw_argv[]) {
         }
         else if (std::strcmp(raw_argv[i], "--profile") == 0 && i + 1 < raw_argc) profile_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--dump-final-state") == 0 && i + 1 < raw_argc) final_state_path = raw_argv[++i];
+        else if (std::strcmp(raw_argv[i], "--rdp-trace") == 0 && i + 1 < raw_argc) trace_path = raw_argv[++i];
+        else if (std::strcmp(raw_argv[i], "--trace-from") == 0 && i + 1 < raw_argc) {
+            const std::string value = raw_argv[++i];
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), trace_from);
+            if (error != std::errc{} || end != value.data() + value.size() || trace_from < 0) {
+                std::cerr << "--trace-from requires a nonnegative field index\n"; return 2;
+            }
+        }
         else args.push_back(raw_argv[i]);
     }
     const int argc = static_cast<int>(args.size());
@@ -190,6 +202,7 @@ int main(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --dump-state <out.bin> [frames]\n"
                      "       ezy_n64_runner <rom> --benchmark <out.bmp> <end> --time-from <first>\n"
                      "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>\n"
+                     "Screenshot options: --rdp-trace <out.bin> [--trace-from <field>]\n"
                      "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter,\n"
                      "         --audio-hle, --audio-hle-check (run audio tasks on the RSP and compare)\n";
         return 2;
@@ -208,6 +221,9 @@ int main(int raw_argc, char* raw_argv[]) {
     const std::string mode = args[2];
     if (mode != "--benchmark" && (time_from != 0 || profile_path || final_state_path)) {
         std::cerr << "--time-from, --profile and --dump-final-state require --benchmark\n"; return 2;
+    }
+    if (mode != "--screenshot" && (trace_path || trace_from != 0)) {
+        std::cerr << "--rdp-trace and --trace-from require --screenshot\n"; return 2;
     }
     if (mode == "--benchmark" && argc == 5) {
         int end_frame = 0;
@@ -234,7 +250,19 @@ int main(int raw_argc, char* raw_argv[]) {
     }
     if (mode == "--screenshot" && argc >= 4) {
         const int frames = argc > 4 ? std::atoi(args[4]) : 120;
-        for (int i = 0; i < frames; ++i) n64->run_frame();
+        std::vector<std::uint64_t> trace;
+        for (int i = 0; i < frames; ++i) {
+            if (trace_path && i == trace_from) n64->bus().rdp().set_trace(&trace);
+            n64->run_frame();
+        }
+        if (trace_path) {
+            n64->bus().rdp().set_trace(nullptr);
+            std::ofstream file(trace_path, std::ios::binary);
+            file.write(reinterpret_cast<const char*>(trace.data()), static_cast<std::streamsize>(trace.size() * 8));
+            file.close();
+            if (!file) return 2;
+            std::cout << "Traced " << trace.size() << " RDP words to " << trace_path << '\n';
+        }
         const std::vector<char> bmp = encode_bmp(n64->image());
         std::ofstream(args[3], std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         std::cout << "Saved " << args[3] << " (" << n64->image().width << "x" << n64->image().height << ")\n";
