@@ -24,6 +24,8 @@ public:
     ~RspRegs();
     [[nodiscard]] bool jit_active() const { return jit_ && jit_->available(); }
     [[nodiscard]] RspJit::Stats jit_stats() const { return jit_ ? jit_->stats() : RspJit::Stats{}; }
+    // Iterations of DMA wait loops jumped over by run() (diagnostics; not in save states).
+    [[nodiscard]] std::uint64_t skipped_dma_wait_iterations() const { return skipped_dma_wait_iterations_; }
     [[nodiscard]] const std::uint8_t* mem() const { return mem_.data(); } // inspection only
     [[nodiscard]] std::uint8_t read_memory8(std::uint32_t address) const { return mem_[address & 0x1FFF]; }
     void write_memory(std::uint32_t address, std::span<const std::uint8_t> bytes);
@@ -93,6 +95,8 @@ private:
     void write_status(std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
     [[nodiscard]] std::uint32_t load_dmem(std::uint32_t address, unsigned width) const;
     void store_dmem(std::uint32_t address, unsigned width, std::uint32_t value);
+    // Jumps over whole iterations of a "wait for my own DMA" loop (see rsp_scalar.cpp).
+    [[nodiscard]] bool skip_dma_wait(std::uint32_t word, std::uint32_t pc, std::uint64_t& when, std::uint64_t limit);
     void execute_scalar(std::uint32_t word, std::uint32_t pc, Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when);
     void execute_special(std::uint32_t word, std::uint32_t pc, Mi& mi);
 
@@ -107,6 +111,7 @@ private:
     RspVector vector_;
     std::unique_ptr<RspJit> jit_;
     std::uint64_t jit_generation_ = ~std::uint64_t{0};
+    std::uint64_t skipped_dma_wait_iterations_ = 0;
 };
 
 }  // namespace ezy::n64

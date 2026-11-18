@@ -61,6 +61,14 @@ std::optional<std::uint64_t> RspRegs::run(Mi& mi, Rdp& rdp, Scheduler& scheduler
         const std::uint32_t pc = sp_pc_ & kPcMask;
         const std::uint8_t* imem = mem_.data() + 0x1000 + pc;
         const std::uint32_t word = (std::uint32_t{imem[0]} << 24) | (imem[1] << 16) | (imem[2] << 8) | imem[3];
+        // MFC0 of an SP register: maybe the start of a DMA wait loop.
+        if ((word & 0xFFE007FF) == 0x40000000 && !(sp_status_ & kSingleStep) && !(stop_on_line && mi.line())) {
+            const std::uint64_t limit = std::min(scheduler.now() + 1, scheduler.others_bound());
+            if (skip_dma_wait(word, pc, when, limit) && when >= limit) {
+                scheduler.schedule(EventType::RspStep, when);
+                return std::nullopt;
+            }
+        }
         sp_pc_ = next_pc_ & kPcMask;
         next_pc_ = (sp_pc_ + 4) & kPcMask;
         execute_scalar(word, pc, mi, rdp, scheduler, when);
@@ -80,6 +88,44 @@ std::optional<std::uint64_t> RspRegs::run(Mi& mi, Rdp& rdp, Scheduler& scheduler
         }
         when = next;
     }
+}
+
+// Microcode waits for its own SP DMA with
+//     loop: mfc0 rt, SP_DMA_BUSY (or SP_DMA_FULL)
+//           bne  rt, $zero, loop
+//           nop
+// Nothing it reads can change before the next SP DMA event, and `limit` (the CPU's time + 1,
+// or the bound on every other event) is never after that. So every whole iteration whose
+// last instruction would still run before `limit` is skipped here, leaving the registers,
+// PC, step parity and time exactly as stepping them would. `when` (< limit) is the time of
+// the MFC0 at `pc`; on return it is the time of the next one, which the caller still runs
+// if it is before `limit`.
+bool RspRegs::skip_dma_wait(std::uint32_t word, std::uint32_t pc, std::uint64_t& when, std::uint64_t limit) {
+    const unsigned rt = (word >> 16) & 31, rd = (word >> 11) & 31;
+    if (rt == 0 || (rd != 5 && rd != 6) || next_pc_ != ((pc + 4) & kPcMask)) return false;
+    const auto imem_word = [this](std::uint32_t address) {
+        const std::uint8_t* bytes = mem_.data() + 0x1000 + (address & kPcMask);
+        return (std::uint32_t{bytes[0]} << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+    };
+    const std::uint32_t branch = imem_word(pc + 4);  // BNE back to pc, either operand order
+    if ((branch != (0x1400FFFEU | rt << 21) && branch != (0x1400FFFEU | rt << 16)) || imem_word(pc + 8) != 0) {
+        return false;
+    }
+    const std::uint32_t value = read_sp(rd * 4);  // SP_DMA_FULL / SP_DMA_BUSY: no side effects
+    if (value == 0 || when + 3 >= limit) return false;
+
+    // Steps take 1 and 2 cycles in turn, so the three instructions of an iteration take 4
+    // or 5 cycles, alternating, and its NOP runs 3 cycles after its MFC0. Iteration i starts
+    // 9 * (i / 2) cycles in, plus `odd_start` if i is odd, and runs whole if its NOP's time
+    // is before `limit`, that is, if it starts at most `room` cycles in.
+    const std::uint64_t odd_start = short_step_ ? 4 : 5;
+    const std::uint64_t room = limit - 4 - when;
+    const std::uint64_t count = room / 9 + 1 + (room >= odd_start ? (room - odd_start) / 9 + 1 : 0);
+    when += 9 * (count / 2) + ((count & 1) ? odd_start : 0);
+    if (count & 1) short_step_ = !short_step_;
+    gpr_[rt] = value;
+    skipped_dma_wait_iterations_ += count;
+    return true;
 }
 
 std::uint32_t RspRegs::load_dmem(std::uint32_t address, unsigned width) const {

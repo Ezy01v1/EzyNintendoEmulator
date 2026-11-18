@@ -144,7 +144,8 @@ void print_rdp_stats(N64& n64) {
     std::cout << "RSP backend: " << (n64.bus().rsp().jit_active() ? "JIT" : "interpreter")
               << ", native: " << jit.native_instructions << ", fallback: " << jit.fallback_instructions
               << ", blocks: " << jit.compiled_blocks << ", compile ms: " << jit.compile_ns/1e6
-              << ", reused: " << jit.reused_blocks << ", cache flushes: " << jit.cache_flushes << '\n';
+              << ", reused: " << jit.reused_blocks << ", cache flushes: " << jit.cache_flushes
+              << ", skipped DMA wait iterations: " << n64.bus().rsp().skipped_dma_wait_iterations() << '\n';
     const auto check = n64.bus().audio_hle_check();
     if (check.tasks != 0) {
         std::cout << "Audio HLE check: tasks " << check.tasks << ", bytes " << check.bytes << ", mismatched bytes "

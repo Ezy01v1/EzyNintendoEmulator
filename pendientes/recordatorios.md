@@ -4,7 +4,7 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-15_
+_Última actualización: 2026-11-17_
 
 > **Perfil actualizado y SHADE (2026-11-15): nuevo atajo descartado.**
 > Con rectángulos constantes ya activos: 8258 muestras, 0 errores de captura;
@@ -283,7 +283,10 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
     directo desde `run` (4,9 % más lento). Ambos revertidos; no repetirlos como mejoras.
   - Dynarec (JIT) MIPS → x86-64 para la CPU: alternativa futura que requiere perfil
     y medición de juego completo; no asumir un multiplicador de velocidad.
-  - O RSP en alto nivel (HLE) de los microcódigos gráficos (F3DEX etc.) si el RSP sigue pesando.
+  - [x] HLE de los microcódigos gráficos F3DEX/F3DLX 0.95 (MK64): integrado el 2026-11-18 en
+    `n64/gfx-hle-port`, apagado por defecto, +6 % en carrera. Ver bitácora 2026-11-18.
+  - Con el HLE gráfico, el límite pasa al dibujo (hilo del RDP) y a la CPU: siguiente palanca,
+    acelerar el rasterizador o el recompilador de CPU (medir antes).
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -715,3 +718,31 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   1500–1900 en esta PC: 1 franja 34,6, **2 franjas 41,1**, 3 39,0, 4 35,8 (más hilos frenan al
   principal): por defecto una franja por cada 4 hilos de hardware. El usuario juega con un mando
   de Xbox One (funciona). Límite actual: el hilo principal (CPU + RSP).
+- 2026-11-17 (8) — Salto exacto del bucle de espera de DMA del RSP (`RspRegs::skip_dma_wait`):
+  `mfc0 rt, SP_DMA_BUSY|FULL` / `bne rt, $zero, -2` / `nop` es el 13,7 % (+1,2 % en FULL) de las
+  instrucciones del RSP en MK64 (histograma temporal, ya quitado). `run()` salta las iteraciones
+  enteras antes de `min(now+1, others_bound())` con registros, PC, paridad y tiempo exactos;
+  20,8 M iteraciones saltadas en 1900 campos. Prueba nueva (`test_rsp_dma_wait.cpp`) contra
+  `step()`, detecta dos mutaciones; siete suites aprobadas, systemtest 2984/3721, imagen y estado
+  de carrera idénticos. **Ganancia ~1 % de CPU en síncrono y nula visible con RDP en hilo**: eran
+  las instrucciones más baratas. Conservado por exacto; no repetirlo como pendiente. Informe:
+  `docs/performance/2026-11-17-n64-rsp-dma-wait.md`. Siguiente palanca real del hilo principal:
+  la ejecución de la CPU y del RSP gráfico (recompilador de CPU o HLE de F3DEX), no bucles ociosos.
+- 2026-11-18 — Rama `n64/gfx-hle-port` (desde `codex/n64-rsp-jit`): se rescató lo útil de la rama
+  vieja `n64/gfx-hle` (9-nov). Sus tres primeros commits (RDP en hilo viejo, bits ocultos, benchmark)
+  ya estaban rehechos y se descartaron. Traído: **EEPROM de 4 Kbit** (estado v13; aún sin `.eep` en
+  disco), entrada directa al RDP + traza (`--rdp-trace/--trace-from`, `tools/rdp_trace_diff`) y el
+  **HLE gráfico F3DEX/F3DLX 0.95**, enganchado igual que el HLE de audio (`Bus::on_rsp_start`), con
+  esperas por rango del RDP por franjas en cada lectura de RDRAM. **Apagado por defecto**
+  (`--gfx-hle` en el runner; en `ezyemu` no se activa todavía). Corregido al validar: la generación de
+  texturas (`G_TEXTURE_GEN`) daba valores 32 veces menores y el logo de Nintendo de la intro salía
+  oscuro; ahora sale dorado y reflejante. Ojo: **el EEPROM cambia el curso de MK64**, así que la
+  imagen de referencia de la carrera pasa de `4B16…` a `5ACA…` (estado `15D9…`); con el EEPROM
+  desactivado la imagen vuelve a ser `4B16…`, o sea que lo demás es exacto. 248 pruebas N64, siete
+  suites, systemtest 2984/3721, continuación cruzada 1700+120 con y sin HLE, Spider-Man idéntico con
+  y sin HLE (su microcódigo no es F3DEX 0.95). Velocidad carrera 1500–1900 (audio HLE, RDP en hilo):
+  **~39,9 → ~42,3 campos/s (+6 %)**, no el +55–70 % de la rama vieja: el HLE de audio y el RDP por
+  franjas ya habían quitado ese cuello; ahora limita el dibujo. Pendientes del HLE: líneas
+  horizontales sueltas mientras gira el logo (triángulos casi degenerados, quizá el recorte), no es
+  bit a bit (decisión del 9-nov), `G_LOAD_UCODE` no traduce el segmento, y que el usuario lo pruebe
+  jugando antes de activarlo en `ezyemu`. También en esta rama: el salto del bucle de DMA de arriba.
