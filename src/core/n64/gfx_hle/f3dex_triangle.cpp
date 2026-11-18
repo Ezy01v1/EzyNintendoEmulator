@@ -51,21 +51,28 @@ void F3dex::draw_triangle(const ScreenVertex& a, const ScreenVertex& b, const Sc
     if ((geometry_mode_ & G_CULL_BACK) && area > 0) return;
     if ((geometry_mode_ & G_CULL_FRONT) && area < 0) return;
 
-    // Top, middle, bottom by Y (stable for equal Y).
-    std::sort(std::begin(v), std::end(v), [](const ScreenVertex* a, const ScreenVertex* b) { return a->py < b->py; });
+    // Top, middle, bottom by the header's quarter-pixel Y (then exact Y), so YH <= YM <= YL.
+    std::sort(std::begin(v), std::end(v), [](const ScreenVertex* a, const ScreenVertex* b) {
+        return a->y != b->y ? a->y < b->y : a->py < b->py;
+    });
     const ScreenVertex &h = *v[0], &m = *v[1], &l = *v[2];
     const double xh = h.px, yh = h.py, xm = m.px, ym = m.py, xl = l.px, yl = l.py;
 
-    const double dxhdy = yl != yh ? (xl - xh) / (yl - yh) : 0;
-    const double dxmdy = ym != yh ? (xm - xh) / (ym - yh) : 0;
-    const double dxldy = yl != ym ? (xl - xm) / (yl - ym) : 0;
+    // Edges go through the vertices at the header's Ys, as the microcode computes them: the
+    // RDP walks from the top of YH's scanline, and with slopes from the exact Ys a sliver's
+    // steep minor edge, extrapolated back to YH, lands far from the vertex and fills a long
+    // horizontal span (the stray lines on MK64's spinning logo).
+    const double qyh = h.y / 4.0, qym = m.y / 4.0, qyl = l.y / 4.0;
+    const double dxhdy = qyl != qyh ? (xl - xh) / (qyl - qyh) : 0;
+    const double dxmdy = qym != qyh ? (xm - xh) / (qym - qyh) : 0;
+    const double dxldy = qyl != qym ? (xl - xm) / (qyl - qym) : 0;
     // Major edge on the left when the middle vertex lies to its right.
-    const bool major_left = (xm - xh) * (yl - yh) - (xl - xh) * (ym - yh) > 0;
+    const bool major_left = (xm - xh) * (qyl - qyh) - (xl - xh) * (qym - qyh) > 0;
 
     // The RDP walks from the start of YH's scanline; XL starts at YM itself.
     const double y_start = (h.y & ~3) / 4.0;
-    const double x_major = xh + dxhdy * (y_start - yh);
-    const double x_minor = xh + dxmdy * (y_start - yh);
+    const double x_major = xh + dxhdy * (y_start - qyh);
+    const double x_minor = xh + dxmdy * (y_start - qyh);
 
     const bool shade = (geometry_mode_ & G_SHADE) != 0;
     const bool texture = (texture_ & 1) != 0;
@@ -76,12 +83,12 @@ void F3dex::draw_triangle(const ScreenVertex& a, const ScreenVertex& b, const Sc
     emit((std::uint64_t{0xC0U | op} << 56) | (std::uint64_t{major_left} << 55) | (std::uint64_t{level} << 51) |
          (std::uint64_t{tile} << 48) | (static_cast<std::uint64_t>(l.y & 0x3FFF) << 32) |
          (static_cast<std::uint64_t>(m.y & 0x3FFF) << 16) | static_cast<std::uint64_t>(h.y & 0x3FFF));
-    emit(edge_word(xm + dxldy * (m.y / 4.0 - ym), dxldy));  // XL at the header's (rounded) YM
+    emit(edge_word(xm, dxldy));  // XL at the header's YM
     emit(edge_word(x_major, dxhdy));
     emit(edge_word(x_minor, dxmdy));
 
-    // Plane gradients of a per-vertex attribute (in screen pixels), and its value where the
-    // RDP starts: on the major edge at the start scanline.
+    // Plane gradients of a per-vertex attribute (from the exact screen positions), and its
+    // value where the RDP starts: on the major edge it walks, at the start scanline.
     const double det = (xm - xh) * (yl - yh) - (xl - xh) * (ym - yh);
     struct Gradient {
         std::int64_t value, dx, de, dy;
@@ -90,7 +97,8 @@ void F3dex::draw_triangle(const ScreenVertex& a, const ScreenVertex& b, const Sc
         const double dadx = det != 0 ? ((a_m - a_h) * (yl - yh) - (a_l - a_h) * (ym - yh)) / det : 0;
         const double dady = det != 0 ? ((a_l - a_h) * (xm - xh) - (a_m - a_h) * (xl - xh)) / det : 0;
         const double dade = dady + dadx * dxhdy;
-        return {to_fixed(a_h + dade * (y_start - yh)), to_fixed(dadx), to_fixed(dade), to_fixed(dady)};
+        const double start = a_h + dadx * (x_major - xh) + dady * (y_start - yh);
+        return {to_fixed(start), to_fixed(dadx), to_fixed(dade), to_fixed(dady)};
     };
     const auto emit_block = [&](const std::array<Gradient, 4>& g) {
         emit(pack_int({g[0].value, g[1].value, g[2].value, g[3].value}));

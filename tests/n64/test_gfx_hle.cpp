@@ -1,6 +1,9 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <cmath>
+#include <iterator>
+#include <utility>
 #include <cstdint>
 #include <initializer_list>
 #include <string>
@@ -453,30 +456,166 @@ TEST_CASE("G_VTX lighting with one directional light and ambient") {
     CHECK(dark.b == 0x10);
 }
 
-TEST_CASE("G_TEXTURE_GEN spans a 32x32 environment map with gsSPTexture's 0x07C0 scale") {
+TEST_CASE("G_VTX lighting uses the normal as stored and the light as bytes, like the microcode") {
+    // A white light from +Z over a 0x20 ambient; the expected grays are what MK64's F3DEX 0.95
+    // computes for the same list (tools/gfx_oracle).
+    const auto lit_grays = [](const std::array<std::int32_t, 16>& modelview, const std::vector<std::array<std::int8_t, 3>>& normals) {
+        const auto n64 = N64::create(counting_rom("HLE LIGHT2"));
+        auto& bus = n64->bus();
+        write_mtx(bus, kMatrix, kIdentity);
+        write_mtx(bus, kMatrix + 64, modelview);
+        write_viewport(bus);
+        bus.write32(kLights, 0xFFFFFF00), bus.write32(kLights + 4, 0xFFFFFF00);
+        bus.write32(kLights + 8, 0x00007F00), bus.write32(kLights + 12, 0);
+        bus.write32(kLights + 16, 0x20202000), bus.write32(kLights + 20, 0x20202000);
+        bus.write32(kLights + 24, 0), bus.write32(kLights + 28, 0);
+        for (std::size_t i = 0; i < normals.size(); ++i) {
+            const auto& n = normals[i];
+            write_vtx(bus, kVertices + static_cast<std::uint32_t>(i) * 16, 0, 0, 0, 0, 0,
+                      (std::uint32_t{std::uint8_t(n[0])} << 24) | (std::uint32_t{std::uint8_t(n[1])} << 16) |
+                          (std::uint32_t{std::uint8_t(n[2])} << 8) | 0xFF);
+        }
+        const std::vector<std::uint64_t> dl = {
+            dl_cmd(0x01030040, kMatrix), dl_cmd(0x01020040, kMatrix + 64), dl_cmd(0x03800010, kViewport),
+            dl_cmd(0xBC000002, 0x80000040), dl_cmd(0x03860010, kLights), dl_cmd(0x03880010, kLights + 16),
+            dl_cmd(0xB7000000, 0x00020004), g_vtx(0, static_cast<unsigned>(normals.size()), kVertices), kEndDl};
+        write_dl(bus, kDisplayList, dl);
+        F3dex f3dex;
+        REQUIRE(f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi()).ok);
+        std::vector<int> grays;
+        for (unsigned i = 0; i < normals.size(); ++i) grays.push_back(f3dex.vertex(i).r);
+        return grays;
+    };
+    const std::vector<std::array<std::int8_t, 3>> normals = {{0, 0, 127}, {127, 0, 0}, {90, 0, 90}, {50, 60, 70},
+                                                             {0, 0, 64}, {-100, 40, 20}, {20, -100, 40}, {-127, 0, 0}};
+    CHECK(lit_grays(kIdentity, normals) == std::vector<int>{255, 32, 209, 170, 158, 71, 111, 32});
+    const double c = std::cos(0.5), s = std::sin(0.5);
+    const auto fixed = [](double v) { return static_cast<std::int32_t>(std::lround(v * 65536.0)); };
+    std::array<std::int32_t, 16> rotate_y = kIdentity;
+    rotate_y[0] = fixed(c), rotate_y[2] = fixed(-s), rotate_y[8] = fixed(s), rotate_y[10] = fixed(c);
+    CHECK(lit_grays(rotate_y, normals) == std::vector<int>{253, 32, 102, 105, 143, 163, 82, 154});
+}
+
+namespace {
+
+// Texture generation with G_TEXTURE's scale at 0x8000 (half), as tools/gfx_oracle runs it:
+// the expected values below are what MK64's F3DEX 0.95 leaves in its vertex buffer.
+struct TexgenRun {
+    std::vector<std::pair<int, int>> st;
+};
+
+// lookat: none (the microcode's defaults) or X, Y and the Y light's green (gdSPDefLookAt: 0x80).
+TexgenRun run_texgen(const std::vector<std::array<std::int8_t, 3>>& normals, const std::array<std::int32_t, 16>& modelview,
+                     std::uint32_t geometry, const std::array<std::int8_t, 3>* lookat_x = nullptr,
+                     const std::array<std::int8_t, 3>* lookat_y = nullptr, std::uint8_t y_green = 0x80) {
     const auto n64 = N64::create(counting_rom("HLE TEXGEN"));
-    REQUIRE(n64);
     auto& bus = n64->bus();
     write_mtx(bus, kMatrix, kIdentity);
+    write_mtx(bus, kMatrix + 64, modelview);
     write_viewport(bus);
-    // Normals (s8) in the color bytes; the default lookat axes are +X and +Y.
-    write_vtx(bus, kVertices, 0, 0, 0, 0, 0, 0x7F0000FF);       // +X: s at the far end
-    write_vtx(bus, kVertices + 16, 0, 0, 0, 0, 0, 0x00007FFF);  // +Z: both in the middle
-    write_vtx(bus, kVertices + 32, 0, 0, 0, 0, 0, 0x810000FF);  // -X: s at 0
-    auto dl = camera_dl();
-    dl.push_back(dl_cmd(0xBB000001, 0x07C007C0));  // G_TEXTURE on, the usual texgen scale
-    dl.push_back(dl_cmd(0xB7000000, 0x00040000));  // G_SETGEOMETRYMODE G_TEXTURE_GEN
-    dl.push_back(g_vtx(0, 3, kVertices));
+    for (std::size_t i = 0; i < normals.size(); ++i) {
+        const auto& n = normals[i];
+        write_vtx(bus, kVertices + static_cast<std::uint32_t>(i) * 16, 0, 0, 0, 0, 0,
+                  (std::uint32_t{std::uint8_t(n[0])} << 24) | (std::uint32_t{std::uint8_t(n[1])} << 16) |
+                      (std::uint32_t{std::uint8_t(n[2])} << 8) | 0xFF);
+    }
+    std::vector<std::uint64_t> dl = {dl_cmd(0x01030040, kMatrix), dl_cmd(0x01020040, kMatrix + 64),
+                                     dl_cmd(0x03800010, kViewport)};
+    if (lookat_x) {
+        const auto light = [&](std::uint32_t at, std::uint8_t green, const std::array<std::int8_t, 3>& d) {
+            const std::uint32_t color = std::uint32_t{green} << 16;
+            bus.write32(at, color), bus.write32(at + 4, color);
+            bus.write32(at + 8, (std::uint32_t{std::uint8_t(d[0])} << 24) | (std::uint32_t{std::uint8_t(d[1])} << 16) |
+                                    (std::uint32_t{std::uint8_t(d[2])} << 8));
+            bus.write32(at + 12, 0);
+        };
+        light(kLights, 0, *lookat_x);
+        light(kLights + 16, y_green, *lookat_y);
+        dl.push_back(dl_cmd(0x03840010, kLights));       // G_MV_LOOKATX
+        dl.push_back(dl_cmd(0x03820010, kLights + 16));  // G_MV_LOOKATY
+    }
+    dl.push_back(dl_cmd(0xB7000000, geometry));
+    dl.push_back(dl_cmd(0xBB000001, 0x80008000));
+    dl.push_back(g_vtx(0, static_cast<unsigned>(normals.size()), kVertices));
     dl.push_back(kEndDl);
     write_dl(bus, kDisplayList, dl);
     F3dex f3dex;
     REQUIRE(f3dex.run_task(graphics_task(), GfxUcode::F3dex095, bus.rdram(), bus.rdp(), bus.mi()).ok);
-    // s10.5: 32 texels is 1024. (dot + 1) * 0x4000 * 0x07C0 >> 16.
-    CHECK(f3dex.vertex(0).s == 992);
-    CHECK(f3dex.vertex(0).t == 496);
-    CHECK(f3dex.vertex(1).s == 496);
-    CHECK(f3dex.vertex(1).t == 496);
-    CHECK(f3dex.vertex(2).s == 0);
+    TexgenRun run;
+    for (unsigned i = 0; i < normals.size(); ++i) run.st.emplace_back(f3dex.vertex(i).s, f3dex.vertex(i).t);
+    return run;
+}
+
+constexpr std::uint32_t kLit = 0x20004, kTexgen = kLit | 0x40000, kTexgenLinear = kTexgen | 0x80000;
+
+}  // namespace
+
+TEST_CASE("G_TEXTURE_GEN with the microcode's default lookat: s along +Y, t along +X") {
+    const auto run = run_texgen({{127, 0, 0}, {0, 127, 0}, {64, 0, 0}, {-127, 0, 0}, {0, -127, 0}, {50, 60, 70}, {0, 0, 127}},
+                                kIdentity, kTexgen);
+    using P = std::pair<int, int>;
+    CHECK(run.st[0] == P{8192, 16256});
+    CHECK(run.st[1] == P{16256, 8192});
+    CHECK(run.st[2] == P{8192, 12256});  // the normal is not normalized: half as long, half as far
+    CHECK(run.st[3] == P{8192, 127});
+    CHECK(run.st[4] == P{127, 8192});
+    CHECK(run.st[5] == P{12002, 11367});
+    CHECK(run.st[6] == P{8192, 8192});
+}
+
+TEST_CASE("G_TEXTURE_GEN with a loaded lookat; t scales with the Y light's green") {
+    const std::array<std::int8_t, 3> x{127, 0, 0}, y{0, 127, 0}, diagonal_x{90, 0, 90}, diagonal_y{0, 90, -90};
+    const std::vector<std::array<std::int8_t, 3>> normals = {{127, 0, 0}, {0, 127, 0}, {50, 60, 70}, {-100, 40, 20}};
+    using P = std::pair<int, int>;
+    const auto run = run_texgen(normals, kIdentity, kTexgen, &x, &y);
+    CHECK(run.st[0] == P{16256, 8192});
+    CHECK(run.st[1] == P{8192, 16256});
+    CHECK(run.st[2] == P{11367, 12002});
+    CHECK(run.st[3] == P{1842, 10732});
+    const auto half = run_texgen(normals, kIdentity, kTexgen, &x, &y, 0x40);
+    CHECK(half.st[1] == P{8192, 12224});
+    const auto none = run_texgen(normals, kIdentity, kTexgen, &x, &y, 0);
+    CHECK(none.st[1] == P{8192, 8192});
+    // Normalized (0, 90, -90) is stored as (0, 90, -91): rounded down.
+    const auto diagonal = run_texgen({{0, 0, 127}, {-100, 40, 20}, {30, 30, -110}}, kIdentity, kTexgen, &diagonal_x, &diagonal_y);
+    CHECK(diagonal.st[0] == P{13907, 2413});
+    CHECK(diagonal.st[1] == P{4592, 9082});
+    CHECK(diagonal.st[2] == P{4592, 14547});
+}
+
+TEST_CASE("G_TEXTURE_GEN follows the modelview's rotation but not its scale") {
+    const double c = std::cos(0.5), s = std::sin(0.5);
+    const auto fixed = [](double v) { return static_cast<std::int32_t>(std::lround(v * 65536.0)); };
+    std::array<std::int32_t, 16> rotate_y = kIdentity, rotate_x2 = kIdentity;
+    rotate_y[0] = fixed(c), rotate_y[2] = fixed(-s), rotate_y[8] = fixed(s), rotate_y[10] = fixed(c);
+    rotate_x2[0] = fixed(2), rotate_x2[5] = fixed(2 * c), rotate_x2[6] = fixed(2 * s);
+    rotate_x2[9] = fixed(-2 * s), rotate_x2[10] = fixed(2 * c);
+    const std::vector<std::array<std::int8_t, 3>> normals = {{0, 0, 127}, {-127, 0, 0}, {30, 30, -110}, {64, 0, 0}};
+    const auto rotated = run_texgen(normals, rotate_y, kTexgen);
+    const std::int16_t expected_t[] = {12065, 1080, 6517, 11776};  // t follows +X, which the rotation moves
+    for (std::size_t i = 0; i < normals.size(); ++i) {
+        CAPTURE(i);
+        CHECK(std::abs(rotated.st[i].second - expected_t[i]) <= 16);
+    }
+    const std::array<std::int8_t, 3> x{127, 0, 0}, y{0, 127, 0};
+    const auto scaled = run_texgen(normals, rotate_x2, kTexgen, &x, &y);
+    CHECK(scaled.st[3].first == 12256);  // the same as without the scale
+}
+
+TEST_CASE("G_TEXTURE_GEN_LINEAR bends the dot product like the microcode") {
+    const std::array<std::int8_t, 3> x{127, 0, 0}, y{0, 127, 0};
+    std::vector<std::array<std::int8_t, 3>> normals;
+    for (int n = -127; n <= 112; n = n == -127 ? -112 : n + 16) normals.push_back({static_cast<std::int8_t>(n), 0, 0});
+    const std::int16_t expected[] = {-137, 1404, 2816, 4024, 5063, 5964, 6763, 7494, 8192,
+                                     8889, 9620, 10419, 11321, 12359, 13567, 14980};
+    const auto run = run_texgen(normals, kIdentity, kTexgenLinear, &x, &y);
+    REQUIRE(run.st.size() == std::size(expected));
+    for (std::size_t i = 0; i < normals.size(); ++i) {
+        CAPTURE(normals[i][0]);
+        CHECK(std::abs(run.st[i].first - expected[i]) <= 1);
+    }
+    // At +127 the curve passes 0x7FFF and saturates.
+    CHECK(run_texgen({{127, 127, 0}}, kIdentity, kTexgenLinear, &x, &y).st[0] == std::pair<int, int>{16383, 16383});
 }
 
 TEST_CASE("G_VTX sets clip flags outside the guard band and behind the camera") {
@@ -552,6 +691,41 @@ TEST_CASE("F3DEX triangle edge coefficients for a known triangle") {
     CHECK(run.trace[1] == 0);                                // XL = 0 at YM, flat bottom: no slope
     CHECK(run.trace[2] == ((0x00A00000ULL << 32) | 0xAAAA));  // XH = 160, DxHDy = 2/3
     CHECK(run.trace[3] == ((0x00A00000ULL << 32) | 0xFFFF5556));  // XM = 160, DxMDy = -2/3
+}
+
+TEST_CASE("F3DEX edges of a nearly flat triangle meet at its top vertex") {
+    // The Nintendo logo in MK64's intro, seen edge-on: a sliver whose top lies 0.66 pixels
+    // into its scanline, with a minor edge 217 pixels wide per line. The RDP walks from the
+    // top of YH's scanline, so the edges must be the ones through the quarter-pixel Ys of the
+    // header; slopes from the exact Ys put XM 140 pixels to the left at YH and draw a line.
+    const auto n64 = N64::create(counting_rom("HLE SLIVER"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    std::array<std::int32_t, 16> modelview = kIdentity;
+    modelview[0] = modelview[5] = 64;  // x and y / 1024: screen x = 160 + 0.15625 x, y = 120 - 0.1171875 y
+    write_mtx(bus, kMatrix, kIdentity);
+    write_mtx(bus, kMatrix + 64, modelview);
+    write_viewport(bus);
+    write_vtx(bus, kVertices, -55, 37, 0);       // (151.41, 115.66): YH = 462 quarters
+    write_vtx(bus, kVertices + 16, 108, 36, 0);  // (176.88, 115.78): YM = 463
+    write_vtx(bus, kVertices + 32, -54, 35, 0);  // (151.56, 115.90): YL = 463
+    const std::vector<std::uint64_t> dl = {dl_cmd(0x01030040, kMatrix), dl_cmd(0x01020040, kMatrix + 64),
+                                           dl_cmd(0x03800010, kViewport), g_vtx(0, 3, kVertices),
+                                           dl_cmd(0xBF000000, 0x00000204), kEndDl};
+    write_dl(bus, kDisplayList, dl);
+    const HleRun run = run_hle(*n64);
+    REQUIRE(run.trace.size() == 4);
+    const unsigned yh = run.trace[0] & 0x3FFF;
+    REQUIRE(yh == 462);
+    const double y_start = (yh & ~3U) / 4.0;
+    const auto x_at_yh = [&](std::uint64_t edge) {
+        const double x = static_cast<std::int32_t>(edge >> 32) / 65536.0;
+        const double slope = static_cast<std::int32_t>(edge & 0xFFFFFFFF) / 65536.0;
+        return x + slope * (yh / 4.0 - y_start);
+    };
+    // Both edges leave from the top vertex: nothing to fill on YH's subscanline.
+    CHECK(x_at_yh(run.trace[2]) == doctest::Approx(151.4).epsilon(0.01));
+    CHECK(x_at_yh(run.trace[3]) == doctest::Approx(151.4).epsilon(0.01));
 }
 
 TEST_CASE("F3DEX culls back faces when G_CULL_BACK is set") {

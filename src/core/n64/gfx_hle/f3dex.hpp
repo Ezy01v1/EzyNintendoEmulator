@@ -111,15 +111,18 @@ private:
     void load_matrix(std::uint32_t w0, std::uint32_t address, std::span<const std::uint8_t> rdram);
     void move_memory(unsigned index, std::uint32_t address, std::span<const std::uint8_t> rdram);
     [[nodiscard]] std::array<std::uint8_t, 3> light_vertex(std::array<std::int8_t, 3> normal) const;
-    // The normal in view space (modelview 3x3), normalized; for texture generation.
-    [[nodiscard]] std::array<double, 3> view_normal(std::array<std::int8_t, 3> normal) const;
+    // A direction (a light's, a lookat axis) brought into model space by the modelview and
+    // normalized to length 127 (as bytes, like the microcode), dotted with the vertex's normal as stored: 127 x 127 when
+    // they line up. 0 for a zero direction.
+    [[nodiscard]] double model_dot(std::array<std::int8_t, 3> normal, std::array<std::int8_t, 3> direction) const;
 
     Mtx projection_{}, mvp_{};
     std::array<Mtx, kMatrixStackDepth> modelview_{};
     unsigned modelview_depth_ = 0;  // index of the current modelview
     std::array<std::int16_t, 4> viewport_scale_{}, viewport_translate_{};
     std::array<Light, 8> lights_{};
-    std::array<std::array<std::int8_t, 3>, 2> lookat_{};  // G_TEXTURE_GEN axes (X, Y)
+    std::array<std::array<std::int8_t, 3>, 2> lookat_{};  // G_TEXTURE_GEN axes: X (for s), Y (for t)
+    std::uint8_t lookat_y_green_ = 0;  // the Y light's green, which scales t (gdSPDefLookAt: 0x80)
     unsigned num_lights_ = 0;  // directional lights; the ambient follows them
     std::uint32_t geometry_mode_ = 0;
     std::uint16_t texture_scale_s_ = 0, texture_scale_t_ = 0;

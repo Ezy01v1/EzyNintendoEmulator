@@ -46,6 +46,7 @@ void F3dex::move_memory(unsigned index, std::uint32_t address, std::span<const s
     } else if (index == G_MV_LOOKATX || index == G_MV_LOOKATY) {
         auto& axis = lookat_[index == G_MV_LOOKATX ? 0 : 1];
         for (unsigned i = 0; i < 3; ++i) axis[i] = static_cast<std::int8_t>(rdram[address + 8 + i]);
+        if (index == G_MV_LOOKATY) lookat_y_green_ = rdram[address + 1];
     } else if (index >= G_MV_L0 && index <= G_MV_L7 && (index & 1) == 0) {
         Light& light = lights_[(index - G_MV_L0) / 2];
         for (unsigned i = 0; i < 3; ++i) {
@@ -57,37 +58,34 @@ void F3dex::move_memory(unsigned index, std::uint32_t address, std::span<const s
 
 // Directional lights in the modelview's space, plus the ambient (the light after the last one).
 std::array<std::uint8_t, 3> F3dex::light_vertex(std::array<std::int8_t, 3> normal) const {
-    const Mtx& mv = modelview_[modelview_depth_];
     std::array<double, 3> color{};
     const Light& ambient = lights_[num_lights_];
     for (unsigned c = 0; c < 3; ++c) color[c] = ambient.color[c];
-    const double nx = normal[0], ny = normal[1], nz = normal[2];
-    const double nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
     for (unsigned i = 0; i < num_lights_; ++i) {
         const Light& light = lights_[i];
-        // The light direction brought into model space: M (3x3) times the direction.
-        std::array<double, 3> d{};
-        for (unsigned r = 0; r < 3; ++r) {
-            for (unsigned k = 0; k < 3; ++k) d[r] += mv.m[r * 4 + k] / 65536.0 * light.direction[k];
-        }
-        const double dlen = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-        if (dlen == 0 || nlen == 0) continue;
-        const double intensity = std::max(0.0, (nx * d[0] + ny * d[1] + nz * d[2]) / (nlen * dlen));
+        // The microcode does not normalize the normal: a shorter one is lit less
+        // (tools/gfx_oracle). 127 x 127 is nearly full intensity.
+        const double intensity = std::max(0.0, model_dot(normal, light.direction)) / 16384.0;
         for (unsigned c = 0; c < 3; ++c) color[c] += light.color[c] * intensity;
     }
     return {clamp_color(static_cast<std::int32_t>(color[0])), clamp_color(static_cast<std::int32_t>(color[1])),
             clamp_color(static_cast<std::int32_t>(color[2]))};
 }
 
-std::array<double, 3> F3dex::view_normal(std::array<std::int8_t, 3> normal) const {
+double F3dex::model_dot(std::array<std::int8_t, 3> normal, std::array<std::int8_t, 3> direction) const {
     const Mtx& mv = modelview_[modelview_depth_];
-    std::array<double, 3> out{};
-    for (unsigned c = 0; c < 3; ++c) {
-        for (unsigned r = 0; r < 3; ++r) out[c] += normal[r] * (mv.m[r * 4 + c] / 65536.0);
+    std::array<double, 3> d{};
+    for (unsigned r = 0; r < 3; ++r) {
+        for (unsigned k = 0; k < 3; ++k) d[r] += mv.m[r * 4 + k] / 65536.0 * direction[k];
     }
-    const double len = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
-    if (len > 0) for (auto& x : out) x /= len;
-    return out;
+    const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (len == 0) return 0;
+    // The microcode keeps the result as bytes, after a reciprocal square root that overshoots
+    // a little: the unit vector times 127.8, rounded down, matches what it stores: (127, 0, 0)
+    // for +X, (112, 0, 61) where the exact value is (111.45, 0, 60.89), and -91 for -90.37.
+    double dot = 0;
+    for (unsigned i = 0; i < 3; ++i) dot += normal[i] * std::floor(d[i] / len * 127.8);
+    return dot;
 }
 
 void F3dex::project(ScreenVertex& v) const {
@@ -133,17 +131,22 @@ void F3dex::load_vertices(std::uint32_t address, unsigned first, unsigned count,
 
         std::int32_t s = read16(rdram, at + 8), t = read16(rdram, at + 10);
         if (geometry_mode_ & G_TEXTURE_GEN) {
-            // Sphere mapping: the view-space normal against the two lookat axes, mapped from
-            // [-1, 1] to [0, 0x8000): with gsSPTexture's usual 0x07C0 scale for texture
-            // generation that is 0 to 32 texels (s10.5) across a 32x32 environment map.
-            const auto n = view_normal({static_cast<std::int8_t>(rdram[at + 12]), static_cast<std::int8_t>(rdram[at + 13]),
-                                        static_cast<std::int8_t>(rdram[at + 14])});
-            const auto axis_dot = [&](const std::array<std::int8_t, 3>& axis) {
-                const double len = std::sqrt(double(axis[0]) * axis[0] + double(axis[1]) * axis[1] + double(axis[2]) * axis[2]);
-                return len > 0 ? (n[0] * axis[0] + n[1] * axis[1] + n[2] * axis[2]) / len : 0.0;
+            // Sphere mapping, as F3DEX 0.95 does it (measured with tools/gfx_oracle): the
+            // normal as stored (not normalized) against each lookat axis brought into model
+            // space, 0x4000 plus that dot product (127 x 127 at most), so with gsSPTexture's
+            // usual 0x07C0 scale about 0 to 32 texels (s10.5) across a 32x32 environment map.
+            // t's product is scaled by the Y light's green over 0x80. G_TEXTURE_GEN_LINEAR
+            // bends it with the microcode's cubic, close to an arcsine.
+            const std::array<std::int8_t, 3> normal = {static_cast<std::int8_t>(rdram[at + 12]),
+                                                       static_cast<std::int8_t>(rdram[at + 13]),
+                                                       static_cast<std::int8_t>(rdram[at + 14])};
+            const auto generate = [&](double dot) {
+                double u = dot / 16384.0;
+                if (geometry_mode_ & G_TEXTURE_GEN_LINEAR) u *= 0.680554 + 0.363436 * u * u;
+                return static_cast<std::int32_t>(std::clamp(std::lround(16384.0 * (1.0 + u)), -32768L, 32767L));
             };
-            s = static_cast<std::int32_t>((axis_dot(lookat_[0]) + 1.0) * 16384.0);
-            t = static_cast<std::int32_t>((axis_dot(lookat_[1]) + 1.0) * 16384.0);
+            s = generate(model_dot(normal, lookat_[0]));
+            t = generate(model_dot(normal, lookat_[1]) * lookat_y_green_ / 128.0);
         }
         v.s = static_cast<std::int16_t>((s * texture_scale_s_) >> 16);
         v.t = static_cast<std::int16_t>((t * texture_scale_t_) >> 16);
