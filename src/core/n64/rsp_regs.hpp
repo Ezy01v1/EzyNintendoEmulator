@@ -28,6 +28,11 @@ public:
     [[nodiscard]] std::uint8_t read_memory8(std::uint32_t address) const { return mem_[address & 0x1FFF]; }
     void write_memory(std::uint32_t address, std::span<const std::uint8_t> bytes);
     [[nodiscard]] std::span<const std::uint8_t, 0x1000> dmem() const { return std::span(mem_).first<0x1000>(); }
+    [[nodiscard]] std::span<std::uint8_t, 0x1000> dmem() { return std::span(mem_).first<0x1000>(); }
+    [[nodiscard]] bool halted() const { return (sp_status_ & kHalt) != 0; }
+    // Ends a task that ran at a high level the way its microcode would: BREAK with
+    // SIG2 (task done) set, interrupting the CPU if it asked for that.
+    void finish_hle_task(Mi& mi, Scheduler& scheduler);
     [[nodiscard]] std::uint32_t read_sp(std::uint32_t offset);
     void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
     void finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when);

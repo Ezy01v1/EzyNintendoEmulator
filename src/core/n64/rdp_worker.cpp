@@ -2,17 +2,12 @@
 
 #include <algorithm>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 
 namespace ezy::n64 {
 
-RdpWorker::RdpWorker(Execute execute, std::size_t capacity)
-    : execute_(std::move(execute)), queue_(std::max(std::size_t{1}, capacity)),
-      thread_([this] { run(); }) {}
-
 namespace {
-// Waits are short (the other thread is actively working), so spin before yielding.
+// Waits are short (the other threads are actively working), so spin before yielding.
 template <class Done>
 void spin_until(Done done) {
     for (unsigned spins = 0; !done(); ++spins) {
@@ -21,16 +16,46 @@ void spin_until(Done done) {
 }
 }  // namespace
 
+RdpWorker::RdpWorker(Execute execute, std::size_t capacity)
+    : RdpWorker(std::vector<Execute>{std::move(execute)}, capacity) {}
+
+RdpWorker::RdpWorker(std::vector<Execute> executes, std::size_t capacity)
+    : queue_(std::max(std::size_t{1}, capacity)) {
+    for (auto& execute : executes) {
+        lanes_.push_back(std::make_unique<Lane>());
+        lanes_.back()->execute = std::move(execute);
+    }
+    // Every lane exists before any thread reads `lanes_`.
+    try {
+        for (std::size_t i = 0; i < lanes_.size(); ++i) lanes_[i]->thread = std::thread([this, i] { run(i); });
+    } catch (...) {
+        { std::lock_guard lock(mutex_); stopping_.store(true, std::memory_order_release); }
+        changed_.notify_all();
+        for (auto& lane : lanes_) if (lane->thread.joinable()) lane->thread.join();
+        throw;
+    }
+}
+
 RdpWorker::~RdpWorker() {
     { std::lock_guard lock(mutex_); stopping_.store(true, std::memory_order_release); }
     changed_.notify_all();
-    if (thread_.joinable()) thread_.join();
+    for (auto& lane : lanes_) if (lane->thread.joinable()) lane->thread.join();
 }
 
-void RdpWorker::submit(const RdpPacket& packet, const RdpAccess& access) {
-    const auto full = [this] {
-        return submitted_ - taken_.load(std::memory_order_acquire) >= queue_.size();
-    };
+std::uint64_t RdpWorker::completed() const {
+    std::uint64_t done = ~std::uint64_t{0};
+    for (const auto& lane : lanes_) done = std::min(done, lane->completed.load(std::memory_order_acquire));
+    return done;
+}
+
+std::uint64_t RdpWorker::taken() const {
+    std::uint64_t done = ~std::uint64_t{0};
+    for (const auto& lane : lanes_) done = std::min(done, lane->taken.load(std::memory_order_acquire));
+    return done;
+}
+
+void RdpWorker::submit(const RdpPacket& packet, const RdpAccess& access, bool barrier) {
+    const auto full = [this] { return submitted_ - taken() >= queue_.size(); };
     if (full()) {
         ++queue_waits_;
         spin_until([&] { return !full() || failed_.load(std::memory_order_acquire); });
@@ -63,21 +88,19 @@ void RdpWorker::submit(const RdpPacket& packet, const RdpAccess& access) {
         cached_[next_cached_] = {range.begin, end, range.write, slot};
         next_cached_ = (next_cached_ + 1) % kCached;
     }
-    queue_[(sequence - 1) % queue_.size()] = {packet, sequence};
+    queue_[(sequence - 1) % queue_.size()] = {packet, sequence, barrier};
     pushed_.store(sequence, std::memory_order_seq_cst);
-    // seq_cst pairs with the worker's sleeping_/pushed_ check: one side always sees the other.
-    if (sleeping_.load(std::memory_order_seq_cst)) {
+    // seq_cst pairs with the consumers' sleepers_/pushed_ check: one side always sees the other.
+    if (sleepers_.load(std::memory_order_seq_cst) != 0) {
         { std::lock_guard lock(mutex_); }
-        changed_.notify_one();
+        changed_.notify_all();
     }
 }
 
 void RdpWorker::wait(std::uint64_t sequence) const {
-    if (!failed_.load(std::memory_order_acquire) && completed_.load(std::memory_order_acquire) >= sequence) return;
+    if (!failed_.load(std::memory_order_acquire) && completed() >= sequence) return;
     ++waits_;
-    spin_until([&] {
-        return failed_.load(std::memory_order_acquire) || completed_.load(std::memory_order_acquire) >= sequence;
-    });
+    spin_until([&] { return failed_.load(std::memory_order_acquire) || completed() >= sequence; });
     if (failed_.load(std::memory_order_acquire)) {
         std::lock_guard lock(mutex_);
         if (failure_) std::rethrow_exception(failure_);
@@ -96,7 +119,8 @@ void RdpWorker::wait_memory(std::uint32_t address, std::size_t bytes, bool write
     wait(sequence);
 }
 
-void RdpWorker::run() {
+void RdpWorker::run(std::size_t index) {
+    Lane& lane = *lanes_[index];
     try {
         std::uint64_t next = 1;
         const auto ready = [&] { return pushed_.load(std::memory_order_seq_cst) >= next; };
@@ -105,22 +129,31 @@ void RdpWorker::run() {
             for (unsigned spins = 0; !ready() && spins < 4096; ++spins) {}
             if (!ready()) {
                 std::unique_lock lock(mutex_);
-                sleeping_.store(true, std::memory_order_seq_cst);
+                sleepers_.fetch_add(1, std::memory_order_seq_cst);
                 changed_.wait(lock, [&] { return ready() || stopping_.load(std::memory_order_acquire); });
-                sleeping_.store(false, std::memory_order_seq_cst);
+                sleepers_.fetch_sub(1, std::memory_order_seq_cst);
                 if (!ready()) return;  // stopping with an empty queue
             }
             // Copy out, then release the slot so the producer can reuse it during execution.
-            const RdpPacket packet = queue_[(next - 1) % queue_.size()].packet;
-            taken_.store(next, std::memory_order_release);
-            execute_(packet);
-            completed_.store(next, std::memory_order_release);
+            const Work work = queue_[(next - 1) % queue_.size()];
+            lane.taken.store(next, std::memory_order_release);
+            if (work.barrier && lanes_.size() > 1) {
+                // Others only wait here for packets before this one, which this lane has
+                // finished: no cycle, so no deadlock.
+                spin_until([&] {
+                    return failed_.load(std::memory_order_acquire) || stopping_.load(std::memory_order_acquire) ||
+                           completed() >= next - 1;
+                });
+                if (failed_.load(std::memory_order_acquire)) return;
+            }
+            lane.execute(work.packet);
+            lane.completed.store(next, std::memory_order_release);
             ++next;
         }
     } catch (...) {
         {
             std::lock_guard lock(mutex_);
-            failure_ = std::current_exception();
+            if (!failure_) failure_ = std::current_exception();
             stopping_.store(true, std::memory_order_release);
             failed_.store(true, std::memory_order_release);
         }
@@ -128,4 +161,4 @@ void RdpWorker::run() {
     }
 }
 
-} // namespace ezy::n64
+}  // namespace ezy::n64

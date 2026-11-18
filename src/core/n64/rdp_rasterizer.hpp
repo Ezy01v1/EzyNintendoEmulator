@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include "n64/rdp_hidden_bits.hpp"
 #include <span>
 #include "n64/rdp_worker.hpp"
@@ -31,6 +32,11 @@ protected:
     using Rgba = std::array<unsigned, 4>;
     [[nodiscard]] unsigned texels_read() const;
     unsigned next_noise() const;
+    // Noise restarts from (primitive, row) so that every row gets the same values however
+    // the rows are split between band workers (hardware noise is random anyway).
+    void reseed_noise(std::uint32_t row) const {
+        noise_state_ = (primitive_serial_ * 0x9E3779B1U) ^ (row * 0x85EBCA77U) ^ 0x27D4EB2FU;
+    }
     struct LodLevel {
         unsigned first, second;  // TEXEL0 and TEXEL1 tile offsets from the primitive's tile
         int fraction;            // LOD_FRACTION combiner input (9-bit signed)
@@ -89,8 +95,12 @@ protected:
     std::uint64_t convert_ = 0;   // Set Convert: K0..K5, 9 bits each
     std::uint32_t prim_lod_ = 0;  // Set Primitive Color: min level and LOD fraction
     mutable std::uint32_t noise_state_ = 1;
-    // Only depth writes set the hidden bits; fills clear them.
-    mutable RdpHiddenBits hidden_;
+    std::uint32_t primitive_serial_ = 1;  // draws so far: the noise seed, saved in states
+    // Only depth writes set the hidden bits; fills clear them. Band copies share the table.
+    std::shared_ptr<RdpHiddenBits> hidden_ = std::make_shared<RdpHiddenBits>();
+    // Threaded rendering splits rows between band workers in groups of 4: this copy draws
+    // the groups with (y / 4) % band_count_ == band_index_. Not saved: set by the owner.
+    unsigned band_index_ = 0, band_count_ = 1;
     SolidState solid_;
     TextureState texture_;
 };

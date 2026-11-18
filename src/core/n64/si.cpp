@@ -15,6 +15,7 @@ void Si::write(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& sch
     switch (offset & 0x1F) {
         case 0x00: dram_addr_ = value & 0x00FFFFF8; return;
         case 0x04:  // SI_PIF_AD_RD64B: PIF RAM -> RDRAM
+            pif.before_read();
             for (std::size_t i = 0; i < 64; ++i) {
                 if (dram_addr_ + i < rdram.size()) rdram[dram_addr_ + i] = pif.ram()[i];
             }

@@ -25,6 +25,14 @@ public:
                std::span<const std::uint8_t> rdram);
     void on_dma_end(Mi& mi, Scheduler& scheduler, std::span<const std::uint8_t> rdram);
 
+    // RDRAM bytes the next AI_LEN write or buffer switch may read, so a threaded RDP only
+    // has to finish the packets touching them. `bytes` is 0 when nothing will be read.
+    struct ReadRange { std::uint32_t address = 0, bytes = 0; };
+    [[nodiscard]] ReadRange next_read_on_length(std::uint32_t value) const { return {dram_addr_, value & 0x3FFF8}; }
+    [[nodiscard]] ReadRange next_read_on_dma_end() const {
+        return count_ == 2 ? ReadRange{fifo_[1].addr, fifo_[1].length} : ReadRange{};
+    }
+
     [[nodiscard]] int sample_rate() const;
     [[nodiscard]] std::span<const float> samples() const { return samples_; }
     void clear_samples() { samples_.clear(); }

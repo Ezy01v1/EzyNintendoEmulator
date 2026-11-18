@@ -34,21 +34,21 @@ struct RdpMemoryState {
     [[nodiscard]] RdpAccess load_access(std::uint64_t word, unsigned op) const {
         constexpr std::uint32_t ram_size = 8 * 1024 * 1024;
         const std::uint64_t image = static_cast<std::uint32_t>(texture_image) & 0xFFFFFF;
-        const std::uint64_t width = (static_cast<std::uint32_t>(texture_image >> 32) & 0x3FF) + 1;
+        const std::uint64_t image_width = (static_cast<std::uint32_t>(texture_image >> 32) & 0x3FF) + 1;
         const unsigned size = static_cast<unsigned>(texture_image >> 51) & 3;
         const auto field = [word](unsigned shift) { return std::uint64_t{(word >> shift) & 0xFFF}; };
         const std::uint64_t sl = field(44), tl = field(32), sh = field(12), th = field(0);
         std::uint64_t first = 0, last = 0, bytes = 1ULL << (size == 0 ? 0 : size - 1);
         if (op == 0x30) {  // Load TLUT: 16-bit entries on one row
             bytes = 2;
-            first = (tl >> 2) * width + (sl >> 2);
-            last = (tl >> 2) * width + (sh >> 2);
+            first = (tl >> 2) * image_width + (sl >> 2);
+            last = (tl >> 2) * image_width + (sh >> 2);
         } else if (op == 0x33) {  // Load Block: a run of texels from (sl, tl)
-            first = tl * width + sl;
+            first = tl * image_width + sl;
             last = first + ((sh - sl + 1) & 0xFFF);
         } else {  // Load Tile: rows top..bottom, texels left..right
-            first = (tl >> 2) * width + (sl >> 2);
-            last = (th >> 2) * width + (sh >> 2);
+            first = (tl >> 2) * image_width + (sl >> 2);
+            last = (th >> 2) * image_width + (sh >> 2);
         }
         if (last < first) return {};  // the rasterizer rejects inverted rectangles
         const std::uint64_t begin = image + first * bytes;

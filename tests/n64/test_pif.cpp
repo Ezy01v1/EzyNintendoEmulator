@@ -80,6 +80,25 @@ TEST_CASE("SI write DMA runs the PIF commands and interrupts") {
     CHECK(bus.read8(0x2000 + 3) == 0x10);
 }
 
+TEST_CASE("SI reads rerun an armed command block, like libultra's repeated controller polls") {
+    // osContStartReadData writes the block only when the command changes; afterwards it
+    // just reads PIF RAM and expects fresh buttons (Spider-Man never saw A pressed).
+    Pif pif;
+    put(pif, {0x01, 0x04, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE});
+    pif.ram()[63] = 0x01;
+    pif.after_write();
+    CHECK(pif.ram()[3] == 0x00);
+    pif.set_buttons(0, 0x8000, 0, 0);  // A pressed after the write
+    pif.before_read();
+    CHECK(pif.ram()[3] == 0x80);
+    // A write without the run bit (e.g. the boot acknowledge) disarms the block.
+    pif.ram()[63] = 0x08;
+    pif.after_write();
+    pif.set_buttons(0, 0x1000, 0, 0);
+    pif.before_read();
+    CHECK(pif.ram()[3] == 0x80);
+}
+
 TEST_CASE("HLE boot copies IPL3 to DMEM and starts at 0xA4000040") {
     Scheduler scheduler;
     const Cartridge cart = boot_cart('E');

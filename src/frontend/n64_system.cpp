@@ -135,10 +135,18 @@ namespace {
 // RDP (checked on MK64), ~15 % faster on a 4-core PC. N64 falls back to synchronous if
 // the thread cannot start.
 constexpr n64::RdpMode kFrontendRdpMode = n64::RdpMode::Threaded;
+
+// Audio tasks of known microcodes run at a high level (MK64: same RDRAM bytes as the RSP
+// over 1858 tasks, ~18 % faster). Unknown ones still run on the RSP.
+std::unique_ptr<n64::N64> create_n64(std::span<const std::uint8_t> rom) {
+    auto n64 = n64::N64::create(rom, {}, kFrontendRdpMode);
+    if (n64) n64->bus().set_audio_hle(true);
+    return n64;
+}
 }  // namespace
 
 std::unique_ptr<N64System> N64System::create(std::span<const std::uint8_t> rom, std::filesystem::path rom_path) {
-    auto n64 = n64::N64::create(rom, {}, kFrontendRdpMode);
+    auto n64 = create_n64(rom);
     if (!n64) return nullptr;
     return std::unique_ptr<N64System>(new N64System({rom.begin(), rom.end()}, std::move(n64), std::move(rom_path)));
 }
@@ -170,7 +178,7 @@ void N64System::collect_audio() {
 }
 
 void N64System::reset() {
-    n64_ = n64::N64::create(rom_, {}, kFrontendRdpMode);
+    n64_ = create_n64(rom_);
     resample_phase_ = 0;
     update_controller();
 }

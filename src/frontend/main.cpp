@@ -140,7 +140,9 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return 1;
     }
-    SDL_SetRenderVSync(renderer, 1);
+    // No vsync: a present that waits for the next refresh would round every slow frame up
+    // to two refreshes (a 21 ms N64 frame became 33 ms, 30 fps). The loop paces itself.
+    SDL_SetRenderVSync(renderer, 0);
 
     SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
                                              system->screen_width(), system->screen_height());
@@ -170,6 +172,8 @@ int main(int argc, char* argv[]) {
         const double counter_freq = static_cast<double>(SDL_GetPerformanceFrequency());
         std::uint64_t previous = SDL_GetPerformanceCounter();
         double accumulator = 0.0;
+        int emulated_frames = 0;
+        std::uint64_t fps_window_start = previous;
 
         bool running = true;
         while (running) {
@@ -198,6 +202,14 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Sleep until the next emulated frame is due instead of spinning (the RDP thread
+            // and the OS need the cores); render only when a new frame was emulated.
+            const double waited = static_cast<double>(SDL_GetPerformanceCounter() - previous) / counter_freq;
+            if (run.paused) {
+                SDL_DelayPrecise(static_cast<std::uint64_t>(frame_seconds * 1e9));  // keep the UI at ~60 Hz
+            } else if (accumulator + waited < frame_seconds) {
+                SDL_DelayPrecise(static_cast<std::uint64_t>((frame_seconds - accumulator - waited) * 1e9));
+            }
             const std::uint64_t now = SDL_GetPerformanceCounter();
             accumulator += static_cast<double>(now - previous) / counter_freq;
             accumulator = std::min(accumulator, kMaxCatchUpSeconds);
@@ -218,9 +230,19 @@ int main(int argc, char* argv[]) {
                 // time, it slows the game down instead of showing one frame out of many.
                 for (int frames = 0; accumulator >= frame_seconds && frames < kMaxFramesPerRender; ++frames) {
                     system->run_frame();
+                    ++emulated_frames;
                     accumulator -= frame_seconds;
                 }
                 if (accumulator >= frame_seconds) accumulator = 0.0;
+            }
+            // Emulated frames per second in the title, refreshed every second: the speed the
+            // game really runs at (60 = full speed for NTSC N64 games).
+            if (const double elapsed = static_cast<double>(now - fps_window_start) / counter_freq; elapsed >= 1.0) {
+                const std::string speed = title + "  |  " + std::to_string(static_cast<int>(emulated_frames / elapsed + 0.5)) +
+                                          " fps";
+                SDL_SetWindowTitle(window, speed.c_str());
+                emulated_frames = 0;
+                fps_window_start = now;
             }
             if (own_audio) {
                 if (run.paused) {

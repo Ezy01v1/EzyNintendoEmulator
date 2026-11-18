@@ -108,6 +108,13 @@ void RspRegs::write_status(std::uint32_t value, Mi& mi, Scheduler& scheduler, st
     }
 }
 
+void RspRegs::finish_hle_task(Mi& mi, Scheduler& scheduler) {
+    constexpr std::uint32_t kTaskDone = 1U << 9;  // SIG2
+    sp_status_ |= kHalt | kBroke | kTaskDone;
+    scheduler.cancel(EventType::RspStep);
+    if (sp_status_ & kInterruptOnBreak) mi.raise(MiInterrupt::Sp);
+}
+
 void RspRegs::start_dma(Scheduler& scheduler, std::uint64_t when) {
     if (dma_.direction != DmaDirection::Idle || pending_.direction == DmaDirection::Idle) return;
     dma_ = pending_;

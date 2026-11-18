@@ -1,7 +1,9 @@
 #include "n64/rdp.hpp"
 
-#include <system_error>
+#include <algorithm>
 #include <atomic>
+#include <system_error>
+#include <thread>
 
 namespace ezy::n64 {
 
@@ -32,18 +34,75 @@ Rdp::~Rdp() = default; // The worker joins before the base raster state is destr
 RdpMode default_rdp_mode() { return default_mode.load(std::memory_order_relaxed); }
 void set_default_rdp_mode(RdpMode mode) { default_mode.store(mode, std::memory_order_relaxed); }
 
-bool Rdp::enable_threaded(std::span<std::uint8_t> rdram) {
+bool Rdp::enable_threaded(std::span<std::uint8_t> rdram, unsigned bands) {
     if (worker_) return true;
+    // One band per four hardware threads: more bands slow the emulation thread down (on a
+    // 4-core/8-thread i7-4790, MK64's race: 1 band 34.6 fps, 2 bands 41.1, 3 39.0, 4 35.8).
+    if (bands == 0) bands = std::clamp(std::thread::hardware_concurrency() / 4, 1U, 4U);
     rebuild_memory_state();
     worker_ram_ = rdram;
+    bands_.clear();
+    for (unsigned i = 1; i < bands; ++i) bands_.push_back(std::make_unique<RdpBand>());
+    band_count_ = bands;
+    sync_bands();
+    std::vector<RdpWorker::Execute> executes;
+    executes.emplace_back([this](const RdpPacket& packet) { execute_packet(packet, worker_ram_); });
+    for (auto& band : bands_) {
+        executes.emplace_back([this, raw = band.get()](const RdpPacket& packet) { raw->run(packet, worker_ram_); });
+    }
     try {
-        worker_ = std::make_unique<RdpWorker>([this](const RdpPacket& packet) {
-            execute_packet(packet, worker_ram_);
-        });
+        worker_ = std::make_unique<RdpWorker>(std::move(executes));
     } catch (const std::system_error&) {
-        return false; // No thread was started; synchronous rendering remains available.
+        bands_.clear();  // No thread is left running; synchronous rendering remains available.
+        band_count_ = 1;
+        return false;
     }
     return true;
+}
+
+void Rdp::sync_bands() {
+    band_index_ = 0;
+    band_count_ = static_cast<unsigned>(bands_.size() + 1);
+    for (unsigned i = 0; i < bands_.size(); ++i) bands_[i]->assign(*this, i + 1, band_count_);
+    drawn_count_ = 0;
+}
+
+bool Rdp::needs_barrier(const RdpPacket& packet, const RdpAccess& access) {
+    if (bands_.empty()) return false;
+    const unsigned op = static_cast<unsigned>(packet.words[0] >> 56) & 63;
+    // A new color or depth image maps addresses to other rows, so to other bands.
+    if (op == 0x3E || op == 0x3F) {
+        drawn_count_ = 0;
+        return true;
+    }
+    if (op == 0x30 || op == 0x33 || op == 0x34) {
+        for (unsigned i = 0; i < access.count; ++i) {
+            const auto& load = access.ranges[i];
+            for (unsigned d = 0; d < drawn_count_; ++d) {
+                if (load.begin < drawn_[d].end && drawn_[d].begin < load.end) {
+                    drawn_count_ = 0;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    for (unsigned i = 0; i < access.count; ++i) {
+        const auto& range = access.ranges[i];
+        if (!range.write) continue;
+        const auto same = std::find_if(drawn_.begin(), drawn_.begin() + drawn_count_, [&](const RdpAccess::Range& d) {
+            return d.begin == range.begin && d.end == range.end;
+        });
+        if (same != drawn_.begin() + drawn_count_) continue;
+        if (drawn_count_ < drawn_.size()) {
+            drawn_[drawn_count_++] = range;
+        } else {  // too many: widen the last one
+            auto& last = drawn_.back();
+            last.begin = std::min(last.begin, range.begin);
+            last.end = std::max(last.end, range.end);
+        }
+    }
+    return false;
 }
 
 void Rdp::rebuild_memory_state() {
@@ -54,6 +113,7 @@ void Rdp::rebuild_memory_state() {
 void Rdp::reset_state() {
     drain();
     static_cast<RdpRasterizer&>(*this) = RdpRasterizer{};
+    sync_bands();
     start_ = end_ = current_ = words_to_skip_ = 0;
     status_ = 0x80;
     clock_origin_ = last_update_ = 0;
@@ -66,7 +126,7 @@ void Rdp::dispatch(const RdpPacket& packet, std::span<std::uint8_t> rdram) {
     if (worker_) {
         const auto access = memory_state_.access(packet);
         memory_state_.apply(packet.words[0]);
-        worker_->submit(packet, access);
+        worker_->submit(packet, access, needs_barrier(packet, access));
     } else {
         execute_packet(packet, rdram);
     }
@@ -176,7 +236,8 @@ void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
             words_to_skip_ = command_words(op) - 1;
             if (words_to_skip_ == 0) {
                 if (op == 0x29) {
-                    drain();
+                    // No drain: every RDRAM observer (CPU, DMA, VI image, save state) waits
+                    // for the packets it overlaps, so the CPU can run ahead of the worker.
                     status_ &= ~(kStartClock | kPipeBusy);
                     mi.raise(MiInterrupt::Dp);
                 } else {

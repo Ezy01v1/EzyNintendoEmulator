@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <memory>
 
 namespace ezy::n64 {
 
@@ -151,6 +152,10 @@ unsigned dither_channel(unsigned channel, unsigned threshold) {
 void RdpRasterizer::execute_packet(const RdpPacket& packet, std::span<std::uint8_t> rdram) {
     if (packet.count == 0) return;
     const auto op = opcode(packet.words[0]);
+    if ((op >= 0x08 && op <= 0x0F) || op == 0x24 || op == 0x36) {
+        ++primitive_serial_;
+        reseed_noise(0xFFFFFFFFU);
+    }
     if ((op >= 0x08 && op <= 0x0F) || op == 0x24) {
         raster_command_ = packet.words;
         if (op != 0x24) draw_triangle(rdram);
@@ -240,6 +245,7 @@ void RdpRasterizer::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8
     if (try_constant_rectangle(left, top, right, bottom, color, rdram)) return;
     for (unsigned y = top >> 2; 4 * y < bottom; ++y) {
         if (!field_matches(y)) continue;
+        reseed_noise(y);
         for (unsigned x = left >> 2; 4 * x < right; ++x) {
             if (!antialias && (4 * y < top || !covers_x(4 * x))) continue;
             unsigned coverage = 0;
@@ -378,6 +384,7 @@ void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
     const bool late = (major.step < 0) == major_left;
     for (int y = top >> 2; 4 * y < bottom; ++y) {
         if (!field_matches(static_cast<unsigned>(y))) continue;
+        reseed_noise(static_cast<std::uint32_t>(y));
         int left = clip_right, right = clip_left;
         bool valid = false, all_left = true, all_right = true;
         std::array<SampleSpan, 4> samples{};
@@ -486,6 +493,8 @@ void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
 }
 
 bool RdpRasterizer::field_matches(unsigned y) const {
+    // Every draw loop asks this per row, so it also picks this band worker's rows.
+    if (band_count_ > 1 && (y >> 2) % band_count_ != band_index_) return false;
     const bool field_only = (scissor_ & (1ULL << 25)) != 0;
     const unsigned field = static_cast<unsigned>(scissor_ >> 24) & 1;
     return !field_only || (y & 1) == field;
@@ -505,7 +514,7 @@ void RdpRasterizer::fill_span(unsigned y, unsigned left, unsigned right, std::sp
     // Fills clear the hidden bits they cover. Hardware copies each halfword's low bit into them;
     // only depth reads use them here, and depth clears (0xFFFC) have that bit clear.
     if (first < end) {
-        hidden_.clear(first >> 1, (end + 1) >> 1);
+        hidden_->clear(first >> 1, (end + 1) >> 1);
     }
 }
 
@@ -633,18 +642,13 @@ RdpRasterizer::Rgba RdpRasterizer::combine(const Rgba& texel0, const Rgba& texel
     const auto unclamped = [](int a, int b, int c, int d) { return ((a - b) * c + (d << 8) + 0x80) >> 8; };
     const auto equation = [&](int a, int b, int c, int d) { return clamp_combined(unclamped(a, b, c, d)); };
 
+    static constexpr Rgba kAllOne{255, 255, 255, 255}, kAllZero{};
     const auto cycle = [&](const CombinerFields& f, const Rgba& combined, const Rgba& t0, const Rgba& t1) {
-        const auto input = [&](unsigned source, unsigned channel) -> int {
-            switch (source) {
-                case kCombined: return static_cast<int>(combined[channel]);
-                case kTexel0: return static_cast<int>(t0[channel]);
-                case kTexel1: return static_cast<int>(t1[channel]);
-                case kPrimitive: return static_cast<int>(primitive[channel]);
-                case kShade: return static_cast<int>(shade[channel]);
-                case kEnvironment: return static_cast<int>(environment[channel]);
-                case kOne: return 255;
-                default: return 0;
-            }
+        // Indexed by CombinerSource: a table lookup the compiler inlines, unlike a switch
+        // per channel and term (the hottest code of the rasterizer).
+        const std::array<const Rgba*, 8> sources{&combined, &t0, &t1, &primitive, &shade, &environment, &kAllOne, &kAllZero};
+        const auto input = [&sources](unsigned source, unsigned channel) -> int {
+            return static_cast<int>((*sources[source & 7])[channel]);
         };
         Rgba out{};
         const unsigned sub_a = field(f.a, 15), sub_b = field(f.b, 15), multiplier = field(f.c, 31), add = field(f.d, 7);
@@ -752,11 +756,11 @@ bool RdpRasterizer::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned
 }
 
 unsigned RdpRasterizer::hidden_bits(std::size_t address) const {
-    return hidden_.read(address >> 1);
+    return hidden_->read(address >> 1);
 }
 
 void RdpRasterizer::set_hidden_bits(std::size_t address, unsigned bits) const {
-    hidden_.write(address >> 1, bits);
+    hidden_->write(address >> 1, bits);
 }
 
 void RdpRasterizer::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const {

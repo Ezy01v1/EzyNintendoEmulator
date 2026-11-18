@@ -2,7 +2,9 @@
 
 #include <array>
 #include <future>
+#include <initializer_list>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "n64/rdp_worker.hpp"
@@ -87,7 +89,7 @@ TEST_CASE("RDP worker handles bounded queues and propagates execution failures")
     CHECK_THROWS_AS(worker.wait_memory(0, 1, false), std::runtime_error);
 }
 
-TEST_CASE("threaded RDP captures XBUS words and completes writes before Sync Full") {
+TEST_CASE("threaded RDP captures XBUS words and exposes writes to observers after Sync Full") {
     std::vector<std::uint8_t> ram(8 * 1024 * 1024);
     std::array<std::uint8_t, 4096> dmem{};
     Rdp rdp;
@@ -117,6 +119,8 @@ TEST_CASE("threaded RDP captures XBUS words and completes writes before Sync Ful
         // The source can be overwritten as soon as its word has been consumed.
         std::fill_n(dmem.begin() + w * 8, 8, std::uint8_t{0});
     }
+    // Sync Full does not block on the worker; observers wait on their own ranges.
+    rdp.prepare_memory(0x4000, 16, false);
     for (unsigned i = 0; i < 16; ++i)
         CHECK(ram[0x4000 + i] == static_cast<std::uint8_t>(0x12345678U >> ((3 - (i & 3)) * 8)));
     CHECK(rdp.read(8, scheduler.now()) == 48);
@@ -131,6 +135,78 @@ TEST_CASE("threaded RDP captures XBUS words and completes writes before Sync Ful
     ezy::StateWriter again;
     synchronous.serialize(again, 11);
     CHECK(again.take() == state);
+}
+
+namespace {
+constexpr std::uint64_t rect(std::uint64_t op, unsigned hi_x, unsigned hi_y, unsigned lo_x, unsigned lo_y) {
+    return (op << 56) | (std::uint64_t{hi_x * 4} << 44) | (std::uint64_t{hi_y * 4} << 32) |
+           (std::uint64_t{lo_x * 4} << 12) | (lo_y * 4);
+}
+
+// Feeds commands through XBUS (DMEM) one word per RDP step, then waits for the raster threads.
+void run_xbus(Rdp& rdp, std::vector<std::uint8_t>& ram, const std::vector<std::uint64_t>& commands) {
+    std::array<std::uint8_t, 4096> dmem{};
+    REQUIRE(commands.size() * 8 <= dmem.size());
+    for (std::size_t w = 0; w < commands.size(); ++w)
+        for (unsigned byte = 0; byte < 8; ++byte)
+            dmem[w * 8 + byte] = static_cast<std::uint8_t>(commands[w] >> (56 - byte * 8));
+    Scheduler scheduler;
+    Mi mi;
+    rdp.write(12, 2, scheduler, 0);  // XBUS
+    rdp.write(0, 0, scheduler, 0);
+    rdp.write(4, static_cast<std::uint32_t>(commands.size() * 8), scheduler, 0);
+    for (std::size_t w = 0; w < commands.size(); ++w) {
+        scheduler.advance(3);
+        const auto event = scheduler.pop_due();
+        REQUIRE(event);
+        rdp.step(mi, scheduler, ram, dmem, event->when);
+    }
+    rdp.drain();
+}
+}  // namespace
+
+TEST_CASE("banded threaded RDP draws the same pixels, including render to texture") {
+    // Three bands split the 16 rows in groups of 4. Image A is filled in three colors, then
+    // loaded as a texture and copied 1:1 into image B: the load must see rows every band drew.
+    constexpr std::uint64_t image_a = 0x3F10000F00004000ULL, image_b = 0x3F10000F00008000ULL;  // RGBA16, 16 wide
+    const std::uint64_t one_cycle = (0x2FULL << 56) | (6ULL << 41) | (3ULL << 38) | (1U << 9);
+    std::uint64_t texel0 = 0x3CULL << 56;  // both cycles: (0 - 0) * 0 + TEXEL0, alpha too
+    for (const auto [shift, value] : std::initializer_list<std::pair<unsigned, unsigned>>{
+             {52, 15}, {47, 31}, {44, 7}, {41, 7}, {28, 15}, {15, 1}, {12, 7}, {9, 1},
+             {37, 15}, {32, 31}, {21, 7}, {18, 7}, {24, 15}, {6, 1}, {3, 7}, {0, 1}}) {
+        texel0 |= std::uint64_t{value} << shift;
+    }
+    const std::vector<std::uint64_t> commands{
+        image_a,
+        0x2F30000000000000ULL,  // fill mode
+        (0x2DULL << 56) | (64ULL << 12) | 64,  // scissor (0,0)..(16,16)
+        0x37000000F801F801ULL, rect(0x36, 15, 4, 0, 0),
+        0x3700000007C107C1ULL, rect(0x36, 15, 9, 0, 5),
+        0x37000000003F003FULL, rect(0x36, 15, 15, 0, 10),
+        image_b,
+        one_cycle,
+        texel0,
+        0x3D10000F00004000ULL,  // texture image: A
+        (0x35ULL << 56) | (2ULL << 51) | (4ULL << 41),  // tile 0: RGBA16, 4 words per row
+        rect(0x34, 0, 0, 15, 15),  // load tile (sl, tl, sh, th)
+        rect(0x32, 0, 0, 15, 15),  // tile size
+        rect(0x24, 16, 16, 0, 0), (1024ULL << 16) | 1024,  // texrect, one texel per pixel
+    };
+    std::vector<std::uint8_t> sync_ram(8 * 1024 * 1024), banded_ram(8 * 1024 * 1024);
+    Rdp synchronous, banded;
+    REQUIRE(banded.enable_threaded(banded_ram, 3));
+    REQUIRE(banded.bands() == 3);
+    run_xbus(synchronous, sync_ram, commands);
+    run_xbus(banded, banded_ram, commands);
+    for (std::uint32_t at = 0x4000; at < 0x4200; ++at) REQUIRE(banded_ram[at] == sync_ram[at]);
+    for (std::uint32_t at = 0x8000; at < 0x8200; ++at) REQUIRE(banded_ram[at] == sync_ram[at]);
+    CHECK(sync_ram[0x4000] == 0xF8);  // row 0: first fill color
+    CHECK(sync_ram[0x4000 + 15 * 32] == 0x00);  // row 15: third color, 0x003F
+    CHECK(sync_ram[0x4000 + 15 * 32 + 1] == 0x3F);
+    for (std::uint32_t i = 0; i < 0x200; i += 2) {  // B is A copied (opaque texels)
+        CAPTURE(i);
+        CHECK(sync_ram[0x8000 + i] == sync_ram[0x4000 + i]);
+    }
 }
 
 TEST_CASE("RDP reservations include unaligned targets and X beyond the row stride") {

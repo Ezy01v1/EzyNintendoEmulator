@@ -816,8 +816,10 @@ TEST_CASE("RDP combiner noise input is a 9-bit value with random top bits") {
         CAPTURE(x);
         const auto pixel = n64->bus().read32(0x4000 + 4 * x);
         const unsigned r = pixel >> 24;
-        // Positive noise 0x20, 0x60, 0xA0, 0xE0 times 255/256; negative values clamp to 0.
-        CHECK((r == 0 || r == 32 || r == 96 || r == 159 || r == 223));
+        CAPTURE(pixel);
+        // Positive noise 0x20, 0x60, 0xA0, 0xE0 times 255/256. Negative noise wraps in the
+        // 9-bit clamp: -0x20 and -0x60 read as 0, -0xA0 and -0xE0 (bit 7 clear) as 255.
+        CHECK((r == 0 || r == 32 || r == 96 || r == 159 || r == 223 || r == 255));
         CHECK(((pixel >> 16) & 255) == r);  // the same noise feeds all three channels
     }
 }
@@ -968,6 +970,64 @@ TEST_CASE("RDP two-cycle TEXEL1 in cycle 1 is the next pixel's TEXEL0") {
     CHECK(bus.read32(0x4000) == 0x00FF00E0U);
     CHECK(bus.read32(0x4004) == 0x0000FFE0U);
     CHECK(bus.read32(0x4008) == 0xFFFFFFE0U);
+}
+
+TEST_CASE("RDP textured rectangles sample intensity textures (I8, I4 and IA8)") {
+    // Spider-Man draws its text in I4: these formats used to be rejected and drew nothing.
+    struct Case {
+        const char* name;
+        std::uint64_t source, load_image, load_tile, render_tile;
+        std::array<std::uint32_t, 4> expected;
+    };
+    const std::uint64_t i_format = 4, ia_format = 3;
+    const std::array<Case, 3> cases{{
+        {"I8", 0x0040'80FF'0000'0000ULL, (i_format << 53) | (1ULL << 51) | (3ULL << 32),
+         rdp_tile(4, 1, 1, 1, 0), rdp_tile(4, 1, 0, 1, 0),
+         {0x000000E0U, 0x404040E0U, 0x808080E0U, 0xFFFFFFE0U}},
+        // I4 is loaded as 8-bit pairs: 0x0F, 0x8F hold texels 0, F, 8, F.
+        {"I4", 0x0F8F'0000'0000'0000ULL, (i_format << 53) | (1ULL << 51) | (1ULL << 32),
+         rdp_tile(4, 1, 1, 1, 0), rdp_tile(4, 0, 0, 1, 0),
+         {0x000000E0U, 0xFFFFFFE0U, 0x888888E0U, 0xFFFFFFE0U}},
+        // IA8: intensity in the high nibble, alpha in the low one.
+        {"IA8", 0x0F30'F0FF'0000'0000ULL, (ia_format << 53) | (1ULL << 51) | (3ULL << 32),
+         rdp_tile(3, 1, 1, 1, 0), rdp_tile(3, 1, 0, 1, 0),
+         {0x000000E0U, 0x333333E0U, 0xFFFFFFE0U, 0xFFFFFFE0U}},
+    }};
+    for (const auto& c : cases) {
+        const std::string name = c.name;
+        CAPTURE(name);
+        const auto n64 = N64::create(counting_rom("RDP INTENSITY"));
+        REQUIRE(n64);
+        auto& bus = n64->bus();
+        constexpr std::uint32_t source = 0x2000;
+        bus.write64(source, c.source);
+        const std::uint64_t modes = (0x2FULL << 56) | (6ULL << 41) | (3ULL << 38) | (1U << 9);
+        const unsigned load_width = c.render_tile == rdp_tile(4, 0, 0, 1, 0) ? 1 : 3;
+        const std::vector<std::uint64_t> commands{
+            0x3F18000300004000ULL,
+            rdp_rectangle(0x2D, 0, 0, 4, 4),
+            modes,
+            set_combine({15, 15, 31, 1, 7, 7, 7, 1}, {15, 15, 31, 1, 7, 7, 7, 1}),  // TEXEL0
+            (0x3DULL << 56) | c.load_image | source,
+            c.load_tile,
+            rdp_rectangle(0x34, 0, 0, load_width, 0) | (1ULL << 24),
+            c.render_tile,
+            rdp_rectangle(0x32, 0, 0, 3, 0),  // tile 0 covers texels 0..3
+            rdp_rectangle(0x24, 4, 1, 0, 0),
+            rdp_texture_coords(0, 0, 1024, 1024),  // one texel per pixel
+            kSyncFull,
+        };
+        std::uint32_t end = 0x1000;
+        for (const auto command : commands) bus.write64(end, command), end += 8;
+        bus.write32(kDpcStart, 0x1000);
+        bus.write32(kDpcEnd, end);
+        for (unsigned i = 0; i < 40; ++i) n64->step();
+        CHECK(bus.read32(kDpcCurrent) == end);
+        for (unsigned x = 0; x < 4; ++x) {
+            CAPTURE(x);
+            CHECK(bus.read32(0x4000 + 4 * x) == c.expected[x]);
+        }
+    }
 }
 
 TEST_CASE("RDP one-cycle fill rectangle goes through the combiner and blender") {

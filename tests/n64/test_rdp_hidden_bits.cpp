@@ -25,8 +25,10 @@ TEST_CASE("RDP direct hidden bits preserve the sparse map across writes and fill
                             reference.lower_bound(static_cast<std::uint32_t>(first + 32)));
             CHECK(bits.read(index) == 0);
         }
-        REQUIRE(bits.count() == reference.size());
+        // count() scans the whole table (no shared counter for the band threads to race on).
+        if (i % 512 == 511) REQUIRE(bits.count() == reference.size());
     }
+    REQUIRE(bits.count() == reference.size());
     ezy::StateWriter old_format, actual;
     auto count = static_cast<std::uint32_t>(reference.size());
     old_format(count);

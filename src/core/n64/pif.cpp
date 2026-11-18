@@ -63,6 +63,7 @@ void Pif::run_commands() {
 
 void Pif::after_write() {
     std::uint8_t& control = ram_[63];
+    joybus_armed_ = (control & 0x01) != 0;
     if (control & 0x01) {
         run_commands();
         control &= static_cast<std::uint8_t>(~0x01);

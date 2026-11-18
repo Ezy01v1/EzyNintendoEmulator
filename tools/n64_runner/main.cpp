@@ -143,6 +143,11 @@ void print_rdp_stats(N64& n64) {
               << ", native: " << jit.native_instructions << ", fallback: " << jit.fallback_instructions
               << ", blocks: " << jit.compiled_blocks << ", compile ms: " << jit.compile_ns/1e6
               << ", reused: " << jit.reused_blocks << ", cache flushes: " << jit.cache_flushes << '\n';
+    const auto check = n64.bus().audio_hle_check();
+    if (check.tasks != 0) {
+        std::cout << "Audio HLE check: tasks " << check.tasks << ", bytes " << check.bytes << ", mismatched bytes "
+                  << check.mismatched_bytes << ", mismatched tasks " << check.mismatched_tasks << '\n';
+    }
 }
 
 }  // namespace
@@ -155,12 +160,15 @@ int main(int raw_argc, char* raw_argv[]) {
     int time_from = 0;
     const char* profile_path = nullptr;
     const char* final_state_path = nullptr;
+    bool audio_hle = false, audio_hle_check = false;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--rdp-threaded") == 0) rdp_mode = ezy::n64::RdpMode::Threaded;
         else if (std::strcmp(raw_argv[i], "--rdp-sync") == 0) rdp_mode = ezy::n64::RdpMode::Synchronous;
         else if (std::strcmp(raw_argv[i], "--rsp-jit") == 0) rsp_mode = ezy::n64::RspMode::Jit;
         else if (std::strcmp(raw_argv[i], "--rsp-interpreter") == 0) rsp_mode = ezy::n64::RspMode::Interpreter;
+        else if (std::strcmp(raw_argv[i], "--audio-hle") == 0) audio_hle = true;
+        else if (std::strcmp(raw_argv[i], "--audio-hle-check") == 0) audio_hle_check = true;
         else if (std::strcmp(raw_argv[i], "--time-from") == 0 && i + 1 < raw_argc) {
             const std::string value = raw_argv[++i];
             const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), time_from);
@@ -182,7 +190,8 @@ int main(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --dump-state <out.bin> [frames]\n"
                      "       ezy_n64_runner <rom> --benchmark <out.bmp> <end> --time-from <first>\n"
                      "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>\n"
-                     "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter\n";
+                     "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter,\n"
+                     "         --audio-hle, --audio-hle-check (run audio tasks on the RSP and compare)\n";
         return 2;
     }
     const std::vector<std::uint8_t> rom = read_file(args[1]);
@@ -191,6 +200,8 @@ int main(int raw_argc, char* raw_argv[]) {
         std::cerr << "Not an N64 ROM: " << args[1] << '\n';
         return 2;
     }
+    n64->bus().set_audio_hle(audio_hle);
+    n64->bus().set_audio_hle_check(audio_hle_check);
     std::cout << "Title: " << n64->cartridge().title() << '\n';
     std::cout << "RDP: " << (n64->bus().rdp_threaded() ? "threaded" : "synchronous") << '\n';
     std::cout << "RSP: " << (n64->bus().rsp().jit_active() ? "JIT available" : "interpreter") << '\n';
@@ -269,7 +280,9 @@ int main(int raw_argc, char* raw_argv[]) {
         const auto other_rsp = rsp_mode == ezy::n64::RspMode::Jit
             ? ezy::n64::RspMode::Interpreter : ezy::n64::RspMode::Jit;
         const auto other = N64::create(rom, pif, other_mode, other_rsp);
-        if (!other || !other->load_state(state) || other->save_state() != state) return 1;
+        if (!other) return 1;
+        other->bus().set_audio_hle(audio_hle);
+        if (!other->load_state(state) || other->save_state() != state) return 1;
         for (int i = 0; i < 120; ++i) { n64->run_frame(); other->run_frame(); }
         if (n64->save_state() != other->save_state() || n64->image().argb != other->image().argb) {
             std::cerr << "Failed: cross-mode state continuation differs\n";

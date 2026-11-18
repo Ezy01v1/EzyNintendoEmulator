@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -13,6 +14,7 @@
 #include "n64/pi.hpp"
 #include "n64/pif.hpp"
 #include "n64/rdp.hpp"
+#include "n64/rsp_audio_hle.hpp"
 #include "n64/rsp_regs.hpp"
 #include "n64/scheduler.hpp"
 #include "n64/si.hpp"
@@ -51,15 +53,36 @@ public:
         rdp_.prepare_memory(address, bytes, write);
     }
     void drain_rdp() const { rdp_.drain(); }
+    // Audio DMA reads only its own buffer: wait for the RDP packets touching it, not all of them.
+    void prepare_ai_read(Ai::ReadRange range) const {
+        if (range.bytes == 0) return;
+        if (range.address + range.bytes <= rdram_.size()) rdp_.prepare_memory(range.address, range.bytes, false);
+        else drain_rdp();
+    }
     [[nodiscard]] bool rdp_threaded() const { return rdp_.threaded(); }
     [[nodiscard]] RdpWorker::Stats rdp_stats() const { return rdp_.stats(); }
     [[nodiscard]] Vi::Image image() const { drain_rdp(); return vi_.image(rdram_); }
 
+    // Audio tasks of a known microcode run at a high level instead of on the RSP.
+    void set_audio_hle(bool enabled) { audio_hle_ = enabled; }
+    // Debugging: the RSP keeps running audio tasks, and each one is also run at a high
+    // level on a copy of RDRAM whose written bytes are compared when the RSP stops.
+    void set_audio_hle_check(bool enabled);
+    struct AudioHleCheck {
+        std::uint64_t tasks = 0, bytes = 0, mismatched_bytes = 0, mismatched_tasks = 0;
+    };
+    [[nodiscard]] AudioHleCheck audio_hle_check() const { return check_; }
+
     void handle_event(EventType type, std::uint64_t when);
     // The RspStep event, without the dispatch (the step loop's fast path).
-    void rsp_step(std::uint64_t when) { rsp_.step(mi_, rdp_, scheduler_, when); }
+    void rsp_step(std::uint64_t when) {
+        rsp_.step(mi_, rdp_, scheduler_, when);
+        if (shadow_) finish_shadow();
+    }
     std::optional<std::uint64_t> rsp_run(std::uint64_t when, bool stop_on_line) {
-        return rsp_.run(mi_, rdp_, scheduler_, when, stop_on_line);
+        const auto result = rsp_.run(mi_, rdp_, scheduler_, when, stop_on_line);
+        if (shadow_) finish_shadow();
+        return result;
     }
 
     [[nodiscard]] Mi& mi() { return mi_; }
@@ -86,7 +109,7 @@ public:
         rsp_.serialize(ar, version, rdp_);
         vi_.serialize(ar);
         si_.serialize(ar);
-        pif_.serialize(ar);
+        pif_.serialize(ar, version);
         ai_.serialize(ar);
         if (version >= 4) rdp_.serialize(ar, version);
     }
@@ -99,6 +122,8 @@ private:
     [[nodiscard]] static bool is_cart(std::uint32_t paddr);
     // Byte-addressable memory (RDRAM, SP DMEM/IMEM, ISViewer buffer), or nullptr.
     [[nodiscard]] std::uint8_t* memory(std::uint32_t paddr);
+    void on_rsp_start();
+    void finish_shadow();
 
     Scheduler& scheduler_;
     const Cartridge& cart_;
@@ -116,6 +141,14 @@ private:
     Pif pif_;
     Ai ai_;
     std::vector<std::uint8_t> pif_rom_;
+    bool audio_hle_ = false;
+    struct Shadow {
+        std::vector<std::uint8_t> rdram;
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> writes;  // address, bytes
+    };
+    std::unique_ptr<Shadow> shadow_;     // the audio task the RSP is running, checked
+    bool check_audio_hle_ = false;
+    AudioHleCheck check_;
 };
 
 }  // namespace ezy::n64

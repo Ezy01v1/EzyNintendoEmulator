@@ -660,3 +660,58 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   y estado final idénticos, continuación cruzada 300+120 aprobada, siete suites aprobadas.
   **`ezyemu` usa ahora el RDP en hilo por defecto** (runner y pruebas siguen síncronos salvo
   `--rdp-threaded`). El hilo principal (CPU + RSP) es ahora el límite (~30 campos/s de 60).
+- 2026-11-17 (2) — Perfil del hilo principal en la carrera (`--profile`): RSP 35 %, CPU ~34 %,
+  esperando al RDP 20 %. La espera venía casi toda de escribir `AI_LEN` (drenaba el RDP en cada
+  búfer de audio, ~3 s de 14,5) y, quitada esa, de `Sync Full`; hay que quitar las dos juntas o
+  la espera solo se muda. Ahora el AI espera solo el rango de su búfer y `Sync Full` no drena
+  (todos los observadores de RDRAM ya esperan su rango). Carrera 1500–1900: hilo **12,9–13,3 s
+  (~31 campos/s)**, síncrono 17,1 s; imagen y estado idénticos en ambos modos, continuación
+  cruzada 300+120 y siete suites aprobadas. El JIT del RSP es más lento que el intérprete en MK64
+  (25,9 frente a 28,7 campos/s). Siguiente: HLE del audio del RSP, luego la CPU.
+- 2026-11-17 (3) — HLE de audio (`rsp_audio_hle.cpp`): el microcódigo de audio de MK64 es el
+  conjunto "NEAD" (opcodes hasta 0x16, no ABI1); se reconoce por el hash de sus datos (el "texto"
+  de 4 KiB no es estable) y la tabla del resampler se lee de esos datos (+0x100). Tres fórmulas
+  medidas contra el RSP con un oráculo (lista sintética en la primera tarea real): RESAMPLE
+  redondea cada tap, MIXER es `(d·0x7FFF + s·g + 0x4000) >> 15` (no `d + round(s·g)`), ENVMIXER
+  trunca. `--audio-hle-check` corre el RSP y compara byte a byte lo que escribiría el HLE:
+  **1858 tareas, 9,7 MB, 0 diferencias**. Comandos no verificados (POLEF, 0x10, ADPCM de 2 bits,
+  flag 2 del resampler) dejan la tarea al RSP. RSP en la carrera: gráficos ~63 % de
+  instrucciones, audio ~37 %; ~10 % del RSP es un bucle esperando su propio DMA (salto exacto
+  posible, pendiente). Carrera 1500–1900 con hilo: **39,4 campos/s con HLE** frente a 33,4 sin;
+  `ezyemu` lo activa por defecto (runner y pruebas no, salvo `--audio-hle`). Spider-Man (USA)
+  en `E:\Rom nintendo\Spider-Man\`: pantalla negra, la CPU queda en 0x80000054–0xCC desde el
+  primer campo (arranque; pendiente, no es regresión de esto).
+- 2026-11-17 (4) — Spider-Man no estaba colgado: el bucle de 0x80000054–0xCC era el checksum del
+  IPL3 (dura ~45 campos) y luego el juego corre y espera A en "EXPANSION PAK FOUND" / "NO
+  CONTROLLER PAK". La pantalla negra era el RDP: `supported_texture` solo aceptaba RGBA16 y
+  CI4/CI8, así que todo texto/logo en I4 se descartaba. Ahora muestrea I4, I8, IA4, IA8 e IA16
+  (prueba nueva en `test_state.cpp`). MK64 también ganó: aparecen las nubes (imagen de la carrera
+  cambió, md5 `4B16…`). Precio: el hilo del RDP dibuja más y el principal espera ~22 % por él;
+  carrera con HLE ~33–35 campos/s (antes 39 sin nubes). Pendiente: RGBA32 y YUV en texturas,
+  acelerar el rasterizador (triángulos con textura y mezcla), y el bucle de DMA del RSP.
+- 2026-11-17 (5) — Controles: el PIF solo ejecutaba los comandos joybus al escribir PIF RAM, y
+  libultra (`osContStartReadData`) solo escribe cuando cambia el comando; después solo lee y
+  espera botones frescos. Ahora un bloque armado (bit 0 del byte de control) se vuelve a
+  ejecutar en cada lectura SI (`Pif::before_read`); el flag va en el estado (versión 12). Con
+  pulsaciones simuladas Spider-Man pasa los avisos, logos, "PRESS START" y llega al menú de
+  dificultad. Prueba nueva en `test_pif.cpp`; continuación cruzada aprobada en MK64 y Spider-Man.
+- 2026-11-17 (6) — Velocidad real en `ezyemu` (no el runner): menús de MK64 y Spider-Man a 60;
+  carrera de MK64 ~33 con vsync porque un campo de 21 ms se redondeaba a dos refrescos. Sin vsync
+  y con espera precisa: ~37. El título de la ventana muestra ahora los fps emulados. Combinador
+  del RDP con tabla de fuentes en vez de switch: +4,6 % en síncrono, imagen idéntica. Cuello de
+  botella actual en la carrera: el hilo del RDP (dibuja más desde las texturas I/IA) y el hilo
+  principal (CPU+RSP). Audio: `AudioOut` mete silencio cuando la cola se vacía (cortes cuando
+  la emulación va por debajo de 60). Opciones siguientes: RDP en varios hilos por franjas,
+  estirar el audio cuando va lento, salto exacto del bucle de DMA del RSP, recompilador de CPU.
+- 2026-11-17 (7) — RDP en varios hilos por franjas: cada hilo ejecuta todos los comandos (su
+  propia TMEM y estado) pero solo dibuja sus filas, en grupos de 4 intercalados; el filtro va en
+  `field_matches`, que ya preguntan todos los bucles de dibujo. Barreras (todos los hilos
+  terminan lo anterior) al cambiar imagen de color o de profundidad y al cargar una textura de
+  RDRAM que se dibujó desde la última barrera (render a textura). Bits ocultos: una tabla
+  compartida sin contador exacto (bandera `used_`). Ruido: se resiembra por (primitiva, fila),
+  así da igual qué hilo dibuja cada fila; el estado guarda la serie de primitivas en el hueco
+  del ruido. Imagen y estado idénticos entre síncrono y por franjas en MK64 y Spider-Man;
+  continuación cruzada aprobada; prueba nueva con 3 franjas y render a textura. Carrera
+  1500–1900 en esta PC: 1 franja 34,6, **2 franjas 41,1**, 3 39,0, 4 35,8 (más hilos frenan al
+  principal): por defecto una franja por cada 4 hilos de hardware. El usuario juega con un mando
+  de Xbox One (funciona). Límite actual: el hilo principal (CPU + RSP).

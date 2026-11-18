@@ -1,5 +1,8 @@
 #include "n64/bus.hpp"
 
+#include <algorithm>
+#include <cstdio>
+
 namespace ezy::n64 {
 
 namespace {
@@ -67,7 +70,9 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     if (paddr >= 0x03F00000 && paddr < 0x04000000) {
         rdram_regs_[(paddr >> 2) & 15] = value;
     } else if (paddr >= kSpRegs && paddr < kDp) {
+        const bool was_halted = rsp_.halted();
         rsp_.write_sp(paddr - kSpRegs, value, mi_, scheduler_, scheduler_.now());
+        if (was_halted && !rsp_.halted() && (audio_hle_ || check_audio_hle_)) on_rsp_start();
     } else if (paddr >= kDp && paddr < kDp + 0x100000) {
         rdp_.write(paddr - kDp, value, scheduler_, scheduler_.now());
     } else if (paddr >= kMi && paddr < kVi) {
@@ -75,7 +80,7 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     } else if (paddr >= kVi && paddr < kAi) {
         vi_.write(paddr - kVi, value, mi_);
     } else if (paddr >= kAi && paddr < kPi) {
-        if (((paddr - kAi) & 0x1F) == 4) drain_rdp();
+        if (((paddr - kAi) & 0x1F) == 4) prepare_ai_read(ai_.next_read_on_length(value));
         ai_.write(paddr - kAi, value, mi_, scheduler_, rdram_);
     } else if (paddr >= kPi && paddr < kRi) {
         if (((paddr - kPi) & 0x3F) == 8 || ((paddr - kPi) & 0x3F) == 12) drain_rdp();
@@ -199,7 +204,10 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         case EventType::PiDma: pi_.finish_dma(mi_); break;
         case EventType::ViLine: vi_.on_line(mi_, scheduler_, when); break;
         case EventType::SiDma: si_.finish_dma(mi_); break;
-        case EventType::AiDma: drain_rdp(); ai_.on_dma_end(mi_, scheduler_, rdram_); break;
+        case EventType::AiDma:
+            prepare_ai_read(ai_.next_read_on_dma_end());
+            ai_.on_dma_end(mi_, scheduler_, rdram_);
+            break;
         case EventType::SpDma: {
             // Only the RDP packets overlapping this row's RDRAM range must finish first.
             const auto row = rsp_.dma_row();
@@ -208,10 +216,61 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
             rsp_.finish_dma_row(scheduler_, rdram_, when);
             break;
         }
-        case EventType::RspStep: rsp_.step(mi_, rdp_, scheduler_, when); break;
+        case EventType::RspStep: rsp_step(when); break;
         case EventType::RdpWord: rdp_.step(mi_, scheduler_, rdram_, rsp_.dmem(), when); break;
         default: break;
     }
+}
+
+void Bus::set_audio_hle_check(bool enabled) {
+    check_audio_hle_ = enabled;
+    if (!enabled) shadow_.reset();
+}
+
+// The CPU just started the RSP: libultra has put the task description at DMEM 0xFC0.
+void Bus::on_rsp_start() {
+    const RspTask task = RspTask::read(rsp_.dmem());
+    if (!AudioHle::supports(task, rdram_)) return;
+    if (check_audio_hle_) {
+        drain_rdp();
+        auto shadow = std::make_unique<Shadow>();
+        shadow->rdram = rdram_;
+        std::array<std::uint8_t, 0x1000> dmem{};
+        std::copy_n(rsp_.dmem().begin(), dmem.size(), dmem.begin());
+        AudioHle::run(task, shadow->rdram, dmem, [&](std::uint32_t address, std::uint32_t bytes, bool write) {
+            if (write) shadow->writes.emplace_back(address, bytes);
+        });
+        shadow_ = std::move(shadow);
+        return;  // the RSP runs the task too
+    }
+    AudioHle::run(task, rdram_, rsp_.dmem(), [this](std::uint32_t address, std::uint32_t bytes, bool write) {
+        if (address + bytes <= rdram_.size()) rdp_.prepare_memory(address, bytes, write);
+        else drain_rdp();
+    });
+    rsp_.finish_hle_task(mi_, scheduler_);
+}
+
+void Bus::finish_shadow() {
+    if (!rsp_.halted()) return;
+    drain_rdp();
+    const auto shadow = std::move(shadow_);
+    std::uint64_t mismatched = 0;
+    for (const auto& [address, bytes] : shadow->writes) {
+        for (std::uint32_t i = 0; i < bytes; ++i) {
+            const std::uint32_t at = address + i;
+            if (at >= rdram_.size()) continue;
+            ++check_.bytes;
+            if (shadow->rdram[at] == rdram_[at]) continue;
+            if (mismatched == 0) {
+                std::fprintf(stderr, "Audio HLE mismatch in task %llu at %06X: HLE %02X, RSP %02X\n",
+                             static_cast<unsigned long long>(check_.tasks), at, shadow->rdram[at], rdram_[at]);
+            }
+            ++mismatched;
+        }
+    }
+    check_.mismatched_bytes += mismatched;
+    if (mismatched) ++check_.mismatched_tasks;
+    ++check_.tasks;
 }
 
 void Bus::set_pif_rom(std::span<const std::uint8_t> rom) { pif_rom_.assign(rom.begin(), rom.end()); }
