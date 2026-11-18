@@ -752,3 +752,13 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Probado en `ezyemu` con una copia de MK64: la primera vez el juego inicializa su EEPROM y se crea el
   `.eep`; la segunda lo encuentra válido y no lo reescribe. Los récords ya no se pierden al cerrar.
   Prueba nueva en `test_pif.cpp`; siete suites aprobadas.
+- 2026-11-18 (3) — Audio sin cortes cuando la emulación va lenta: `AudioOut` ya no rellena con
+  silencio, estira el sonido sin cambiar el tono (WSOLA, `src/frontend/time_stretch.hpp`: segmentos
+  Hann de 1024, salto 512, búsqueda ±256 por correlación). El factor es 1/velocidad medida (ventanas
+  de 0,25 s) por una corrección proporcional hacia 60 ms en cola (×0,5–×1,5); por encima de 250 ms
+  se descarta. Con factor 1 devuelve la entrada exacta (GB/GBA a velocidad normal no cambian).
+  Suite nueva `ezy_frontend_tests` (ocho en total): exactitud con factor 1, duración ×1,25/1,5/2 y
+  tono a 440 Hz ±1 %, cambio de factor y silencio. En `ezyemu` con MK64 (75 s, medición temporal ya
+  quitada): cola estable en ~60 ms, 0 vaciados, factor 1,4–2,6 a 40–70 % de velocidad y ~1,0 a
+  velocidad completa. Falta que el usuario lo escuche. Una primera corrida de `ezyemu` se cerró sola
+  a los ~56 s sin error en el registro de Windows (no se repitió; vigilar).
