@@ -31,6 +31,10 @@ public:
     [[nodiscard]] std::uint32_t read_sp(std::uint32_t offset);
     void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
     void finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when);
+    // RDRAM range the next finish_dma_row call touches, so a threaded RDP only has to
+    // finish the packets that overlap it. bytes == 0 means no transfer is active.
+    struct DmaRow { std::uint32_t address = 0, bytes = 0; bool write = false; };
+    [[nodiscard]] DmaRow dma_row() const;
     void step(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when);
     // Steps from `when` while each next one is due and before every other event (see rsp_scalar.cpp).
     std::optional<std::uint64_t> run(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when, bool stop_on_line);

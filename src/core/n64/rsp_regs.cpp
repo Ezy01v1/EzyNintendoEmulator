@@ -121,6 +121,11 @@ void RspRegs::schedule_dma_row(Scheduler& scheduler, std::uint64_t when) const {
     scheduler.schedule(EventType::SpDma, when + (beats * 9 + 1) / 2);
 }
 
+RspRegs::DmaRow RspRegs::dma_row() const {
+    if (dma_.direction == DmaDirection::Idle) return {};
+    return {dma_.dram_address & kDramMask, (dma_.length & kLengthMask) + 8, dma_.direction == DmaDirection::ToDram};
+}
+
 void RspRegs::finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when) {
     if (dma_.direction == DmaDirection::Idle) return;
     const std::uint32_t bytes = (dma_.length & kLengthMask) + 8;

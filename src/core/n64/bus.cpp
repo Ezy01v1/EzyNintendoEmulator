@@ -200,7 +200,14 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         case EventType::ViLine: vi_.on_line(mi_, scheduler_, when); break;
         case EventType::SiDma: si_.finish_dma(mi_); break;
         case EventType::AiDma: drain_rdp(); ai_.on_dma_end(mi_, scheduler_, rdram_); break;
-        case EventType::SpDma: drain_rdp(); rsp_.finish_dma_row(scheduler_, rdram_, when); break;
+        case EventType::SpDma: {
+            // Only the RDP packets overlapping this row's RDRAM range must finish first.
+            const auto row = rsp_.dma_row();
+            if (row.address + row.bytes <= rdram_.size()) rdp_.prepare_memory(row.address, row.bytes, row.write);
+            else drain_rdp();  // wraps or leaves RDRAM: rare, keep the full barrier
+            rsp_.finish_dma_row(scheduler_, rdram_, when);
+            break;
+        }
         case EventType::RspStep: rsp_.step(mi_, rdp_, scheduler_, when); break;
         case EventType::RdpWord: rdp_.step(mi_, scheduler_, rdram_, rsp_.dmem(), when); break;
         default: break;

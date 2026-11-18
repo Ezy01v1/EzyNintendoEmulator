@@ -47,7 +47,8 @@ bool Rdp::enable_threaded(std::span<std::uint8_t> rdram) {
 }
 
 void Rdp::rebuild_memory_state() {
-    memory_state_ = {color_address_, color_width_, pixel_size_, mask_address_, scissor_, solid_.modes};
+    memory_state_ = {color_address_, color_width_, pixel_size_, mask_address_, scissor_, solid_.modes,
+                     texture_.image};
 }
 
 void Rdp::reset_state() {

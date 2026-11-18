@@ -150,12 +150,44 @@ TEST_CASE("RDP reservations include unaligned targets and X beyond the row strid
     CHECK(access.ranges[1].begin == 0x6000);
     CHECK(access.ranges[1].end >= 0x6013);
     CHECK(access.ranges[0].write);
-    packet.words[0] = 0x3400000000000000ULL;
+}
+
+TEST_CASE("RDP texture load reservations cover the source texels they read") {
+    RdpMemoryState state;
+    // 16-bit texture image at 0x10000, 64 texels wide.
+    state.apply((0x3DULL << 56) | (2ULL << 51) | (63ULL << 32) | 0x10000);
+    RdpPacket packet;
+    // Load Tile of texels (0,0)-(15,3) in 10.2 coordinates.
+    packet.words[0] = (0x34ULL << 56) | ((15ULL << 2) << 12) | (3ULL << 2);
+    auto access = state.access(packet);
+    REQUIRE(access.count == 1);
+    CHECK_FALSE(access.ranges[0].write);
+    CHECK(access.ranges[0].begin == 0x10000);
+    // The last row's final 64-bit word ends at texel 3 * 64 + 19.
+    CHECK(access.ranges[0].end >= 0x10000 + (3 * 64 + 20) * 2);
+    CHECK(access.ranges[0].end < 0x10000 + 4096);
+
+    // Load Block of 256 texels from (8, 2) reads a run starting at 2 * 64 + 8.
+    packet.words[0] = (0x33ULL << 56) | (8ULL << 44) | (2ULL << 32) | (263ULL << 12);
+    access = state.access(packet);
+    REQUIRE(access.count == 1);
+    CHECK(access.ranges[0].begin <= 0x10000 + (2 * 64 + 8) * 2);
+    CHECK(access.ranges[0].end >= 0x10000 + (2 * 64 + 8 + 256 + 4) * 2);
+
+    // Load TLUT of entries 0-15 on row 0.
+    packet.words[0] = (0x30ULL << 56) | ((15ULL << 2) << 12);
+    access = state.access(packet);
+    REQUIRE(access.count == 1);
+    CHECK(access.ranges[0].begin == 0x10000);
+    CHECK(access.ranges[0].end >= 0x10000 + 16 * 2);
+
+    // A source that could wrap the 24-bit address reserves all of RDRAM.
+    state.apply((0x3DULL << 56) | (2ULL << 51) | (1023ULL << 32) | 0xFFF000);
+    packet.words[0] = (0x34ULL << 56) | ((15ULL << 2) << 12) | (3ULL << 2);
     access = state.access(packet);
     REQUIRE(access.count == 1);
     CHECK(access.ranges[0].begin == 0);
     CHECK(access.ranges[0].end == 8 * 1024 * 1024);
-    CHECK_FALSE(access.ranges[0].write);
 }
 
 TEST_CASE("RDP reservations cover inclusive COPY and fill edges on a page boundary") {

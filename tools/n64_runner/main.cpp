@@ -176,6 +176,7 @@ int main(int raw_argc, char* raw_argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: ezy_n64_runner <rom> --screenshot <out.bmp> [frames]\n"
                      "       ezy_n64_runner <rom> --compare <reference.bmp> [frames]\n"
+                     "       ezy_n64_runner <rom> --series <prefix> <first> <last> <step>\n"
                      "       ezy_n64_runner <rom> --isviewer [seconds]\n"
                      "       ezy_n64_runner <rom> --state-check [frames]\n"
                      "       ezy_n64_runner <rom> --dump-state <out.bin> [frames]\n"
@@ -227,6 +228,19 @@ int main(int raw_argc, char* raw_argv[]) {
         std::ofstream(args[3], std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         std::cout << "Saved " << args[3] << " (" << n64->image().width << "x" << n64->image().height << ")\n";
         print_rdp_stats(*n64);
+        return 0;
+    }
+    if (mode == "--series" && argc >= 7) {
+        // --series <prefix> <first> <last> <step>: one BMP per sampled field, in a single run.
+        const int first = std::atoi(args[4]), last = std::atoi(args[5]), step = std::atoi(args[6]);
+        if (first < 0 || last < first || step <= 0) { std::cerr << "Bad --series range\n"; return 2; }
+        for (int i = 1; i <= last; ++i) {
+            n64->run_frame();
+            if (i < first || (i - first) % step != 0) continue;
+            const std::vector<char> bmp = encode_bmp(n64->image());
+            const std::string path = std::string(args[3]) + std::to_string(i) + ".bmp";
+            std::ofstream(path, std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
+        }
         return 0;
     }
     if (mode == "--dump-state" && argc >= 4) {

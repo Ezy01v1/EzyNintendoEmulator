@@ -35,7 +35,7 @@ struct RdpAccess {
 class RdpWorker {
 public:
     using Execute = std::function<void(const RdpPacket&)>;
-    explicit RdpWorker(Execute execute, std::size_t capacity = 1024);
+    explicit RdpWorker(Execute execute, std::size_t capacity = 16384);
     ~RdpWorker();
     RdpWorker(const RdpWorker&) = delete;
     RdpWorker& operator=(const RdpWorker&) = delete;
@@ -56,16 +56,32 @@ private:
     void wait(std::uint64_t sequence) const;
     Execute execute_;
     std::vector<Work> queue_;
-    std::array<std::uint64_t, (kRamSize >> kPageShift)> readers_{}, writers_{};
+    // Each page names the reservation slot that last covered it; the slot holds the newest
+    // packet sequence using that range. Consecutive draws into the same framebuffer then
+    // only bump one slot instead of rewriting every page. Slots are recycled round-robin:
+    // a stale page may see a newer sequence, which only makes a barrier more conservative.
+    static constexpr unsigned kSlots = 4096, kCached = 4;
+    struct Cached { std::uint32_t begin = 0, end = 0; bool write = false; std::uint16_t slot = 0; };
+    std::array<std::uint16_t, (kRamSize >> kPageShift)> readers_{}, writers_{};
+    std::array<std::uint64_t, kSlots> slot_sequence_{};
+    std::array<Cached, kCached> cached_{};
+    unsigned next_slot_ = 1, next_cached_ = 0;
     std::uint64_t submitted_ = 0;
     mutable std::uint64_t waits_ = 0;
     std::uint64_t queue_waits_ = 0;
+    // Single-producer, single-consumer ring: the producer publishes `pushed_`, the worker
+    // publishes `taken_` once it has copied a packet out of its slot (freeing the slot) and
+    // `completed_` after executing it. `submitted_ - taken_` is the number of queued packets,
+    // matching a queue that holds `capacity` packets besides the one being executed.
+    // The mutex only guards the worker's sleep and the failure pointer.
+    std::atomic<std::uint64_t> pushed_{0};
+    std::atomic<std::uint64_t> taken_{0};
     std::atomic<std::uint64_t> completed_{0};
     std::atomic<bool> failed_{false};
+    std::atomic<bool> sleeping_{false};
+    std::atomic<bool> stopping_{false};
     mutable std::mutex mutex_;
     mutable std::condition_variable changed_;
-    std::size_t head_ = 0, tail_ = 0, size_ = 0;
-    bool stopping_ = false;
     std::exception_ptr failure_;
     std::thread thread_;
 };

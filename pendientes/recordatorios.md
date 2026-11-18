@@ -649,3 +649,14 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   N64 206/65381 por modo. Informe `docs/performance/2026-11-15-n64-shade-only.md`.
   Cierre: contadores OFF, siete suites aprobadas con el combinador restaurado,
   runner/frontend Release reconstruidos y comparación a 120 idéntica.
+- 2026-11-17 — MK64 probado en `ezyemu`: las capturas del juego (101 de la demo, 48 campos seguidos
+  y 40 de la ventana) se ven coherentes; lo que falla es la ventana, que abre con la imagen recortada
+  por un `imgui.ini` guardado maximizado (pendiente). Runner: modo `--series <prefijo> <primero>
+  <último> <paso>`. RDP en hilo rehecho: la fila de DMA del SP espera solo su rango de RDRAM en vez
+  de drenar todo; las cargas de textura reservan su rango real y no toda la RAM; cola SPSC sin
+  candado por paquete (16384 paquetes, el hueco se libera al copiar el paquete) y reservas por
+  ranura. `Sync Full` sigue drenando (la prueba lo exige y no costaba casi nada). Carrera
+  1500–1900 en esta PC (i7-4790), dos pares: síncrono 15,5/16,6 s, hilo **14,2/13,3 s**; imagen
+  y estado final idénticos, continuación cruzada 300+120 aprobada, siete suites aprobadas.
+  **`ezyemu` usa ahora el RDP en hilo por defecto** (runner y pruebas siguen síncronos salvo
+  `--rdp-threaded`). El hilo principal (CPU + RSP) es ahora el límite (~30 campos/s de 60).
