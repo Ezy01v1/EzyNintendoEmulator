@@ -164,7 +164,7 @@ int main(int raw_argc, char* raw_argv[]) {
     const char* final_state_path = nullptr;
     const char* trace_path = nullptr;
     int trace_from = 0;
-    bool audio_hle = false, audio_hle_check = false;
+    bool audio_hle = false, audio_hle_check = false, gfx_hle = false;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--rdp-threaded") == 0) rdp_mode = ezy::n64::RdpMode::Threaded;
@@ -172,6 +172,7 @@ int main(int raw_argc, char* raw_argv[]) {
         else if (std::strcmp(raw_argv[i], "--rsp-jit") == 0) rsp_mode = ezy::n64::RspMode::Jit;
         else if (std::strcmp(raw_argv[i], "--rsp-interpreter") == 0) rsp_mode = ezy::n64::RspMode::Interpreter;
         else if (std::strcmp(raw_argv[i], "--audio-hle") == 0) audio_hle = true;
+        else if (std::strcmp(raw_argv[i], "--gfx-hle") == 0) gfx_hle = true;
         else if (std::strcmp(raw_argv[i], "--audio-hle-check") == 0) audio_hle_check = true;
         else if (std::strcmp(raw_argv[i], "--time-from") == 0 && i + 1 < raw_argc) {
             const std::string value = raw_argv[++i];
@@ -204,7 +205,8 @@ int main(int raw_argc, char* raw_argv[]) {
                      "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>\n"
                      "Screenshot options: --rdp-trace <out.bin> [--trace-from <field>]\n"
                      "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter,\n"
-                     "         --audio-hle, --audio-hle-check (run audio tasks on the RSP and compare)\n";
+                     "         --audio-hle, --audio-hle-check (run audio tasks on the RSP and compare),\n"
+                     "         --gfx-hle (F3DEX/F3DLX 0.95 graphics tasks in C++, not bit-exact)\n";
         return 2;
     }
     const std::vector<std::uint8_t> rom = read_file(args[1]);
@@ -215,6 +217,7 @@ int main(int raw_argc, char* raw_argv[]) {
     }
     n64->bus().set_audio_hle(audio_hle);
     n64->bus().set_audio_hle_check(audio_hle_check);
+    n64->bus().set_gfx_hle(gfx_hle);
     std::cout << "Title: " << n64->cartridge().title() << '\n';
     std::cout << "RDP: " << (n64->bus().rdp_threaded() ? "threaded" : "synchronous") << '\n';
     std::cout << "RSP: " << (n64->bus().rsp().jit_active() ? "JIT available" : "interpreter") << '\n';
@@ -310,6 +313,7 @@ int main(int raw_argc, char* raw_argv[]) {
         const auto other = N64::create(rom, pif, other_mode, other_rsp);
         if (!other) return 1;
         other->bus().set_audio_hle(audio_hle);
+        other->bus().set_gfx_hle(gfx_hle);
         if (!other->load_state(state) || other->save_state() != state) return 1;
         for (int i = 0; i < 120; ++i) { n64->run_frame(); other->run_frame(); }
         if (n64->save_state() != other->save_state() || n64->image().argb != other->image().argb) {

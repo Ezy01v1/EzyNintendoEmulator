@@ -10,6 +10,7 @@
 #include "n64/ai.hpp"
 #include "n64/cartridge.hpp"
 #include "n64/cpu/cpu_bus.hpp"
+#include "n64/gfx_hle/f3dex.hpp"
 #include "n64/mi.hpp"
 #include "n64/pi.hpp"
 #include "n64/pif.hpp"
@@ -65,6 +66,9 @@ public:
 
     // Audio tasks of a known microcode run at a high level instead of on the RSP.
     void set_audio_hle(bool enabled) { audio_hle_ = enabled; }
+    // Graphics tasks of F3DEX/F3DLX 0.95 run in C++ (gfx_hle/) instead of on the RSP. Close
+    // to the microcode's results but not bit-exact, and the task takes an estimated time.
+    void set_gfx_hle(bool enabled) { gfx_hle_ = enabled; }
     // Debugging: the RSP keeps running audio tasks, and each one is also run at a high
     // level on a copy of RDRAM whose written bytes are compared when the RSP stops.
     void set_audio_hle_check(bool enabled);
@@ -126,6 +130,8 @@ private:
     // Byte-addressable memory (RDRAM, SP DMEM/IMEM, ISViewer buffer), or nullptr.
     [[nodiscard]] std::uint8_t* memory(std::uint32_t paddr);
     void on_rsp_start();
+    // A graphics task the HLE knows: runs it and schedules its end; false leaves it to the RSP.
+    bool start_gfx_hle_task();
     void finish_shadow();
 
     Scheduler& scheduler_;
@@ -145,6 +151,8 @@ private:
     Ai ai_;
     std::vector<std::uint8_t> pif_rom_;
     bool audio_hle_ = false;
+    bool gfx_hle_ = false;  // a setting, not saved
+    F3dex f3dex_;           // keeps nothing between tasks
     struct Shadow {
         std::vector<std::uint8_t> rdram;
         std::vector<std::pair<std::uint32_t, std::uint32_t>> writes;  // address, bytes

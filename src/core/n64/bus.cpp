@@ -72,7 +72,7 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     } else if (paddr >= kSpRegs && paddr < kDp) {
         const bool was_halted = rsp_.halted();
         rsp_.write_sp(paddr - kSpRegs, value, mi_, scheduler_, scheduler_.now());
-        if (was_halted && !rsp_.halted() && (audio_hle_ || check_audio_hle_)) on_rsp_start();
+        if (was_halted && !rsp_.halted() && (audio_hle_ || check_audio_hle_ || gfx_hle_)) on_rsp_start();
     } else if (paddr >= kDp && paddr < kDp + 0x100000) {
         rdp_.write(paddr - kDp, value, scheduler_, scheduler_.now());
     } else if (paddr >= kMi && paddr < kVi) {
@@ -218,6 +218,8 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         }
         case EventType::RspStep: rsp_step(when); break;
         case EventType::RdpWord: rdp_.step(mi_, scheduler_, rdram_, rsp_.dmem(), when); break;
+        case EventType::GfxHleDone: rsp_.finish_hle_task(mi_, scheduler_); break;
+        case EventType::GfxHleRdpDone: rdp_.finish_deferred_sync(mi_); break;
         default: break;
     }
 }
@@ -229,6 +231,8 @@ void Bus::set_audio_hle_check(bool enabled) {
 
 // The CPU just started the RSP: libultra has put the task description at DMEM 0xFC0.
 void Bus::on_rsp_start() {
+    if (gfx_hle_ && start_gfx_hle_task()) return;
+    if (!audio_hle_ && !check_audio_hle_) return;
     const RspTask task = RspTask::read(rsp_.dmem());
     if (!AudioHle::supports(task, rdram_)) return;
     if (check_audio_hle_) {
@@ -248,6 +252,34 @@ void Bus::on_rsp_start() {
         else drain_rdp();
     });
     rsp_.finish_hle_task(mi_, scheduler_);
+}
+
+bool Bus::start_gfx_hle_task() {
+    const OsTask task = read_os_task(rsp_.dmem());
+    if (task.type != kOsTaskGraphics) return false;
+    rdp_.prepare_memory(task.ucode_data & 0xFFFFFF, task.ucode_data_size, false);
+    const GfxUcode ucode = identify_gfx_ucode(task, rdram_);
+    if (ucode == GfxUcode::Unknown) return false;
+    // Games wait for a task's end before the next one; if one did not, the old one ends now.
+    if (scheduler_.pending(EventType::GfxHleDone)) {
+        scheduler_.cancel(EventType::GfxHleDone);
+        rsp_.finish_hle_task(mi_, scheduler_);
+    }
+    // One deferred Sync Full at a time: the previous task's is delivered before this one's.
+    if (scheduler_.pending(EventType::GfxHleRdpDone)) {
+        scheduler_.cancel(EventType::GfxHleRdpDone);
+        rdp_.finish_deferred_sync(mi_);
+    }
+    const std::uint64_t when = scheduler_.now();
+    const F3dex::Result result = f3dex_.run_task(task, ucode, rdram_, rdp_, mi_);
+    rsp_.hold_for_hle(scheduler_);
+    // The RSP needs time for the task: it ends later, as the microcode's BREAK would, and
+    // the RDP's Sync Full (if the list had one) once it would have drawn what it got.
+    constexpr std::uint64_t kTaskOverheadCycles = 2000;
+    const std::uint64_t done = when + kTaskOverheadCycles + result.work;
+    scheduler_.schedule(EventType::GfxHleDone, done);
+    scheduler_.schedule(EventType::GfxHleRdpDone, done + result.drawing);
+    return true;
 }
 
 void Bus::finish_shadow() {

@@ -33,6 +33,9 @@ public:
     // Ends a task that ran at a high level the way its microcode would: BREAK with
     // SIG2 (task done) set, interrupting the CPU if it asked for that.
     void finish_hle_task(Mi& mi, Scheduler& scheduler);
+    // The CPU just started a task that runs at a high level later on: the RSP itself stays
+    // halted (and does not step) until finish_hle_task().
+    void hold_for_hle(Scheduler& scheduler);
     [[nodiscard]] std::uint32_t read_sp(std::uint32_t offset);
     void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
     void finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when);

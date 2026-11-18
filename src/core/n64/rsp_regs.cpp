@@ -115,6 +115,11 @@ void RspRegs::finish_hle_task(Mi& mi, Scheduler& scheduler) {
     if (sp_status_ & kInterruptOnBreak) mi.raise(MiInterrupt::Sp);
 }
 
+void RspRegs::hold_for_hle(Scheduler& scheduler) {
+    sp_status_ |= kHalt;
+    scheduler.cancel(EventType::RspStep);
+}
+
 void RspRegs::start_dma(Scheduler& scheduler, std::uint64_t when) {
     if (dma_.direction != DmaDirection::Idle || pending_.direction == DmaDirection::Idle) return;
     dma_ = pending_;
