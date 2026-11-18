@@ -288,8 +288,10 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
     - [x] Líneas sueltas del logo, texgen e iluminación corregidos (bitácora 2026-11-18 (3)).
     - [ ] Que el usuario juegue MK64 con `ezyemu ... --gfx-hle`; si va bien, activarlo por
       defecto en `ezyemu` y abrir el PR de `n64/gfx-hle-port`.
-  - Con el HLE gráfico, el límite pasa al dibujo (hilo del RDP) y a la CPU: siguiente palanca,
-    acelerar el rasterizador o el recompilador de CPU (medir antes).
+  - [x] Barreras por rango para los DMA del PI y del SI (antes drenaban todo el RDP): con HLE
+    gráfico la carrera pasa de 44,5 a **51,6 campos/s** (+16 %). Ver bitácora 2026-11-18 (4).
+  - Siguiente palanca: medir de nuevo el reparto CPU / hilo del RDP con HLE antes de elegir
+    entre acelerar el rasterizador o el recompilador de CPU.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -785,3 +787,14 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   comparar píxel a píxel: con HLE la duración de las tareas cambia el curso del juego. `ezyemu` acepta
   `--gfx-hle` (se conserva al reiniciar con F5); sigue apagado por defecto. 254 pruebas N64, ocho
   suites aprobadas.
+- 2026-11-18 (4) — Velocidad con HLE gráfico: el HLE solo daba +2,5 % (44,2 → 45,2 campos/s)
+  porque el hilo principal esperaba ~29 % del tiempo al RDP, que solo estaba ocupado ~60 %. Un
+  registro temporal de esperas (ya quitado) mostró que escribir `PI_RD_LEN/PI_WR_LEN` o iniciar un
+  DMA del SI **drenaba todo el RDP**: con HLE, 458 + 182 drenados y ~5 s esperando en 400 campos
+  (sin HLE solo 0,08 s, porque los comandos llegan de a poco). Ahora esperan solo por su rango de
+  RDRAM (`Bus::prepare_pi_dma`, `Bus::prepare_range`), como la CPU, el VI y el audio. Parejas
+  intercaladas en la carrera 1500–1900: con HLE **44,5 → 51,6 campos/s (+16 %)**, 5/5 a favor; sin
+  HLE sin cambio (43,9 → 43,8). Estados completos a 1900 idénticos síncrono/hilo con y sin HLE,
+  continuación cruzada 1700+120 con y sin HLE, systemtest en hilo 2984/3721, ocho suites. Sin
+  emparejar, la misma sesión dio de 38 a 52 campos/s: comparar solo parejas. Informe:
+  `docs/performance/2026-11-18-n64-dma-barriers.md`.

@@ -83,12 +83,15 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
         if (((paddr - kAi) & 0x1F) == 4) prepare_ai_read(ai_.next_read_on_length(value));
         ai_.write(paddr - kAi, value, mi_, scheduler_, rdram_);
     } else if (paddr >= kPi && paddr < kRi) {
-        if (((paddr - kPi) & 0x3F) == 8 || ((paddr - kPi) & 0x3F) == 12) drain_rdp();
+        if (((paddr - kPi) & 0x3F) == 8 || ((paddr - kPi) & 0x3F) == 12) prepare_pi_dma((paddr - kPi) & 0x3F, value);
         pi_.write(paddr - kPi, value, mi_, scheduler_, rdram_, cart_);
     } else if (paddr >= kRi && paddr < kSi) {
         ri_[(paddr >> 2) & 7] = value;
     } else if (paddr >= kSi && paddr < kSi + 0x100000) {
-        if (((paddr - kSi) & 0x1F) == 4 || ((paddr - kSi) & 0x1F) == 16) drain_rdp();
+        if (((paddr - kSi) & 0x1F) == 4 || ((paddr - kSi) & 0x1F) == 16) {
+            // 64 bytes at SI_DRAM_ADDR: written by PIF -> RDRAM (0x04), read by RDRAM -> PIF (0x10).
+            prepare_range(si_.read(0x00), 64, ((paddr - kSi) & 0x1F) == 4);
+        }
         si_.write(paddr - kSi, value, mi_, scheduler_, rdram_, pif_);
     } else if (paddr >= kPifRam && paddr < kPifRam + 64) {
         const std::uint32_t o = paddr - kPifRam;
