@@ -4,7 +4,7 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-17_
+_Última actualización: 2026-11-18_
 
 > **Perfil actualizado y SHADE (2026-11-15): nuevo atajo descartado.**
 > Con rectángulos constantes ya activos: 8258 muestras, 0 errores de captura;
@@ -285,6 +285,9 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
     y medición de juego completo; no asumir un multiplicador de velocidad.
   - [x] HLE de los microcódigos gráficos F3DEX/F3DLX 0.95 (MK64): integrado el 2026-11-18 en
     `n64/gfx-hle-port`, apagado por defecto, +6 % en carrera. Ver bitácora 2026-11-18.
+    - [x] Líneas sueltas del logo, texgen e iluminación corregidos (bitácora 2026-11-18 (3)).
+    - [ ] Que el usuario juegue MK64 con `ezyemu ... --gfx-hle`; si va bien, activarlo por
+      defecto en `ezyemu` y abrir el PR de `n64/gfx-hle-port`.
   - Con el HLE gráfico, el límite pasa al dibujo (hilo del RDP) y a la CPU: siguiente palanca,
     acelerar el rasterizador o el recompilador de CPU (medir antes).
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
@@ -762,3 +765,23 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   quitada): cola estable en ~60 ms, 0 vaciados, factor 1,4–2,6 a 40–70 % de velocidad y ~1,0 a
   velocidad completa. Falta que el usuario lo escuche. Una primera corrida de `ezyemu` se cerró sola
   a los ~56 s sin error en el registro de Windows (no se repitió; vigilar).
+- 2026-11-18 (3) — HLE gráfico: tres fallos corregidos para poder activarlo. (1) **Líneas horizontales
+  sueltas** en el logo que gira: las pendientes de los bordes salían de las Y exactas, pero el RDP
+  empieza en la Y del encabezado cuantizada a cuartos; en un triángulo casi plano el borde menor,
+  extrapolado hasta YH, caía hasta 140 px lejos del vértice. Ahora los bordes pasan por las Y del
+  encabezado (como el microcódigo) y los atributos se evalúan sobre el plano exacto. (2) **Texgen**
+  y (3) **iluminación**, medidos con la herramienta nueva `tools/gfx_oracle` (`gfx_oracle <rom>`):
+  saca el F3DEX 0.95 real de la ROM, lo ejecuta en el RSP con listas hechas a mano y compara el búfer
+  de vértices de DMEM (0x4B4, 40 bytes por vértice) con el HLE. Hallazgos: `s` sale de LookAt X
+  (0x84) y `t` de Y (0x82); los valores por defecto del microcódigo son X=(0,127,0) e Y=(127,0,0)
+  (el HLE los tenía al revés, y el logo de MK64 usa esos valores: no carga LookAt ni luces); la
+  normal **no** se normaliza; luces y LookAt se llevan al espacio del modelo y se guardan como bytes
+  `floor(unidad*127,8)`; texgen = `0x4000 + n·L` (t escalada por el verde de la luz Y / 0x80, el
+  0x80 de `gdSPDefLookAt`); el modo lineal es la cúbica `u(0,6806+0,3634u²)` saturada a 0x7FFF;
+  iluminación = ambiente + color·max(0, n·L)/16384. El oráculo coincide en s, t y color en 23
+  experimentos (diferencia máxima 1, solo en el lineal). `G_LOAD_UCODE` sin traducir segmento es
+  correcto (el DMA del SP solo usa 24 bits; GLideN64 igual). Logo con HLE ≈ LLE (de ~13.500 a ~2.300
+  píxeles distintos por cuadro, buena parte la fila 239 que solo pinta LLE). Una carrera no se puede
+  comparar píxel a píxel: con HLE la duración de las tareas cambia el curso del juego. `ezyemu` acepta
+  `--gfx-hle` (se conserva al reiniciar con F5); sigue apagado por defecto. 254 pruebas N64, ocho
+  suites aprobadas.

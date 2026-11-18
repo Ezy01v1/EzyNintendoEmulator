@@ -42,13 +42,21 @@ std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
     return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(file), {});
 }
 
-// Game Boy options after the ROM path: --model auto|dmg|cgb, --boot-rom <file>,
-// --no-color-correction. Returns nullopt (after printing why) on a bad option.
-std::optional<ezy::frontend::GameBoySettings> parse_gb_options(int argc, char* argv[]) {
-    ezy::frontend::GameBoySettings settings;
+struct Options {
+    ezy::frontend::GameBoySettings gb;
+    bool n64_gfx_hle = false;
+};
+
+// Options after the ROM path. Game Boy: --model auto|dmg|cgb, --boot-rom <file>,
+// --no-color-correction. N64: --gfx-hle. Returns nullopt (after printing why) on a bad option.
+std::optional<Options> parse_options(int argc, char* argv[]) {
+    Options options;
+    auto& settings = options.gb;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--model" && i + 1 < argc) {
+        if (arg == "--gfx-hle") {
+            options.n64_gfx_hle = true;
+        } else if (arg == "--model" && i + 1 < argc) {
             const std::string model = argv[++i];
             if (model == "auto") {
                 settings.model = ezy::gb::ModelChoice::Auto;
@@ -73,23 +81,22 @@ std::optional<ezy::frontend::GameBoySettings> parse_gb_options(int argc, char* a
             return std::nullopt;
         }
     }
-    return settings;
+    return options;
 }
 
 // Picks the console from the file extension.
-std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom,
-                                      ezy::frontend::GameBoySettings gb_settings) {
+std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom, Options options) {
     std::string ext = std::filesystem::path(path).extension().string();
     std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (ext == ".gba") {
         return ezy::frontend::GbaSystem::create(rom, {}, std::filesystem::path(path).replace_extension(".sav"));
     }
     if (ext == ".z64" || ext == ".v64" || ext == ".n64") {
-        return ezy::frontend::N64System::create(rom, std::filesystem::path(path));
+        return ezy::frontend::N64System::create(rom, std::filesystem::path(path), options.n64_gfx_hle);
     }
     if (ext == ".gb" || ext == ".gbc") {
         return ezy::frontend::GameBoySystem::create(rom, std::filesystem::path(path).replace_extension(".sav"),
-                                                    std::move(gb_settings));
+                                                    std::move(options.gb));
     }
     return ezy::frontend::Chip8System::create(rom);
 }
@@ -110,17 +117,18 @@ bool handle_shortcut(SDL_Scancode scancode, RunState& run) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba | rom.z64/.v64/.n64> [Game Boy options]\n"
-                     "  --model auto|dmg|cgb    hardware to emulate (auto = Game Boy Color)\n"
+        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba | rom.z64/.v64/.n64> [options]\n"
+                     "  --model auto|dmg|cgb    Game Boy hardware to emulate (auto = Game Boy Color)\n"
                      "  --boot-rom <file>       run a real CGB boot ROM dump (2304 bytes)\n"
-                     "  --no-color-correction   show raw CGB colours\n";
+                     "  --no-color-correction   show raw CGB colours\n"
+                     "  --gfx-hle               N64: run F3DEX 0.95 graphics in C++ (experimental)\n";
         return 1;
     }
 
-    auto gb_settings = parse_gb_options(argc, argv);
-    if (!gb_settings) return 1;
+    auto options = parse_options(argc, argv);
+    if (!options) return 1;
     const auto rom = read_file(argv[1]);
-    std::unique_ptr<System> system = rom ? create_system(argv[1], *rom, std::move(*gb_settings)) : nullptr;
+    std::unique_ptr<System> system = rom ? create_system(argv[1], *rom, std::move(*options)) : nullptr;
     if (!system) {
         std::cerr << "Could not load ROM: " << argv[1] << '\n';
         return 1;

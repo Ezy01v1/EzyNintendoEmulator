@@ -19,8 +19,9 @@ public:
 
     // nullptr if the file isn't an N64 ROM. Save states go next to the ROM (<rom>.ss1), and
     // so does the cartridge's EEPROM (<rom>.eep), loaded at start and written when it changes.
+    // gfx_hle runs F3DEX/F3DLX 0.95 graphics tasks at a high level (Bus::set_gfx_hle).
     [[nodiscard]] static std::unique_ptr<N64System> create(std::span<const std::uint8_t> rom,
-                                                           std::filesystem::path rom_path = {});
+                                                           std::filesystem::path rom_path = {}, bool gfx_hle = false);
     ~N64System() override { flush_eeprom(); }
 
     [[nodiscard]] std::string_view name() const override { return "Nintendo 64"; }
@@ -44,8 +45,8 @@ public:
     void draw_debug_windows() override;
 
 private:
-    N64System(std::vector<std::uint8_t> rom, std::unique_ptr<n64::N64> n64, std::filesystem::path rom_path)
-        : rom_(std::move(rom)), n64_(std::move(n64)), rom_path_(std::move(rom_path)) {}
+    N64System(std::vector<std::uint8_t> rom, std::unique_ptr<n64::N64> n64, std::filesystem::path rom_path, bool gfx_hle)
+        : rom_(std::move(rom)), n64_(std::move(n64)), rom_path_(std::move(rom_path)), gfx_hle_(gfx_hle) {}
 
     void update_controller();
     // Moves the AI's samples to audio_, resampled from the AI rate to kAudioRate.
@@ -59,6 +60,7 @@ private:
     std::vector<std::uint8_t> rom_;
     std::unique_ptr<n64::N64> n64_;
     std::filesystem::path rom_path_;
+    bool gfx_hle_ = false;  // kept across resets
     std::uint16_t buttons_ = 0;
     std::int8_t stick_x_ = 0, stick_y_ = 0;
     std::uint8_t stick_keys_ = 0;  // up, down, left, right held
