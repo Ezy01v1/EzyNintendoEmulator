@@ -55,6 +55,7 @@ public:
     void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const override {
         rdp_.prepare_memory(address, bytes, write);
     }
+    static_assert(RdpWorker::kRamSize == kRdramSize, "the RDP page tables must cover the RDRAM the CPU JIT indexes");
     [[nodiscard]] std::optional<jit::PageBarrierView> barrier_view() const override { return rdp_.barrier_view(); }
     void drain_rdp() const { rdp_.drain(); }
     // DMA engines touch only their own RDRAM range: wait for the RDP packets touching it (a

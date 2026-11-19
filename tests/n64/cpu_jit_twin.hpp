@@ -71,7 +71,7 @@ struct TwinBus final : ezy::n64::CpuBus {
                                          &failed};
     }
     void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const override {
-        if (throw_at >= address && throw_at - address < bytes) throw std::runtime_error("host failure");
+        if (throw_at >= address && throw_at - address < bytes) throw std::runtime_error("rdp failed");
         if (address < guard_end && address + bytes > guard_begin) ++guards;
         std::uint64_t sequence = 0;
         for (std::uint32_t page = address >> 12; page <= (address + bytes - 1) >> 12 && page < writers.size(); ++page) {

@@ -98,7 +98,7 @@ void N64::step() {
         const std::uint64_t now = scheduler_.now(), next = scheduler_.earliest_except(0);
         const std::uint64_t budget = next > now ? next - now : 0;  // ~0 (nothing pending) included
         if (budget != 0) {
-            // A throw from execute() (only check mode throws, and it is fatal) skips the
+            // A throw from execute() (check mode or a failed RDP worker; both are fatal) skips the
             // scheduler advance below: what ran is retired in the CPU but not in time.
             const Vr4300Jit::Result r = cpu_jit_->execute(budget);
             if (r.instructions != 0) {

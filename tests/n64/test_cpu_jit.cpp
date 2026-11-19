@@ -484,6 +484,49 @@ TEST_CASE("CPU JIT leaves a block at an instruction boundary when the RDP worker
     CHECK(t.jit.execute(1000).instructions > 0);
 }
 
+TEST_CASE("CPU JIT rethrows an RDP worker failure raised inside a block") {
+    Twin t;
+    REQUIRE_NATIVE(t.jit);
+    // LWL runs in place: its memory guard throws inside the block. The helper catches it, the
+    // block leaves before the LWL and execute() rethrows after retiring what ran, leaving
+    // the state the interpreter's step() leaves when it throws at the same instruction.
+    t.jit_bus.throw_at = t.ref_bus.throw_at = kData + 0x11;
+    t.program(kCode, {addiu(8, 0, 1), lui(9, 0x8004), lwl(10, 9, 0x11), addiu(11, 0, 1), kStop});
+    t.start(kKseg0 + kCode);
+    CHECK_THROWS_WITH_AS(t.jit.execute(10'000), "rdp failed", std::runtime_error);
+    for (int k = 0; k < 2; ++k) t.ref_cpu.step();
+    CHECK_THROWS_WITH_AS(t.ref_cpu.step(), "rdp failed", std::runtime_error);
+    CHECK(t.jit_cpu.pc() == t.ref_cpu.pc());  // the LWL faulted; nothing after it ran
+    CHECK(state_of(t.ref_cpu) == state_of(t.jit_cpu));
+    CHECK(t.jit_cpu.gpr(10) == 0);
+    CHECK(t.jit_cpu.gpr(11) == 0);
+    // The failure is gone: both machines continue identically.
+    t.jit_bus.throw_at = t.ref_bus.throw_at = ~0U;
+    t.run_until_pc(kKseg0 + kCode + 0x10);
+    CHECK(t.same());
+}
+
+TEST_CASE("CPU JIT rethrows an error from a store's code watch after retiring the store") {
+    Twin t;
+    REQUIRE_NATIVE(t.jit);
+    // An in-place store (SWL) over a page holding compiled code reports it to the code watch;
+    // here the watch throws. The interpreter lets it out of step() with the store done.
+    const auto throwing = [](void*, std::uint32_t, std::uint32_t) {
+        throw std::runtime_error("watch failed");
+    };
+    t.program(kCode, {addiu(8, 0, 1), lui(9, 0x8000), swl(8, 9, kCode + 0x21), addiu(11, 0, 1), kStop});
+    t.start(kKseg0 + kCode);
+    static std::uint8_t pages[0x100000 >> 12];
+    pages[kCode >> 12] = 1;
+    t.jit_bus.set_code_watch(pages, throwing, nullptr);
+    t.ref_bus.set_code_watch(pages, throwing, nullptr);
+    CHECK_THROWS_WITH_AS(t.jit.execute(10'000), "watch failed", std::runtime_error);
+    for (int k = 0; k < 2; ++k) t.ref_cpu.step();
+    CHECK_THROWS_WITH_AS(t.ref_cpu.step(), "watch failed", std::runtime_error);
+    CHECK(state_of(t.ref_cpu) == state_of(t.jit_cpu));
+    CHECK(t.ref_bus.mem == t.jit_bus.mem);
+}
+
 TEST_CASE("CPU JIT sees a store that rewrites the block it is running") {
     Twin t;
     t.lockstep = true;

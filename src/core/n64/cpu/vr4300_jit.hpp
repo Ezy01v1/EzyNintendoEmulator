@@ -107,7 +107,8 @@ private:
                                          std::uint64_t block_cycles) noexcept;
     std::uint64_t run(std::uint32_t instr, std::uint64_t flags, std::uint64_t block_cycles);
     static void on_code_write(void* self, std::uint32_t begin, std::uint32_t end);
-    // Context::code_write: a native store over a marked page; 1 if it dropped a block.
+    // Context::code_write: a native store over a marked page; 1 if it dropped a block, or if it
+    // caught an error (the store is retired; execute() rethrows the error at the boundary).
     static std::uint32_t native_code_write(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes) noexcept;
     void verify(const jit::Block& block) const;
     [[nodiscard]] std::uint32_t mode_key() const;

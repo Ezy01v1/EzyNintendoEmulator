@@ -45,6 +45,7 @@ constexpr std::uint32_t bne(int rs, int rt, std::int32_t words) { return i(0x05,
 constexpr std::uint32_t beql(int rs, int rt, std::int32_t words) { return i(0x14, rs, rt, words); }
 constexpr std::uint32_t lw(int rt, int base, std::int32_t off) { return i(0x23, base, rt, off); }
 constexpr std::uint32_t lwl(int rt, int base, std::int32_t off) { return i(0x22, base, rt, off); }
+constexpr std::uint32_t swl(int rt, int base, std::int32_t off) { return i(0x2A, base, rt, off); }
 constexpr std::uint32_t lwr(int rt, int base, std::int32_t off) { return i(0x26, base, rt, off); }
 constexpr std::uint32_t sw(int rt, int base, std::int32_t off) { return i(0x2B, base, rt, off); }
 constexpr std::uint32_t sdl(int rt, int base, std::int32_t off) { return i(0x2C, base, rt, off); }

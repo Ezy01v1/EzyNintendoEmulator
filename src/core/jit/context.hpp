@@ -19,6 +19,9 @@ struct PageBarrierView {
     const std::atomic<bool>* failed;
 };
 
+// The backend reads `failed` as one byte.
+static_assert(sizeof(std::atomic<bool>) == 1 && std::atomic<bool>::is_always_lock_free);
+
 // What every compiled block receives as its only argument. The pointers (guest, ram,
 // code_pages) must not change while a block runs: the block may keep them in registers.
 struct Context {

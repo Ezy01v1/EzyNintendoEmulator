@@ -63,8 +63,11 @@ public:
     struct Stats { std::uint64_t submitted = 0, waits = 0, queue_waits = 0; };
     [[nodiscard]] Stats stats() const { return {submitted_, waits_, queue_waits_}; }
 
-private:
+    // The RDRAM the page tables cover; the CPU JIT indexes them with its direct RAM
+    // (Bus::kRdramSize asserts they agree).
     static constexpr std::uint32_t kRamSize = 8 * 1024 * 1024;
+
+private:
     static constexpr unsigned kPageShift = 12;
     struct Work { RdpPacket packet; std::uint64_t sequence = 0; bool barrier = false; };
     // Per consumer (each allocated apart, padded off its neighbours' cache lines): `taken`
