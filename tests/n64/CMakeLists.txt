@@ -45,4 +45,22 @@ foreach(rom IN LISTS EZY_PETERLEMON_ROMS)
     string(REPLACE "/" "_" group ${rel})
     add_test(NAME n64_peterlemon_${group}_${name} COMMAND ezy_n64_runner ${rom} --compare ${dir}/${name}.bmp
              CONFIGURATIONS Release)
+    # The same ROM through the CPU JIT, checked against the interpreter on every block.
+    if(EZY_N64_CPU_JIT AND EZY_HOST_X64)
+        add_test(NAME n64_peterlemon_cpu_jit_${group}_${name}
+                 COMMAND ezy_n64_runner ${rom} --cpu-jit-check --compare ${dir}/${name}.bmp
+                 CONFIGURATIONS Release)
+    endif()
 endforeach()
+
+# n64-systemtest through the CPU JIT. The runner exits 0 only when no base test fails, and
+# 737 of 3721 are known failures (same set as the interpreter), so the summary line is the
+# check: PASS_REGULAR_EXPRESSION replaces the exit code. A changed baseline (a fix, or a new
+# failure) must update the count here.
+if(EZY_N64_CPU_JIT AND EZY_HOST_X64 AND EXISTS ${EZY_N64_ROMS}/n64-systemtest.z64)
+    add_test(NAME n64_systemtest_cpu_jit
+             COMMAND ezy_n64_runner ${EZY_N64_ROMS}/n64-systemtest.z64 --rdp-threaded --isviewer 60 --cpu-jit
+             CONFIGURATIONS Release)
+    set_tests_properties(n64_systemtest_cpu_jit PROPERTIES
+        PASS_REGULAR_EXPRESSION "Base: Failed 737 of 3721 tests" TIMEOUT 180)
+endif()
