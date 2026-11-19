@@ -122,10 +122,18 @@ void Rdp::reset_state() {
     rebuild_memory_state();
 }
 
+// Both modes keep the producer's memory shadow, so the ranges a draw writes come from the
+// same code: they reserve RDRAM for the worker and are reported to the listener first.
 void Rdp::dispatch(const RdpPacket& packet, std::span<std::uint8_t> rdram) {
+    const auto access = memory_state_.access(packet);
+    memory_state_.apply(packet.words[0]);
+    if (ram_write_listener_) {
+        for (unsigned i = 0; i < access.count; ++i) {
+            const auto& range = access.ranges[i];
+            if (range.write) ram_write_listener_(range.begin, range.end);
+        }
+    }
     if (worker_) {
-        const auto access = memory_state_.access(packet);
-        memory_state_.apply(packet.words[0]);
         worker_->submit(packet, access, needs_barrier(packet, access));
     } else {
         execute_packet(packet, rdram);

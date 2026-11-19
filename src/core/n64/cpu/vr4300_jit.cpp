@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -48,6 +50,16 @@ Vr4300Jit::Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget)
     ctx_.code_pages = cache_.pages().table();
     ctx_.barrier = nullptr;
     ctx_.user = this;
+    static_assert(CpuBus::kCodePageShift == jit::CodePages::kPageShift);
+    bus_.set_code_watch(cache_.pages().table(), &on_code_write, this);  // flush() keeps the table
+}
+
+Vr4300Jit::~Vr4300Jit() {
+    if (bus_.code_watch_user() == this) bus_.set_code_watch(nullptr, nullptr, nullptr);
+}
+
+void Vr4300Jit::on_code_write(void* self, std::uint32_t begin, std::uint32_t end) {
+    static_cast<Vr4300Jit*>(self)->invalidate_ram(begin, end);
 }
 
 Vr4300Jit::Stats Vr4300Jit::stats() const {
@@ -57,7 +69,24 @@ Vr4300Jit::Stats Vr4300Jit::stats() const {
     return s;
 }
 
-void Vr4300Jit::invalidate_ram(std::uint32_t begin, std::uint32_t end) { cache_.invalidate(begin, end); }
+void Vr4300Jit::invalidate_ram(std::uint32_t begin, std::uint32_t end) {
+    if (cache_.invalidate(begin, end)) code_changed_ = true;
+}
+
+void Vr4300Jit::verify(const jit::Block& block) const {
+    const auto words = static_cast<std::uint32_t>(block.code.size());
+    bus_.guard_memory(block.paddr, std::size_t{words} * 4, false);  // the threaded RDP may still write there
+    const std::uint8_t* m = bus_.direct_ram() + block.paddr;
+    for (std::uint32_t i = 0; i < words; ++i, m += 4) {
+        const std::uint32_t ram = (std::uint32_t{m[0]} << 24) | (std::uint32_t{m[1]} << 16) | (std::uint32_t{m[2]} << 8) | m[3];
+        if (ram == block.code[i]) continue;
+        char message[160];
+        std::snprintf(message, sizeof(message),
+                      "CPU JIT check: the block at 0x%08X no longer matches RAM (0x%08X: compiled 0x%08X, RAM 0x%08X)",
+                      block.paddr, block.paddr + 4 * i, block.code[i], ram);
+        throw std::runtime_error(message);
+    }
+}
 
 void Vr4300Jit::flush() { cache_.flush(); }
 
@@ -83,30 +112,15 @@ std::uint64_t Vr4300Jit::run_instruction(jit::Context* ctx, std::uint64_t instr,
 
 std::uint64_t Vr4300Jit::run(std::uint32_t instr, std::uint64_t flags, std::uint64_t block_cycles) {
     int cycles = 1;
-    Vr4300::InPlace status = Vr4300::InPlace::Ok;
-    std::uint32_t store_begin = 0, store_bytes = 0;
-    if (flags & kFlagMemory) {
-        const MemoryAccess access = memory_access(instr);
-        if (access.store) {  // its range, from the base register as it is before the store
-            const std::uint64_t base = cpu_.gpr_[(instr >> 21) & 31];
-            std::uint64_t vaddr = base + static_cast<std::uint64_t>(static_cast<std::int16_t>(instr & 0xFFFF));
-            if (access.aligned_down) vaddr &= ~std::uint64_t{access.bytes - 1U};
-            store_begin = static_cast<std::uint32_t>(vaddr & 0x1FFFFFFF);
-            store_bytes = access.bytes;
-        }
-        status = cpu_.execute_memory_in_place(instr, cycles);
-    } else {
-        status = cpu_.execute_in_place(instr, cycles);
-    }
+    code_changed_ = false;
+    Vr4300::InPlace status = (flags & kFlagMemory) ? cpu_.execute_memory_in_place(instr, cycles)
+                                                   : cpu_.execute_in_place(instr, cycles);
+    // A store over compiled code: the code watch already dropped those blocks (this one's
+    // memory stays valid until a flush); leave, since this block may be one of them.
+    if (status == Vr4300::InPlace::Ok && code_changed_) status = Vr4300::InPlace::CodeChanged;
     if (status == Vr4300::InPlace::ExitBefore || status == Vr4300::InPlace::HostError) return kBefore;
     ctx_.extra_cycles += cycles - 1;
     if (status != Vr4300::InPlace::Ok) return kAfter;  // Exception, CodeChanged: it retired
-    // A store over compiled code: drop those blocks (this one's memory stays valid until a
-    // flush) and leave, since this block may be one of them.
-    if (store_bytes != 0 && cache_.pages().marked(store_begin, store_begin + store_bytes) &&
-        cache_.invalidate(store_begin, store_begin + store_bytes)) {
-        return kAfter;
-    }
     // Extra cycles: done + extra + remaining static = the block's static cycles + extra. If
     // that reaches the budget, leave now (only this instruction may overshoot it).
     if (cycles > 1 && ctx_.extra_cycles + static_cast<std::int64_t>(block_cycles) >= ctx_.budget) return kAfter;
@@ -126,7 +140,9 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     const std::uint32_t page_end = (paddr | 0xFFFU) + 1;
     const std::uint32_t end = std::min(page_end, bus_.direct_ram_size());
     const std::uint32_t max_words = std::min<std::uint32_t>(kMaxBlockInstructions, (end - paddr) / 4);
-    bus_.guard_memory(paddr, std::size_t{max_words} * 4, false);  // the threaded RDP may still write there
+    // The threaded RDP may still write there: it reported the write when the draw was
+    // submitted, so waiting for it before reading the words keeps the block current.
+    bus_.guard_memory(paddr, std::size_t{max_words} * 4, false);
     const std::uint8_t* ram = bus_.direct_ram() + paddr;
     const auto word = [ram](std::uint32_t i) {
         const std::uint8_t* m = ram + 4 * i;
@@ -228,6 +244,7 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
             if (std::uint64_t{paddr} + 4 > bus_.direct_ram_size()) break;
             const jit::Block* block = cache_.find(paddr, key);
             if (block == nullptr) block = compile(paddr, key);
+            if (check_) verify(*block);
             if (block->fn == nullptr) {
                 if (classify(block->code[0]) == Kind::OutOfBlock) ++stats_.out_of_block;
                 break;
@@ -254,7 +271,7 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
                 break;
             }
         }
-    } catch (...) {  // from compile(): the memory guard
+    } catch (...) {  // from compile() (the memory guard) or verify()
         failure = std::current_exception();
     }
     // What ran is retired even when a host error follows, as step() would have.

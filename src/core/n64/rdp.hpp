@@ -2,9 +2,11 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "n64/mi.hpp"
@@ -31,7 +33,7 @@ public:
 // Display Processor command interface and software rasterizer.
 class Rdp : private RdpRasterizer {
 public:
-    Rdp() = default;
+    Rdp() { rebuild_memory_state(); }
     ~Rdp();
     // Threaded mode draws on `bands` worker threads (0 picks one per four hardware threads,
     // at most 4), each owning every band-th group of 4 rows. Results match synchronous mode.
@@ -54,6 +56,12 @@ public:
     void submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram,
                       bool defer_sync_full = false);
     void finish_deferred_sync(Mi& mi);
+    // Called with every RDRAM range [begin, end) a draw may write (color and depth image),
+    // on the calling thread before the draw runs: synchronous mode executes it right after,
+    // threaded mode hands it to the worker. The bounds may overestimate the pixels drawn.
+    void set_ram_write_listener(std::function<void(std::uint32_t begin, std::uint32_t end)> listener) {
+        ram_write_listener_ = std::move(listener);
+    }
     // When set, every command word the RDP consumes is appended here (for comparing runs).
     void set_trace(std::vector<std::uint64_t>* trace) { trace_ = trace; }
     // How many 64-bit words the command with this opcode (bits 61:56) takes.
@@ -139,6 +147,7 @@ private:
     unsigned drawn_count_ = 0;
     std::unique_ptr<RdpWorker> worker_;
     std::vector<std::uint64_t>* trace_ = nullptr;  // not saved: a debugging aid
+    std::function<void(std::uint32_t, std::uint32_t)> ram_write_listener_;  // not saved: wiring
     bool deferring_sync_full_ = false;  // inside a deferred submit_words
     bool pending_sync_full_ = false;    // a deferred Sync Full not delivered yet
 };

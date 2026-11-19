@@ -5,7 +5,7 @@ target_sources(ezy_n64_tests PRIVATE test_rsp_vector_multiply.cpp test_rsp_dma_w
 target_sources(ezy_n64_tests PRIVATE test_rdp_hidden_bits.cpp)
 target_sources(ezy_n64_tests PRIVATE test_rdp_combiner.cpp)
 target_sources(ezy_n64_tests PRIVATE test_rdp_constant_rectangle.cpp)
-target_sources(ezy_n64_tests PRIVATE test_cpu_jit.cpp)
+target_sources(ezy_n64_tests PRIVATE test_cpu_jit.cpp test_cpu_jit_invalidation.cpp)
 if(TARGET asmjit::asmjit)
     target_link_libraries(ezy_n64_tests PRIVATE asmjit::asmjit)
 endif()

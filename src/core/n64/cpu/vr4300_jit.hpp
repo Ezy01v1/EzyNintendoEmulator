@@ -38,7 +38,9 @@ inline constexpr unsigned kMaxBlockInstructions = 64;
 // kMaxBlockInstructions, or at the end of its 4 KiB page or of direct RAM.
 class Vr4300Jit {
 public:
+    // Registers itself as the bus's code watch (CpuBus::set_code_watch) until destroyed.
     Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget = 32 * 1024 * 1024);
+    ~Vr4300Jit();
     Vr4300Jit(const Vr4300Jit&) = delete;
     Vr4300Jit& operator=(const Vr4300Jit&) = delete;
 
@@ -50,11 +52,17 @@ public:
     };
     // Runs blocks from cpu.pc() while each fits strictly below min(event_budget,
     // cycles_until_compare()). Retires Count/Random (retire_many) itself.
-    // instructions == 0: the caller runs cpu.step().
+    // instructions == 0: the caller runs cpu.step(). Throws std::runtime_error in check
+    // mode when a block no longer matches RAM, before running it.
     Result execute(std::uint64_t event_budget);
-    void invalidate_ram(std::uint32_t begin, std::uint32_t end);  // from any RDRAM writer
+    // Drops the blocks over [begin, end). The bus's code watch calls it for every write
+    // over compiled code (CpuBus::note_ram_write), stores run in place included: a block
+    // whose own store drops code leaves right after it (CodeChanged).
+    void invalidate_ram(std::uint32_t begin, std::uint32_t end);
     void flush();
-    void set_check(bool enabled) { check_ = enabled; }  // Task 5
+    // Debugging: before entering each block, compare the words it was compiled from with
+    // RAM; a difference means some writer did not report its write.
+    void set_check(bool enabled) { check_ = enabled; }
 
     struct Stats {
         std::uint64_t compiled = 0, in_place = 0, native = 0, out_of_block = 0, exits_before = 0, compile_ns = 0,
@@ -75,6 +83,8 @@ private:
     static std::uint64_t run_instruction(jit::Context* ctx, std::uint64_t instr, std::uint64_t flags,
                                          std::uint64_t block_cycles) noexcept;
     std::uint64_t run(std::uint32_t instr, std::uint64_t flags, std::uint64_t block_cycles);
+    static void on_code_write(void* self, std::uint32_t begin, std::uint32_t end);
+    void verify(const jit::Block& block) const;
     [[nodiscard]] std::uint32_t mode_key() const;
     [[nodiscard]] bool kernel_mode() const;
     const jit::Block* compile(std::uint32_t paddr, std::uint32_t key);
@@ -92,6 +102,7 @@ private:
     Offsets offsets_;
     bool available_ = false;
     bool check_ = false;
+    bool code_changed_ = false;  // invalidate_ram() dropped a block since run() cleared it
     std::exception_ptr error_;  // a C++ exception a helper caught, rethrown by execute()
     Stats stats_;
 };

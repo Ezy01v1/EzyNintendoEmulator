@@ -30,6 +30,8 @@ Bus::Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode, RspMode rsp_
     vi_.start(scheduler_);
     set_direct_ram(rdram_.data(), kRdramSize);
     if (mode == RdpMode::Threaded) set_memory_guard(rdp_.enable_threaded(rdram_));
+    // Every RDP draw reports what it writes, on this thread, before the pixels change.
+    rdp_.set_ram_write_listener([this](std::uint32_t begin, std::uint32_t end) { note_ram_write(begin, end - begin); });
 }
 
 std::uint8_t* Bus::memory(std::uint32_t paddr) {
@@ -90,7 +92,9 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     } else if (paddr >= kSi && paddr < kSi + 0x100000) {
         if (((paddr - kSi) & 0x1F) == 4 || ((paddr - kSi) & 0x1F) == 16) {
             // 64 bytes at SI_DRAM_ADDR: written by PIF -> RDRAM (0x04), read by RDRAM -> PIF (0x10).
-            prepare_range(si_.read(0x00), 64, ((paddr - kSi) & 0x1F) == 4);
+            const bool to_rdram = ((paddr - kSi) & 0x1F) == 4;
+            prepare_range(si_.read(0x00), 64, to_rdram);
+            if (to_rdram) note_ram_write(si_.read(0x00), 64);
         }
         si_.write(paddr - kSi, value, mi_, scheduler_, rdram_, pif_);
     } else if (paddr >= kPifRam && paddr < kPifRam + 64) {
@@ -153,6 +157,7 @@ void Bus::write8(std::uint32_t paddr, std::uint8_t value) {
     if (paddr >= kSpMem && paddr < kSpRegs) { rsp_.write_memory(paddr, std::span(&value, 1)); return; }
     if (std::uint8_t* m = memory(paddr)) {
         *m = value;
+        note_ram_write(paddr, 1);
         return;
     }
     write_io(paddr, static_cast<std::uint32_t>(value) << ((3 - (paddr & 3)) * 8));
@@ -185,6 +190,7 @@ void Bus::write32(std::uint32_t paddr, std::uint32_t value) {
         m[1] = static_cast<std::uint8_t>(value >> 16);
         m[2] = static_cast<std::uint8_t>(value >> 8);
         m[3] = static_cast<std::uint8_t>(value);
+        note_ram_write(paddr, 4);
         return;
     }
     write_io(paddr, value);
@@ -216,6 +222,7 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
             const auto row = rsp_.dma_row();
             if (row.address + row.bytes <= rdram_.size()) rdp_.prepare_memory(row.address, row.bytes, row.write);
             else drain_rdp();  // wraps or leaves RDRAM: rare, keep the full barrier
+            if (row.write) note_dram_write(row.address, row.bytes);
             rsp_.finish_dma_row(scheduler_, rdram_, when);
             break;
         }
@@ -251,8 +258,7 @@ void Bus::on_rsp_start() {
         return;  // the RSP runs the task too
     }
     AudioHle::run(task, rdram_, rsp_.dmem(), [this](std::uint32_t address, std::uint32_t bytes, bool write) {
-        if (address + bytes <= rdram_.size()) rdp_.prepare_memory(address, bytes, write);
-        else drain_rdp();
+        audio_hle_access(address, bytes, write);
     });
     rsp_.finish_hle_task(mi_, scheduler_);
 }

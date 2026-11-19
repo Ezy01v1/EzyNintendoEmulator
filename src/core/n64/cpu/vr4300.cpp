@@ -350,6 +350,7 @@ bool Vr4300::store(std::uint64_t vaddr, T value) {
         bus_.guard_memory(t.paddr, sizeof(T), true);
         std::uint8_t* m = bus_.direct_ram() + t.paddr;
         for (std::size_t i = 0; i < sizeof(T); ++i) m[i] = static_cast<std::uint8_t>(static_cast<std::uint64_t>(value) >> (8 * (sizeof(T) - 1 - i)));
+        bus_.note_ram_write(t.paddr, sizeof(T));  // compiled code there is stale now
         return true;
     }
     if constexpr (sizeof(T) == 1) bus_.write8(t.paddr, value);
