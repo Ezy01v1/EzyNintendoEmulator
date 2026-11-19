@@ -397,7 +397,7 @@ TEST_CASE("CPU JIT leaves COP0 and MMIO to the interpreter") {
     REQUIRE_NATIVE(t.jit);
     CHECK(t.jit.stats().out_of_block > 0);
     CHECK(t.jit.stats().exits_before > 0);
-    CHECK(t.jit.stats().in_place > 0);
+    CHECK(t.jit.stats().in_place == 0);  // the loads and stores are native, the uncached ones exit before
 }
 
 TEST_CASE("CPU JIT does not compile past a page end or past RAM") {
@@ -461,11 +461,18 @@ TEST_CASE("CPU JIT keeps idle loop detection working") {
 TEST_CASE("CPU JIT rethrows a host error raised inside a block") {
     Twin t;
     REQUIRE_NATIVE(t.jit);
+    // The threaded RDP still has a packet writing that page: the native LW's barrier calls
+    // the bus, which fails. The block leaves before the LW, the instructions before it retired.
+    t.jit_bus.pend(kData, false, 1, 1);
     t.jit_bus.throw_at = kData + 0x10;
     t.program(kCode, {addiu(8, 0, 1), lui(9, 0x8004), lw(10, 9, 0x10), addiu(11, 0, 1), kStop});
     t.start(kKseg0 + kCode);
     CHECK_THROWS_AS(t.jit.execute(1000), std::runtime_error);
     CHECK(t.jit_cpu.gpr(11) == 0);
+    CHECK(t.jit_cpu.gpr(8) == 1);
+    CHECK(t.jit_cpu.pc() == kKseg0 + kCode + 8);  // at the LW, which did not run
+    for (int k = 0; k < 2; ++k) t.ref_cpu.step();
+    CHECK(state_of(t.ref_cpu) == state_of(t.jit_cpu));
     t.jit_bus.throw_at = ~0U;
     t.jit.flush();
     CHECK(t.jit.execute(1000).instructions > 0);

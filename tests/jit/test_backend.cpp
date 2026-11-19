@@ -383,15 +383,17 @@ struct BarrierProbe {
     PageBarrierView view{writers.data(), readers.data(), slot_sequence.data(), &completed_seen, &failed};
     unsigned waits = 0;
     std::uint32_t paddr = 0, bytes = 0, write = 0;
+    std::uint32_t fail = 0;  // count_wait's answer
 };
 
 BarrierProbe* probe = nullptr;
 
-void count_wait(Context*, std::uint32_t paddr, std::uint32_t bytes, std::uint32_t write) noexcept {
+std::uint32_t count_wait(Context*, std::uint32_t paddr, std::uint32_t bytes, std::uint32_t write) noexcept {
     ++probe->waits;
     probe->paddr = paddr;
     probe->bytes = bytes;
     probe->write = write;
+    return probe->fail;
 }
 
 }  // namespace
@@ -444,6 +446,48 @@ TEST_CASE("IR barrier calls barrier_wait only when the page's packet is newer th
     fn(&m.ctx);
     CHECK(p.waits == 1);
     CHECK(p.write == 1);
+    probe = nullptr;
+}
+
+TEST_CASE("IR barrier with an exit takes it only when barrier_wait fails" * doctest::skip(!kNative)) {
+    // Slot 1 = 1 before the barrier, 2 after it; the failure exit stores 3 in slot 2.
+    Machine m;
+    BarrierProbe p;
+    probe = &p;
+    m.ctx.barrier_wait = &count_wait;
+    m.ctx.barrier = &p.view;
+    IrBuilder b;
+    const auto paddr = b.convert(Op::Trunc, Type::I32, b.load_guest(Type::I64, slot(0)));
+    b.store_guest(slot(1), b.constant(Type::I64, 1));
+    const ExitId failed = b.add_exit(), done = b.add_exit();
+    b.begin_exit(failed);
+    b.store_guest(slot(2), b.constant(Type::I64, 3));
+    b.end_exit();
+    b.barrier(paddr, 4, true, failed);
+    b.store_guest(slot(1), b.constant(Type::I64, 2));
+    b.exit(done);
+    const auto fn = m.build(b);
+
+    m.guest[0] = 0x10;
+    const auto fast = fn(&m.ctx);  // page 0 is clear: no call
+    CHECK(fast == done);
+    CHECK(p.waits == 0);
+    CHECK(m.guest[1] == 2);
+
+    p.writers[0] = 1;
+    p.slot_sequence[1] = 1;  // newer than completed_seen = 0: the slow path
+    const auto waited = fn(&m.ctx);
+    CHECK(waited == done);
+    CHECK(p.waits == 1);
+    CHECK(p.write == 1);
+    CHECK(m.guest[2] == 0);
+
+    p.fail = 1;
+    const auto failure = fn(&m.ctx);
+    CHECK(failure == failed);
+    CHECK(p.waits == 2);
+    CHECK(m.guest[1] == 1);  // the store after the barrier did not run
+    CHECK(m.guest[2] == 3);
     probe = nullptr;
 }
 
@@ -563,6 +607,23 @@ TEST_CASE("IR rejects float types and misuse") {
         const auto e0 = b.add_exit();
         const auto e1 = b.add_exit();
         b.exit_if(b.constant(Type::I32, 1), e1);
+        const auto late = b.constant(Type::I64, 3);
+        b.begin_exit(e1);
+        b.store_guest(0, late);
+        b.end_exit();
+        b.exit(e0);
+        CHECK_THROWS_AS((void)b.finish(), std::logic_error);
+    }
+    {
+        IrBuilder b;  // a barrier's failure exit is a jump like exit_if's
+        const auto e0 = b.add_exit();
+        const auto e1 = b.add_exit();
+        const auto paddr = b.constant(Type::I32, 0);
+        CHECK_THROWS_AS(b.barrier(paddr, 4, false, 7), std::logic_error);  // no such exit
+        b.begin_exit(e0);
+        CHECK_THROWS_AS(b.barrier(paddr, 4, false, e1), std::logic_error);  // not from a region
+        b.end_exit();
+        b.barrier(paddr, 4, false, e1);
         const auto late = b.constant(Type::I64, 3);
         b.begin_exit(e1);
         b.store_guest(0, late);

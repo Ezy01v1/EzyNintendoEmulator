@@ -2327,7 +2327,7 @@ TEST_CASE("N64 with the CPU JIT loads a state and continues exactly like the int
         CHECK_FALSE(n64->load_state(truncated));
         for (int i = 0; i < 2; ++i) n64->run_frame();
         CHECK(n64->cpu().gpr(9) > 1000);  // the loop in RDRAM ran
-        if (n64->cpu_jit() != nullptr) CHECK(n64->cpu_jit()->stats().in_place > 1000);
+        if (n64->cpu_jit() != nullptr) CHECK(n64->cpu_jit()->stats().native > 1000);  // its stores included
         return n64->save_state();
     };
     const auto interpreter_state = run(CpuMode::Interpreter);

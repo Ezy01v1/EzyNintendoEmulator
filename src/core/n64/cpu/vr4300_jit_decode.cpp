@@ -23,7 +23,7 @@ MemoryAccess memory_access(std::uint32_t instr) {
 
 Kind classify(std::uint32_t instr, bool allow_64bit) {
     if ((instr >> 26) == 0x10) return Kind::OutOfBlock;  // COP0: MTC0/MFC0, ERET, TLB
-    if (memory_access(instr).bytes != 0) return Kind::Memory;
+    if (memory_access(instr).bytes != 0) return is_native_memory(instr, allow_64bit) ? Kind::Native : Kind::Memory;
     if (alu_cycles(instr, allow_64bit) != 0) return Kind::Native;
     if (is_branch(instr)) return (instr >> 26) == 0x11 ? Kind::InPlace : Kind::Native;  // BC1* in place
     // Everything else, SYSCALL, BREAK, traps, CACHE and COP1 included, has no effect on

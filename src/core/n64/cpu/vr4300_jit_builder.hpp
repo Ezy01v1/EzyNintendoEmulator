@@ -31,15 +31,17 @@ enum ExitKind : std::uint32_t { kExitNormal, kExitBefore, kExitAfter };
 // real state.
 class BlockBuilder {
 public:
-    // `vaddr`: the kseg0 address of the block's first instruction.
-    BlockBuilder(jit::IrBuilder& ir, const GuestOffsets& offsets, std::uint64_t vaddr, bool allow_64bit)
-        : ir_(ir), offsets_(offsets), vaddr_(vaddr), allow_64bit_(allow_64bit) {
+    // `vaddr`: the kseg0 address of the block's first instruction; `ram_size`: Context::ram_size.
+    BlockBuilder(jit::IrBuilder& ir, const GuestOffsets& offsets, std::uint64_t vaddr, bool allow_64bit,
+                 std::uint32_t ram_size)
+        : ir_(ir), offsets_(offsets), vaddr_(vaddr), allow_64bit_(allow_64bit), ram_size_(ram_size) {
         cached_.fill(kNone);
     }
 
     // For the emitters, while they emit the current instruction.
     [[nodiscard]] jit::IrBuilder& ir() { return ir_; }
     [[nodiscard]] bool allow_64bit() const { return allow_64bit_; }
+    [[nodiscard]] std::uint32_t ram_size() const { return ram_size_; }
     jit::Value gpr(int index);                  // I64; $0 reads as 0
     void set_gpr(int index, jit::Value value);  // I64; $0 is never written
     jit::Value hi() { return reg(kHi); }
@@ -57,6 +59,12 @@ public:
     // instruction, which is not retired: the interpreter's next step() runs it (and raises
     // its exception). Call it before the instruction writes anything.
     void exit_before_if(jit::Value cond);
+    // The exit exit_before_if() takes, for several jumps (exit_if, a barrier's failure).
+    jit::ExitId exit_before();
+    // When cond (I32) is nonzero, leaves the block right after the current instruction, a
+    // native one taking `cycles` that retires (kExitAfter: execute() stops there): the pc
+    // state of the next instruction. Call it after the instruction's writes.
+    void exit_after_if(jit::Value cond, std::uint32_t cycles);
     // For a branch-likely: when not_taken (I32) is nonzero, leaves the block right after
     // the current instruction, its delay slot nullified (a normal end: the next block
     // starts at the slot + 4). Call it after the branch's writes (the link).
@@ -103,6 +111,7 @@ private:
     const GuestOffsets& offsets_;
     std::uint64_t vaddr_;  // the current instruction's address
     bool allow_64bit_;
+    std::uint32_t ram_size_;
     std::array<std::uint32_t, kRegs> cached_{};  // IR value id per register, kNone if not loaded
     std::uint64_t dirty_ = 0;                     // registers written since their last store
     PcState pc_state_ = PcState::Clean;           // Clean: the CPU holds the pc state
@@ -121,5 +130,9 @@ bool emit_alu(BlockBuilder& builder, std::uint32_t instr);
 // branches and their -AL forms (not BC1*). Emits `instr` and ends it (end_branch), or
 // returns false (emitting nothing) when it is not one.
 bool emit_branch(BlockBuilder& builder, std::uint32_t instr);
+// Native loads and stores (vr4300_jit_memory.cpp): LB LBU LH LHU LW SB SH SW, and LWU LD SD
+// under allow_64bit (is_native_memory). Emits `instr` (the caller ends it, 1 static cycle),
+// or returns false (emitting nothing) when it is not one.
+bool emit_memory(BlockBuilder& builder, std::uint32_t instr);
 
 }  // namespace ezy::n64

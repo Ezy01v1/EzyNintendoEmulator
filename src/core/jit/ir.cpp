@@ -146,6 +146,17 @@ void IrBuilder::barrier(Value paddr, unsigned bytes, bool write) {
     push({.op = Op::Barrier, .aux = static_cast<std::uint8_t>(bytes), .a = paddr.id, .imm = write ? 1U : 0U});
 }
 
+void IrBuilder::barrier(Value paddr, unsigned bytes, bool write, ExitId on_failure) {
+    check_exit(on_failure);
+    if (region_ != kBody) fail("jit IR: an exit region cannot jump");
+    if (use(paddr) != Type::I32) fail("jit IR: a physical address is I32");
+    check_bytes(Type::I64, bytes);
+    auto& info = exits_[on_failure];
+    info.first_jump = std::min(info.first_jump, static_cast<std::uint32_t>(body_.size()));
+    const std::uint64_t flags = (write ? 1U : 0U) | ((std::uint64_t{on_failure} + 1) << Inst::kBarrierExitShift);
+    push({.op = Op::Barrier, .aux = static_cast<std::uint8_t>(bytes), .a = paddr.id, .imm = flags});
+}
+
 Value IrBuilder::note_ram_write(Value paddr, unsigned bytes) {
     if (use(paddr) != Type::I32) fail("jit IR: a physical address is I32");
     check_bytes(Type::I64, bytes);

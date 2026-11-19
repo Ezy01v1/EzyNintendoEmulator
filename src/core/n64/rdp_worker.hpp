@@ -12,6 +12,8 @@
 #include <thread>
 #include <vector>
 
+#include "jit/context.hpp"
+
 namespace ezy::n64 {
 
 struct RdpPacket {
@@ -47,6 +49,12 @@ public:
     // (for state that crosses bands: a new framebuffer, a texture read from one just drawn).
     void submit(const RdpPacket& packet, const RdpAccess& access, bool barrier = false);
     void wait_memory(std::uint32_t address, std::size_t bytes, bool write) const;
+    // wait_memory()'s first check, for a JIT's inline barrier: its own reservation tables,
+    // completed_seen_ and failed_. The pointers stay valid while the worker lives; only the
+    // producer thread may read them (it is the only one writing the tables).
+    [[nodiscard]] jit::PageBarrierView barrier_view() const {
+        return {writers_.data(), readers_.data(), slot_sequence_.data(), &completed_seen_, &failed_};
+    }
     void drain() const { wait(submitted_); }
     [[nodiscard]] bool pending() const {
         return failed_.load(std::memory_order_acquire) || submitted_ > completed();

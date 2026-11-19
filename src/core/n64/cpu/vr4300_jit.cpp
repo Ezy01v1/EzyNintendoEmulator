@@ -1,7 +1,8 @@
-// VR4300 JIT: block building and the dispatcher. The integer ALU and the branches run as
-// native code (vr4300_jit_alu.cpp, vr4300_jit_branch.cpp); every other instruction runs
-// through the interpreter, called from the block ("in place"). Either way the block skips the per-instruction fetch, interrupt
-// check and retire, which execute() does once at the end.
+// VR4300 JIT: block building and the dispatcher. The integer ALU, the branches and the
+// aligned loads and stores run as native code (vr4300_jit_alu.cpp, vr4300_jit_branch.cpp,
+// vr4300_jit_memory.cpp); every other instruction runs through the interpreter, called
+// from the block ("in place"). Either way the block skips the per-instruction fetch,
+// interrupt check and retire, which execute() does once at the end.
 #include "n64/cpu/vr4300_jit.hpp"
 
 #include <algorithm>
@@ -111,10 +112,23 @@ jit::ExitId BlockBuilder::add_exit(std::uint32_t instructions, std::uint32_t cyc
     return ir_.add_exit();
 }
 
-void BlockBuilder::exit_before_if(jit::Value cond) {
+jit::ExitId BlockBuilder::exit_before() {
     const jit::ExitId exit = add_exit(done_, cycles_, native_, kExitBefore);
     ir_.begin_exit(exit);
     write_back();  // what the instructions before this one left
+    ir_.end_exit();
+    return exit;
+}
+
+void BlockBuilder::exit_before_if(jit::Value cond) { ir_.exit_if(cond, exit_before()); }
+
+void BlockBuilder::exit_after_if(jit::Value cond, std::uint32_t cycles) {
+    // What end_native() is about to leave: after a native branch's slot, AfterSlot (pc_ = N);
+    // otherwise sequential at the next instruction.
+    const jit::ExitId exit = add_exit(done_ + 1, cycles_ + cycles, native_ + 1, kExitAfter);
+    ir_.begin_exit(exit);
+    store_registers();
+    store_pc_state(pc_state_ == PcState::InSlot ? PcState::AfterSlot : PcState::Sequential, vaddr_ + 4);
     ir_.end_exit();
     ir_.exit_if(cond, exit);
 }
@@ -194,7 +208,9 @@ Vr4300Jit::Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget)
     ctx_.ram = bus.direct_ram();
     ctx_.ram_size = bus.direct_ram_size();
     ctx_.code_pages = cache_.pages().table();
-    ctx_.barrier = nullptr;
+    ctx_.barrier = nullptr;  // execute() reads the bus's view
+    ctx_.barrier_wait = &native_barrier_wait;
+    ctx_.code_write = &native_code_write;
     ctx_.user = this;
     static_assert(CpuBus::kCodePageShift == jit::CodePages::kPageShift);
     bus_.set_code_watch(cache_.pages().table(), &on_code_write, this);  // flush() keeps the table
@@ -206,6 +222,30 @@ Vr4300Jit::~Vr4300Jit() {
 
 void Vr4300Jit::on_code_write(void* self, std::uint32_t begin, std::uint32_t end) {
     static_cast<Vr4300Jit*>(self)->invalidate_ram(begin, end);
+}
+
+std::uint32_t Vr4300Jit::native_barrier_wait(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes,
+                                             std::uint32_t write) noexcept {
+    auto& self = *static_cast<Vr4300Jit*>(ctx->user);
+    try {
+        self.bus_.guard_memory(paddr, bytes, write != 0);
+        return 0;
+    } catch (...) {
+        // A failed renderer: execute() rethrows it, the CPU before the access.
+        self.error_ = std::current_exception();
+        return 1;
+    }
+}
+
+std::uint32_t Vr4300Jit::native_code_write(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes) noexcept {
+    auto& self = *static_cast<Vr4300Jit*>(ctx->user);
+    try {
+        // What CpuBus::note_ram_write -> on_code_write does; the store's range is within a page.
+        return self.cache_.invalidate(paddr, paddr + bytes) ? 1 : 0;
+    } catch (...) {
+        self.error_ = std::current_exception();
+        return 1;  // leave: execute() rethrows it
+    }
 }
 
 Vr4300Jit::Stats Vr4300Jit::stats() const {
@@ -276,8 +316,10 @@ std::uint64_t Vr4300Jit::run(std::uint32_t instr, std::uint64_t flags, std::uint
     return kOk;
 }
 
-// A native instruction is emitted by emit_alu (an overflow leaves before it) or
-// emit_branch (a likely branch not taken leaves after it, its slot nullified). For an
+// A native instruction is emitted by emit_alu (an overflow leaves before it), emit_branch
+// (a likely branch not taken leaves after it, its slot nullified) or emit_memory (an
+// access outside kseg0 RAM, unaligned, or whose barrier failed leaves before it; a store
+// that dropped compiled code leaves after it, kExitAfter). For an
 // in-place instruction i: write the pending state back, call the helper with (word, flags,
 // the block's static cycles), then leave if it says so:
 //   kBefore  -> {i}       it did not run (ExitBefore) or a host error interrupted it
@@ -340,13 +382,13 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
         // next_pc_ that branch left.
         const bool after_in_place_branch = i > 0 && is_branch(words[i - 1]) && native_cycles[i - 1] == 0;
         if (!after_in_place_branch && classify(w, allow_64bit) == Kind::Native) {
-            native_cycles[i] = is_branch(w) ? 1 : alu_cycles(w, allow_64bit);
+            native_cycles[i] = is_branch(w) || memory_access(w).bytes != 0 ? 1 : alu_cycles(w, allow_64bit);
         }
         static_cycles += native_cycles[i] != 0 ? native_cycles[i] : 1;
     }
 
     jit::IrBuilder b;
-    BlockBuilder builder(b, offsets_, kKseg0 + paddr, allow_64bit);
+    BlockBuilder builder(b, offsets_, kKseg0 + paddr, allow_64bit, ctx_.ram_size);
     const auto is = [&](jit::Value r, Status st) {
         return b.compare(jit::Cond::Eq, r, b.constant(jit::Type::I64, st));
     };
@@ -357,13 +399,16 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
                 if (!emit_branch(builder, w)) throw std::logic_error("CPU JIT: a native branch has no emitter");
                 continue;  // emit_branch ended it
             }
-            if (!emit_alu(builder, w)) throw std::logic_error("CPU JIT: a Native instruction has no emitter");
+            if (!emit_memory(builder, w) && !emit_alu(builder, w)) {
+                throw std::logic_error("CPU JIT: a Native instruction has no emitter");
+            }
             builder.end_native(native_cycles[i]);
             continue;
         }
         builder.sync();
+        // A native load or store left in place (the slot of BC1*) still needs the memory checks.
         const std::uint64_t flags =
-            (classify(w, allow_64bit) == Kind::Memory ? kFlagMemory : 0) | (is_branch(w) ? kFlagBranch : 0);
+            (memory_access(w).bytes != 0 ? kFlagMemory : 0) | (is_branch(w) ? kFlagBranch : 0);
         const jit::Value r = b.call(&run_instruction, b.constant(jit::Type::I64, w),
                                     b.constant(jit::Type::I64, flags), b.constant(jit::Type::I64, static_cycles));
         b.exit_if(is(r, kBefore), builder.helper_exit(kExitBefore, false));
@@ -407,6 +452,13 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
     const std::uint64_t until_compare = cpu_.cycles_until_compare();
     const std::uint64_t limit = std::min(event_budget, until_compare);
     const std::uint32_t key = mode_key();
+    // The renderer's barrier view: a threaded RDP may come or go between calls.
+    if (const auto view = bus_.barrier_view()) {
+        barrier_view_ = *view;
+        ctx_.barrier = &barrier_view_;
+    } else {
+        ctx_.barrier = nullptr;
+    }
     bool line_latched = false;
     std::exception_ptr failure;
     try {

@@ -297,8 +297,11 @@ private:
     }
 
     // The cheap part of the renderer's memory barrier; barrier_wait only when the page
-    // has a newer packet than completed_seen, or the renderer failed.
+    // has a newer packet than completed_seen, or the renderer failed. With an exit, only
+    // that slow path tests barrier_wait's answer.
     bool barrier(const Inst& inst) {
+        const bool write = (inst.imm & 1) != 0;
+        const auto on_failure = inst.imm >> Inst::kBarrierExitShift;  // 1 + the exit, 0: none
         const auto done = cc_.new_label(), slow = cc_.new_label();
         auto view = cc_.new_gp_ptr();
         cc_.mov(view, x86::qword_ptr(ctx_, field(offsetof(Context, barrier))));
@@ -311,7 +314,7 @@ private:
         cc_.mov(table, x86::qword_ptr(view, field(offsetof(PageBarrierView, writers))));
         cc_.movzx(slot.r32(), x86::word_ptr(table, at, 1));
         cc_.mov(sequence, x86::qword_ptr(sequences, slot, 3));
-        if (inst.imm != 0) {
+        if (write) {
             auto reader = cc_.new_gp64();
             cc_.mov(table, x86::qword_ptr(view, field(offsetof(PageBarrierView, readers))));
             cc_.movzx(slot.r32(), x86::word_ptr(table, at, 1));
@@ -330,12 +333,18 @@ private:
         cc_.mov(wait, x86::qword_ptr(ctx_, field(offsetof(Context, barrier_wait))));
         InvokeNode* node = nullptr;
         cc_.invoke(Out(node), wait,
-                   FuncSignature::build<void, Context*, std::uint32_t, std::uint32_t, std::uint32_t>());
+                   FuncSignature::build<std::uint32_t, Context*, std::uint32_t, std::uint32_t, std::uint32_t>());
         if (node == nullptr) return false;
         node->set_arg(0, ctx_);
         node->set_arg(1, v(inst.a));
         node->set_arg(2, Imm(inst.aux));
-        node->set_arg(3, Imm(inst.imm));
+        node->set_arg(3, Imm(write ? 1 : 0));
+        if (on_failure != 0) {
+            auto failed = cc_.new_gp32();
+            node->set_ret(0, failed);
+            cc_.test(failed, failed);
+            cc_.jnz(exits_[on_failure - 1]);
+        }
         cc_.bind(done);
         return true;
     }

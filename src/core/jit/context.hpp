@@ -31,8 +31,9 @@ struct Context {
     std::int64_t extra_cycles;           // dynamic cycles added by helpers in this block
     void* user;                          // the front-end
     // Slow paths the backend calls; all noexcept, set by the front-end. No C++ exception may
-    // cross a native frame.
-    void (*barrier_wait)(Context*, std::uint32_t paddr, std::uint32_t bytes, std::uint32_t write) noexcept;
+    // cross a native frame. barrier_wait returns nonzero when the access must not happen (the
+    // wait failed: the front-end keeps the error); a barrier with an exit then takes it.
+    std::uint32_t (*barrier_wait)(Context*, std::uint32_t paddr, std::uint32_t bytes, std::uint32_t write) noexcept;
     std::uint32_t (*code_write)(Context*, std::uint32_t paddr, std::uint32_t bytes) noexcept;  // 1 = compiled code changed
 };
 

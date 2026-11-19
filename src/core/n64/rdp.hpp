@@ -43,6 +43,11 @@ public:
     [[nodiscard]] bool threaded() const { return worker_ != nullptr; }
     [[nodiscard]] RdpWorker::Stats stats() const { return worker_ ? worker_->stats() : RdpWorker::Stats{}; }
     void drain() const { if (worker_) worker_->drain(); }
+    // The worker's barrier view (RdpWorker::barrier_view); none without a worker.
+    [[nodiscard]] std::optional<jit::PageBarrierView> barrier_view() const {
+        if (!worker_) return std::nullopt;
+        return worker_->barrier_view();
+    }
     void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const {
         if (worker_) worker_->wait_memory(address, bytes, write);  // cheap when nothing touches the range
     }

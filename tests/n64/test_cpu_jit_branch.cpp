@@ -123,7 +123,7 @@ TEST_CASE("CPU JIT native branches match on every branch kind, taken and not") {
         {"native slot reading the link", addu(10, 31, 21), false},
         {"native slot writing the compared register", addiu(8, 8, 5), false},
         {"in-place slot (DIV)", mips::div(8, 14), true},
-        {"memory slot in RAM (LW)", lw(10, 28, 8), true},
+        {"native memory slot (LW kseg0)", lw(10, 28, 8), false},
     };
     const std::int32_t pairs[][2] = {{-1, -1}, {0, 0}, {1, 1}, {-1, 1}, {1, -1}, {0, 1}};
     for (const Branch& b : branch_kinds()) {

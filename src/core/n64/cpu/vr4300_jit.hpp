@@ -14,9 +14,13 @@ namespace ezy::n64 {
 // How a block treats an instruction (vr4300_jit_decode.cpp):
 //   Native      translated to IR: the integer ALU (vr4300_jit_alu.cpp), the 64-bit ops
 //               only when allow_64bit (else InPlace: the interpreter raises RI); every
-//               branch but BC1* (vr4300_jit_branch.cpp)
+//               branch but BC1* (vr4300_jit_branch.cpp); LB LBU LH LHU LW SB SH SW, and
+//               LWU LD SD only when allow_64bit (vr4300_jit_memory.cpp), which leave the
+//               block before themselves unless they are aligned kseg0 accesses inside
+//               direct RAM
 //   InPlace     Vr4300::execute_in_place, called from the block (BC1* included)
-//   Memory      a load or store: Vr4300::execute_memory_in_place, which exits before it
+//   Memory      any other load or store (LWL..SDR, LL/SC, COP1, the 64-bit ones without
+//               allow_64bit): Vr4300::execute_memory_in_place, which exits before it
 //               unless it is a kernel-mode kseg0/kseg1 access inside direct RAM
 //   OutOfBlock  COP0: the block ends before it and Vr4300::step() runs it
 enum class Kind : std::uint8_t { Native, InPlace, Memory, OutOfBlock };
@@ -34,6 +38,8 @@ struct MemoryAccess {
     bool store = false;
 };
 [[nodiscard]] MemoryAccess memory_access(std::uint32_t instr);
+// Whether a load or store runs natively under this mode (vr4300_jit_memory.cpp).
+[[nodiscard]] bool is_native_memory(std::uint32_t instr, bool allow_64bit);
 
 inline constexpr unsigned kMaxBlockInstructions = 64;
 
@@ -52,7 +58,10 @@ struct GuestOffsets {
 class Vr4300Jit {
 public:
     // Registers itself as the bus's code watch (CpuBus::set_code_watch) until destroyed.
-    Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget = 32 * 1024 * 1024);
+    // code_budget caps the executable memory, allocated as blocks need it; reaching it
+    // flushes every block. With native loads and stores, MK64's first 1900 fields compile
+    // about 68 MB of code: under the former 32 MiB, flushes and recompiles halved the speed.
+    Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget = std::size_t{128} * 1024 * 1024);
     ~Vr4300Jit();
     Vr4300Jit(const Vr4300Jit&) = delete;
     Vr4300Jit& operator=(const Vr4300Jit&) = delete;
@@ -70,7 +79,8 @@ public:
     Result execute(std::uint64_t event_budget);
     // Drops the blocks over [begin, end). The bus's code watch calls it for every write
     // over compiled code (CpuBus::note_ram_write), stores run in place included: a block
-    // whose own store drops code leaves right after it (CodeChanged).
+    // whose own store drops code leaves right after it (CodeChanged). Native stores call
+    // native_code_write instead, through the same table, with the same effect.
     void invalidate_ram(std::uint32_t begin, std::uint32_t end);
     void flush();
     // Debugging: before entering each block, compare the words it was compiled from with
@@ -97,6 +107,12 @@ private:
                                          std::uint64_t block_cycles) noexcept;
     std::uint64_t run(std::uint32_t instr, std::uint64_t flags, std::uint64_t block_cycles);
     static void on_code_write(void* self, std::uint32_t begin, std::uint32_t end);
+    // Context::barrier_wait: guard_memory() for a native access; a C++ exception is kept
+    // for execute() and the access's block leaves before it (returns 1).
+    static std::uint32_t native_barrier_wait(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes,
+                                             std::uint32_t write) noexcept;
+    // Context::code_write: a native store over a marked page; 1 if it dropped a block.
+    static std::uint32_t native_code_write(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes) noexcept;
     void verify(const jit::Block& block) const;
     [[nodiscard]] std::uint32_t mode_key() const;
     [[nodiscard]] bool kernel_mode() const;
@@ -107,6 +123,7 @@ private:
     CpuBus& bus_;
     jit::BlockCache cache_;
     jit::Context ctx_{};
+    jit::PageBarrierView barrier_view_{};  // ctx_.barrier while the bus has one (execute())
     GuestOffsets offsets_;
     bool available_ = false;
     bool check_ = false;

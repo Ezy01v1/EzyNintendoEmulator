@@ -4,7 +4,11 @@
 // interpreter and one the JIT, compared instruction for instruction.
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -31,19 +35,52 @@ constexpr std::uint32_t kStop = mfc0(0, 9);
 
 // Plain memory, the first `direct` bytes exposed as direct RAM; the rest (and anything
 // above, wrapping) goes through the virtual accessors, counted as MMIO.
+//
+// It also plays a threaded RDP's page reservations, exposed as a PageBarrierView (unless
+// `threaded` is false): pend() gives a page a writer (or reader) packet newer than
+// completed_seen. prepare_memory then counts the access as a wait and completes the
+// packet, as RdpWorker::wait_memory does, after throwing first for throw_at.
 struct TwinBus final : ezy::n64::CpuBus {
     std::vector<std::uint8_t> mem;
     mutable unsigned mmio_reads = 0, mmio_writes = 0;
     std::uint32_t penalty = 0;
     std::uint32_t throw_at = ~0U;  // prepare_memory throws for an access covering it
+    bool threaded = true;
+    std::vector<std::uint16_t> writers, readers;  // slot per 4 KiB page of direct RAM
+    std::array<std::uint64_t, 8> slot_sequence{};
+    mutable std::uint64_t completed_seen = 0;
+    std::atomic<bool> failed{false};
+    mutable unsigned waits = 0;
+    // prepare_memory calls for accesses overlapping [guard_begin, guard_end).
+    std::uint32_t guard_begin = 0, guard_end = 0;
+    mutable unsigned guards = 0;
 
-    TwinBus(std::uint32_t size, std::uint32_t direct) : mem(size, 0) {
+    TwinBus(std::uint32_t size, std::uint32_t direct)
+        : mem(size, 0), writers(direct >> 12, 0), readers(direct >> 12, 0) {
         set_direct_ram(mem.data(), direct);
         set_memory_guard(true);
     }
     std::uint8_t& at(std::uint32_t paddr) { return mem[paddr % mem.size()]; }
-    void prepare_memory(std::uint32_t address, std::size_t bytes, bool) const override {
+    void pend(std::uint32_t paddr, bool reader, std::uint16_t slot, std::uint64_t sequence) {
+        (reader ? readers : writers)[paddr >> 12] = slot;
+        slot_sequence[slot] = sequence;
+    }
+    [[nodiscard]] std::optional<ezy::jit::PageBarrierView> barrier_view() const override {
+        if (!threaded) return std::nullopt;
+        return ezy::jit::PageBarrierView{writers.data(), readers.data(), slot_sequence.data(), &completed_seen,
+                                         &failed};
+    }
+    void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const override {
         if (throw_at >= address && throw_at - address < bytes) throw std::runtime_error("host failure");
+        if (address < guard_end && address + bytes > guard_begin) ++guards;
+        std::uint64_t sequence = 0;
+        for (std::uint32_t page = address >> 12; page <= (address + bytes - 1) >> 12 && page < writers.size(); ++page) {
+            sequence = std::max(sequence, slot_sequence[writers[page]]);
+            if (write) sequence = std::max(sequence, slot_sequence[readers[page]]);
+        }
+        if (sequence <= completed_seen && !failed) return;
+        ++waits;
+        completed_seen = std::max(completed_seen, sequence);
     }
     std::uint64_t read(std::uint32_t paddr, unsigned bytes) {
         ++mmio_reads;

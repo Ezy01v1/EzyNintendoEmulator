@@ -2,6 +2,9 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <optional>
+
+#include "jit/context.hpp"
 
 namespace ezy::n64 {
 
@@ -33,6 +36,11 @@ public:
         if (memory_guard_) prepare_memory(address, bytes, write);
     }
     virtual void prepare_memory(std::uint32_t, std::size_t, bool) const {}
+    // The inline form of prepare_memory()'s check for direct RAM, when the bus has one (a
+    // threaded RDP): an access whose page the view says is clear needs no prepare_memory()
+    // call. None (the default): prepare_memory() never waits for direct RAM. The CPU JIT
+    // reads it again on every Vr4300Jit::execute(), as the renderer may change in between.
+    [[nodiscard]] virtual std::optional<jit::PageBarrierView> barrier_view() const { return std::nullopt; }
 
     // The code watch: every writer of direct RAM (CPU stores, DMA, HLE tasks, the RDP)
     // reports the range it writes through note_ram_write(), so compiled code over it can be
