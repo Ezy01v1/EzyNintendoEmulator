@@ -1,4 +1,4 @@
-add_executable(ezy_jit_tests test_main.cpp test_build.cpp)
+add_executable(ezy_jit_tests test_main.cpp test_build.cpp test_backend.cpp)
 target_link_libraries(ezy_jit_tests PRIVATE ezy_jit doctest::doctest ezy_warnings)
 target_compile_definitions(ezy_jit_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
 add_test(NAME ezy_jit_tests COMMAND ezy_jit_tests)
