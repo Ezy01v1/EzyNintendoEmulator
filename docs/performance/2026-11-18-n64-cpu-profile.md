@@ -38,10 +38,12 @@ by themselves and are worth avoiding in the JIT's COP1 path.
 ## TLB check
 
 `Vr4300::translate_mapped` and `Tlb::translate` (and anything else TLB-related)
-have **0 samples** in the race (0.0 %, threshold 2 %). Both are real out-of-line
-functions in the sources and absent from the CSV, so they were not inlined away.
-The 11.4 % in `load<u32>` is the access path, mostly unmapped KSEG0/KSEG1
-addresses.
+have **0 samples attributed to them** in the race (0.0 %, threshold 2 %). The
+sampler is function-level and the Release build uses LTO, so time inlined into
+callers (`N64::step` 31.7 %, `load<u32>` 11.4 %) cannot be separated: this is
+strong but not conclusive evidence that the race runs from unmapped KSEG0/KSEG1.
 
 Consequence: the threshold is not met, so Phase 5 (TLB page table) does not
-enter the project. Revisit only if another game shows TLB time.
+enter the project for now. The JIT's statistics (exits before an instruction
+because its address is not KSEG0 RDRAM) give a direct count; revisit Phase 5 if
+they show mapped accesses in the race, or if another game shows TLB time.
