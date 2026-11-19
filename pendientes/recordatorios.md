@@ -294,8 +294,10 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
   - Ahora el límite es el hilo principal (la CPU emulada, ~65 % de sus muestras); el RDP en hilo
     tiene margen (~3,4 s de dibujo en 400 campos). Siguiente palanca grande: recompilador de CPU.
   - [ ] Recompilador de CPU (JIT compartido N64 → GameCube/Wii): diseño escrito en
-    `docs/superpowers/specs/2026-11-18-cpu-jit-core-design.md`, revisado; falta que el usuario lo
-    apruebe (y el criterio de salida de la Fase 4). Después: plan con writing-plans; nada de código antes.
+    `docs/superpowers/specs/2026-11-18-cpu-jit-core-design.md`, **aprobado** 2026-11-18 (con el criterio
+    de la Fase 4: mediana ≥ +10 %, ≥ 4/5 pares). Plan de las Fases 1–3:
+    `docs/superpowers/plans/2026-11-18-cpu-jit-core.md` (Tareas 0–11); falta que el usuario lo revise
+    y elija cómo ejecutarlo. La Fase 4 tendrá su propio plan tras la medición de la Tarea 11.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -817,3 +819,6 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   (un bloque corre entero solo si cabe antes del próximo evento y de Compare), meta MK64 ≥ 60 campos/s.
   Revisión independiente: corregidos los escritores del RDP/HLE para invalidar, la clave por PC virtual
   (solo kseg0 en este proyecto), la descarga de AsmJit y `idle_candidate_`. Pendiente de aprobación.
+- 2026-11-18 (7) — El usuario aprobó el diseño del JIT de CPU y el criterio de la Fase 4. Escrito el plan
+  de las Fases 1–3 (perfil, AsmJit compartido, IR + backend, caché, despachador "en el sitio",
+  invalidación, integración, ALU/saltos/memoria nativos, medición).
