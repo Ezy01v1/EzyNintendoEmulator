@@ -13,6 +13,15 @@
 
 namespace ezy::n64 {
 
+class Vr4300Jit;
+
+// How N64::step() runs the CPU: one instruction at a time (Vr4300::step), or blocks of
+// kseg0 code from RDRAM through the JIT (Vr4300Jit), with the same result. The default is
+// what N64::create applies.
+enum class CpuMode { Interpreter, Jit };
+CpuMode default_cpu_mode();
+void set_default_cpu_mode(CpuMode mode);
+
 // The whole console: what the frontend and the runner talk to.
 //
 // Main loop: the CPU runs one instruction, the scheduler advances by the cycles it took,
@@ -32,6 +41,14 @@ public:
 
     N64(const N64&) = delete;
     N64& operator=(const N64&) = delete;
+    ~N64();
+
+    // Jit: false (and the CPU stays in the interpreter) when this build or host has no JIT.
+    // Interpreter drops the JIT and its compiled code.
+    bool set_cpu_mode(CpuMode mode);
+    [[nodiscard]] CpuMode cpu_mode() const { return cpu_jit_ ? CpuMode::Jit : CpuMode::Interpreter; }
+    [[nodiscard]] const Vr4300Jit* cpu_jit() const { return cpu_jit_.get(); }  // nullptr in interpreter mode
+    [[nodiscard]] Vr4300Jit* cpu_jit() { return cpu_jit_.get(); }
 
     void step();
 
@@ -67,6 +84,8 @@ private:
     Scheduler scheduler_;
     Bus bus_;
     Vr4300 cpu_;
+    // Declared after bus_ and cpu_, so destroyed before them: it is the bus's code watch.
+    std::unique_ptr<Vr4300Jit> cpu_jit_;
 };
 
 }  // namespace ezy::n64

@@ -2,6 +2,7 @@
 
 // Helpers shared by the N64 tests: a minimal bootable ROM and RDP command encoders.
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,42 @@ inline std::vector<std::uint8_t> counting_rom(const std::string& title) {
     using namespace mips;
     constexpr int t0 = 8, t1 = 9;
     const std::uint32_t program[] = {lui(t0, 0x8000), addiu(t1, t1, 1), sw(t1, t0, 0x100), j(0x02, 0xA4000044), nop()};
+    std::size_t at = 0x40;
+    for (const std::uint32_t w : program) {
+        rom[at] = static_cast<std::uint8_t>(w >> 24);
+        rom[at + 1] = static_cast<std::uint8_t>(w >> 16);
+        rom[at + 2] = static_cast<std::uint8_t>(w >> 8);
+        rom[at + 3] = static_cast<std::uint8_t>(w);
+        at += 4;
+    }
+    return rom;
+}
+
+// A ROM whose "IPL3" copies a loop to RDRAM at 0x80001000 and jumps there (kseg0 code in
+// direct RAM, what the CPU JIT compiles). t1 counts iterations, t4 += the immediate of the
+// loop's first instruction and is stored at 0x80000100; every 4096 iterations the loop
+// rewrites that immediate with t1's low half.
+inline std::vector<std::uint8_t> rdram_loop_rom(const std::string& title) {
+    std::vector<std::uint8_t> rom = counting_rom(title);
+    using namespace mips;
+    constexpr int zero = 0, t0 = 8, t1 = 9, t2 = 10, t3 = 11, t4 = 12, t5 = 13;
+    const std::uint32_t loop[] = {
+        addiu(t4, t4, 0),                // 0x1000: the immediate the SH below rewrites
+        addiu(t1, t1, 1),                // 0x1004
+        mips::i(0x0C, t1, t5, 0xFFF),    // 0x1008: ANDI t5, t1, 0xFFF
+        bne(t5, zero, 2),                // 0x100C: -> 0x1018
+        sw(t4, t0, 0x100),               // 0x1010 (delay slot)
+        mips::i(0x29, t0, t1, 0x1002),   // 0x1014: SH t1 -> the immediate at 0x1000
+        j(0x02, 0x80001000),             // 0x1018
+        nop(),
+    };
+    std::vector<std::uint32_t> program{lui(t0, 0x8000)};
+    for (std::size_t k = 0; k < std::size(loop); ++k) {
+        program.push_back(lui(t2, static_cast<std::int32_t>(loop[k] >> 16)));
+        program.push_back(ori(t2, t2, static_cast<std::int32_t>(loop[k] & 0xFFFF)));
+        program.push_back(sw(t2, t0, static_cast<std::int32_t>(0x1000 + 4 * k)));
+    }
+    program.insert(program.end(), {lui(t3, 0x8000), ori(t3, t3, 0x1000), jr(t3), nop()});
     std::size_t at = 0x40;
     for (const std::uint32_t w : program) {
         rom[at] = static_cast<std::uint8_t>(w >> 24);

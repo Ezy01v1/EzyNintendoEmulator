@@ -10,6 +10,7 @@
 
 #include "common/state.hpp"
 #include "mips_asm.hpp"
+#include "n64/cpu/vr4300_jit.hpp"
 #include "n64/n64.hpp"
 #include "n64_test_helpers.hpp"
 
@@ -2306,3 +2307,25 @@ TEST_CASE("RSP JIT discards hot code after mirrored writes DMA and state restora
     }
 }
 #endif
+
+TEST_CASE("N64 with the CPU JIT loads a state and continues exactly like the interpreter") {
+    // The loop rewrites its own code, so the RAM a state restores holds other code than the
+    // blocks compiled since it was saved.
+    const auto rom = rdram_loop_rom("JIT STATE TEST");
+    const auto run = [&rom](CpuMode mode) {
+        const auto n64 = N64::create(rom);
+        REQUIRE(n64);
+        REQUIRE(n64->set_cpu_mode(mode) == (mode == CpuMode::Interpreter || EZY_JIT_AVAILABLE == 1));
+        for (int i = 0; i < 2; ++i) n64->run_frame();
+        const auto state = n64->save_state();
+        n64->run_frame();
+        REQUIRE(n64->load_state(state));
+        for (int i = 0; i < 3; ++i) n64->run_frame();
+        CHECK(n64->cpu().gpr(9) > 1000);  // the loop in RDRAM ran
+        if (n64->cpu_jit() != nullptr) CHECK(n64->cpu_jit()->stats().in_place > 1000);
+        return n64->save_state();
+    };
+    const auto interpreter_state = run(CpuMode::Interpreter);
+    const auto jit_state = run(CpuMode::Jit);
+    CHECK(jit_state == interpreter_state);
+}

@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "cpu_jit_twin.hpp"
+#include "n64/n64.hpp"
+#include "n64_test_helpers.hpp"
 
 using namespace cpu_jit_test;
 
@@ -472,4 +474,18 @@ TEST_CASE("CPU JIT leaves a jump to an unaligned pc to the interpreter") {
     CHECK(t.jit_cpu.cop0().read(Cop0::kEpc) == kBase + 0x41);
     CHECK(t.jit_cpu.gpr(9) == 1);
     if (t.jit.available()) CHECK(t.jit_instructions > 0);
+}
+
+TEST_CASE("N64::set_cpu_mode refuses the JIT when it was not built") {
+    using ezy::n64::CpuMode;
+    const auto n64 = ezy::n64::N64::create(n64_test::counting_rom("CPU MODE TEST"));
+    REQUIRE(n64);
+    CHECK(n64->set_cpu_mode(CpuMode::Interpreter));
+    CHECK(n64->cpu_mode() == CpuMode::Interpreter);
+    CHECK(n64->cpu_jit() == nullptr);
+    CHECK(n64->set_cpu_mode(CpuMode::Jit) == (EZY_JIT_AVAILABLE == 1));
+    CHECK(n64->cpu_mode() == (EZY_JIT_AVAILABLE == 1 ? CpuMode::Jit : CpuMode::Interpreter));
+    CHECK((n64->cpu_jit() != nullptr) == (EZY_JIT_AVAILABLE == 1));
+    CHECK(n64->set_cpu_mode(CpuMode::Interpreter));
+    CHECK(n64->cpu_jit() == nullptr);
 }
