@@ -134,3 +134,14 @@ TEST_CASE("BlockCache rejects blocks that cross a page or leave RAM") {
     CHECK_THROWS_AS(put(cache, kRam, 1, 1), std::logic_error);
     CHECK_THROWS_AS(put(cache, 0x1002, 1, 1), std::logic_error);
 }
+
+TEST_CASE("BlockCache rejects code that does not match the block and reports its arena") {
+    BlockCache cache(kRam, 1 << 16);
+    CHECK(cache.arena_bytes() == 0);
+    const std::array<std::uint32_t, 3> code{1, 2, 3};
+    CHECK_THROWS_AS(cache.insert(make(0x1000, 1, 2), {}, code), std::logic_error);
+    put(cache, 0x1000, 1);
+    CHECK(cache.arena_bytes() > 0);
+    cache.flush();
+    CHECK(cache.arena_bytes() == 0);
+}

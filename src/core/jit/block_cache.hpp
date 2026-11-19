@@ -48,7 +48,7 @@ public:
 
     // Copies exits and code into an arena (freed only by flush), marks the page and
     // replaces any block at the same address. Throws std::logic_error if the block is empty,
-    // unaligned, outside RAM or crosses a 4 KiB page.
+    // unaligned, outside RAM, crosses a 4 KiB page or `code` does not hold `words` words.
     const Block& insert(const Block& block, std::span<const BlockExit> exits, std::span<const std::uint32_t> code);
     // Drops every block of every page overlapping [begin, end) and clears those marks.
     // Returns true if any block existed.
@@ -56,6 +56,8 @@ public:
     void flush();  // everything, including the code buffer
 
     [[nodiscard]] CodeBuffer& code() { return code_; }
+    // Bytes the inserted blocks use in the arena (Block, exits, code words) until flush().
+    [[nodiscard]] std::size_t arena_bytes() const { return arena_bytes_; }
     [[nodiscard]] const CodePages& pages() const { return pages_; }
 
     // blocks = blocks currently findable (inserted, not replaced or invalidated since).
@@ -73,7 +75,7 @@ private:
     CodePages pages_;
     std::vector<std::unique_ptr<const Block*[]>> top_;  // per page, allocated on demand
     std::vector<std::unique_ptr<std::byte[]>> chunks_;
-    std::size_t chunk_used_ = 0, chunk_size_ = 0;
+    std::size_t chunk_used_ = 0, chunk_size_ = 0, arena_bytes_ = 0;
     Stats stats_;
 };
 

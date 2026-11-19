@@ -33,6 +33,7 @@ const Block& BlockCache::insert(const Block& block, std::span<const BlockExit> e
     const std::uint64_t last = std::uint64_t{block.paddr} + 4ULL * block.words - 1;
     if ((last >> CodePages::kPageShift) != (block.paddr >> CodePages::kPageShift) || last >= ram_size_)
         throw std::logic_error("jit block cache: block crosses a page or leaves RAM");
+    if (code.size() != block.words) throw std::logic_error("jit block cache: code does not match the block's words");
 
     const std::size_t head = (sizeof(Block) + alignof(BlockExit) - 1) & ~(alignof(BlockExit) - 1);
     const std::size_t exits_bytes = exits.size() * sizeof(BlockExit);
@@ -42,6 +43,7 @@ const Block& BlockCache::insert(const Block& block, std::span<const BlockExit> e
     auto* raw = static_cast<std::byte*>(arena_alloc(total));
     constexpr std::size_t kAlign = alignof(std::max_align_t);
     chunk_used_ += (total + kAlign - 1) & ~(kAlign - 1);
+    arena_bytes_ += (total + kAlign - 1) & ~(kAlign - 1);
 
     auto* exits_dst = reinterpret_cast<BlockExit*>(raw + head);
     auto* code_dst = reinterpret_cast<std::uint32_t*>(raw + code_off);
@@ -86,7 +88,7 @@ bool BlockCache::invalidate(std::uint32_t begin, std::uint32_t end) {
 void BlockCache::flush() {
     for (auto& page : top_) page.reset();
     chunks_.clear();
-    chunk_used_ = chunk_size_ = 0;
+    chunk_used_ = chunk_size_ = arena_bytes_ = 0;
     pages_.clear_all();
     code_.reset();
     stats_.blocks = 0;
