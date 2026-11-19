@@ -97,7 +97,16 @@ struct Twin {
         ref_bus.penalty = jit_bus.penalty = o.penalty;
     }
     // Random program from the generator (defined in test_cpu_jit.cpp).
-    explicit Twin(unsigned seed, std::size_t code_budget = kDefaultCode);
+    struct Generated {
+        std::size_t code_budget = kDefaultCode;
+        // Some registers start at 0, 1, -1, INT32_MIN, INT32_MAX, INT64_MIN or INT64_MAX.
+        bool edge_values = false;
+        // ADD ADDI SUB DADD DADDI DSUB too; the Ov handler at the vector skips the instruction.
+        bool overflow_ops = false;
+    };
+    Twin(unsigned seed, Generated options);
+    explicit Twin(unsigned seed, std::size_t code_budget = kDefaultCode)
+        : Twin(seed, Generated{.code_budget = code_budget}) {}
 
     void poke32(std::uint32_t paddr, std::uint32_t word) {
         for (TwinBus* bus : {&ref_bus, &jit_bus})

@@ -30,7 +30,7 @@ struct Inst {
     static constexpr std::uint32_t kNone = ~0U;
     Op op = Op::Const;
     Type type = Type::I32;       // result type; for stores, the stored value's type
-    std::uint8_t aux = 0;        // Cond, ContextField, or byte count of a RAM access
+    std::uint8_t aux = 0;        // Cond, ContextField, or byte count of a RAM access or guest store (0: whole value)
     std::uint32_t result = kNone;
     std::uint32_t a = kNone, b = kNone, c = kNone;
     std::uint64_t imm = 0;       // constant, guest offset, Helper address, ExitId, Barrier write flag
@@ -60,7 +60,8 @@ class IrBuilder {
 public:
     Value constant(Type type, std::uint64_t value);
     Value load_guest(Type type, std::uint32_t offset);
-    void store_guest(std::uint32_t offset, Value value);
+    // bytes: 0 stores the whole value; 1, 2 or 4 store its low bytes (within its width).
+    void store_guest(std::uint32_t offset, Value value, unsigned bytes = 0);
     Value load_context(ContextField field);                 // I64
     void store_context(ContextField field, Value value);
     Value binary(Op op, Value a, Value b);                  // same type; shifts mask the amount by width-1

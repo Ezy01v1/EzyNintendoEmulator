@@ -18,7 +18,7 @@ namespace {
 // wrapped in a 3-iteration loop so cached blocks run again; it ends at `end`.
 class Generator {
 public:
-    explicit Generator(unsigned seed) : rng_(seed) {}
+    Generator(unsigned seed, bool overflow_ops) : rng_(seed), overflow_ops_(overflow_ops) {}
 
     std::uint32_t pick(std::uint32_t n) { return static_cast<std::uint32_t>(rng_() % n); }
     int reg() { return static_cast<int>(1 + pick(22)); }       // r1..r22
@@ -28,7 +28,7 @@ public:
         const int d = dst(), s = reg(), t = reg();
         const int sa = static_cast<int>(pick(32));
         const std::int32_t imm = static_cast<std::int32_t>(pick(0x10000)) - 0x8000;
-        switch (pick(40)) {
+        switch (pick(overflow_ops_ ? 46 : 40)) {
             case 0: return special(s, t, d, 0, 0x21);    // ADDU
             case 1: return special(s, t, d, 0, 0x23);    // SUBU
             case 2: return special(s, t, d, 0, 0x24);    // AND
@@ -68,6 +68,12 @@ public:
             case 36: return special(s, t, 0, 0, 0x18 + static_cast<int>(pick(2)));  // MULT, MULTU
             case 37: return special(0, 0, 0, 0, 0x0F);   // SYNC
             case 38: return i(0x2F, 28, static_cast<int>(pick(32)), static_cast<std::int32_t>(pick(kDataBytes)));  // CACHE
+            case 40: return special(s, t, d, 0, 0x20);   // ADD
+            case 41: return special(s, t, d, 0, 0x22);   // SUB
+            case 42: return special(s, t, d, 0, 0x2C);   // DADD
+            case 43: return special(s, t, d, 0, 0x2E);   // DSUB
+            case 44: return i(0x08, s, d, imm);          // ADDI
+            case 45: return i(0x18, s, d, imm);          // DADDI
             default: return special(s, t, d, 0, 0x25);  // OR
         }
     }
@@ -151,12 +157,26 @@ public:
     }
 
     std::mt19937 rng_;
+    bool overflow_ops_;
 };
+
+// Words that set register r to an edge value.
+std::vector<std::uint32_t> edge_value(int r, std::uint32_t which) {
+    switch (which) {
+        case 0: return {addiu(r, 0, 0)};
+        case 1: return {addiu(r, 0, 1)};
+        case 2: return {addiu(r, 0, -1)};
+        case 3: return {lui(r, 0x8000)};                                   // INT32_MIN
+        case 4: return {lui(r, 0x7FFF), ori(r, r, 0xFFFF)};                // INT32_MAX
+        case 5: return {addiu(r, 0, 1), special(0, r, r, 31, 0x3C)};       // INT64_MIN (DSLL32 31)
+        default: return {addiu(r, 0, -1), special(0, r, r, 1, 0x3A)};      // INT64_MAX (DSRL 1)
+    }
+}
 
 }  // namespace
 
-cpu_jit_test::Twin::Twin(unsigned seed, std::size_t code_budget) : Twin(TwinOptions{.code_budget = code_budget}) {
-    Generator g(seed);
+cpu_jit_test::Twin::Twin(unsigned seed, Generated options) : Twin(TwinOptions{.code_budget = options.code_budget}) {
+    Generator g(seed, options.overflow_ops);
     budget = 1 + g.pick(300);
     for (std::uint32_t a = 0; a < kDataBytes; ++a) poke8(kData + a, static_cast<std::uint8_t>(g.pick(256)));
     std::vector<std::uint32_t> words;
@@ -166,6 +186,14 @@ cpu_jit_test::Twin::Twin(unsigned seed, std::size_t code_budget) : Twin(TwinOpti
         words.push_back(lui(r, static_cast<std::int32_t>(g.pick(0x10000))));
         words.push_back(ori(r, r, static_cast<std::int32_t>(g.pick(0x10000))));
         if (g.pick(3) == 0) words.push_back(dsll32(r, r, static_cast<int>(g.pick(32))));
+        if (options.edge_values && g.pick(3) == 0) {
+            const auto edge = edge_value(r, g.pick(7));
+            words.insert(words.end(), edge.begin(), edge.end());
+        }
+    }
+    if (options.overflow_ops) {
+        // Ov handler: EPC += 4, ERET (k0 = r26 is not used by the programs).
+        program(0x180, {mfc0(26, 14), addiu(26, 26, 4), mtc0(26, 14), eret()});
     }
     const auto body_start = static_cast<std::uint32_t>(words.size());
     const std::uint32_t n = 120 + g.pick(130);

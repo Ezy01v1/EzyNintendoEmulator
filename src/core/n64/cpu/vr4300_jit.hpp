@@ -12,13 +12,14 @@
 namespace ezy::n64 {
 
 // How a block treats an instruction (vr4300_jit_decode.cpp):
-//   Native      translated to IR (none yet: every instruction still runs in place)
+//   Native      translated to IR: the integer ALU (vr4300_jit_alu.cpp); the 64-bit ops
+//               only when allow_64bit (else InPlace: the interpreter raises RI)
 //   InPlace     Vr4300::execute_in_place, called from the block
 //   Memory      a load or store: Vr4300::execute_memory_in_place, which exits before it
 //               unless it is a kernel-mode kseg0/kseg1 access inside direct RAM
 //   OutOfBlock  COP0: the block ends before it and Vr4300::step() runs it
 enum class Kind : std::uint8_t { Native, InPlace, Memory, OutOfBlock };
-[[nodiscard]] Kind classify(std::uint32_t instr);
+[[nodiscard]] Kind classify(std::uint32_t instr, bool allow_64bit);
 // J JAL JR JALR, B*, B*L, the REGIMM branches (and their -AL forms), BC1*.
 [[nodiscard]] bool is_branch(std::uint32_t instr);
 // The memory range a Memory instruction touches: `bytes` at its address, rounded down to
@@ -32,10 +33,17 @@ struct MemoryAccess {
 
 inline constexpr unsigned kMaxBlockInstructions = 64;
 
+// Byte offsets of Vr4300 members from Context::guest (= &cpu), for native code.
+struct GuestOffsets {
+    std::uint32_t gpr = 0, hi = 0, lo = 0, pc = 0, next_pc = 0, in_delay_slot = 0, branch_taken = 0,
+                  idle_candidate = 0;
+};
+
 // The VR4300 CPU JIT: compiles blocks of kernel-mode kseg0 code from direct RAM and runs
 // them in place of Vr4300::step(), with the same result instruction for instruction.
 // A block ends after a branch and its delay slot, before an OutOfBlock instruction, at
-// kMaxBlockInstructions, or at the end of its 4 KiB page or of direct RAM.
+// kMaxBlockInstructions, or at the end of its 4 KiB page or of direct RAM. A delay slot
+// always runs in place.
 class Vr4300Jit {
 public:
     // Registers itself as the bus's code watch (CpuBus::set_code_watch) until destroyed.
@@ -64,6 +72,8 @@ public:
     // RAM; a difference means some writer did not report its write.
     void set_check(bool enabled) { check_ = enabled; }
 
+    // in_place and native: instructions retired by blocks, through a helper or as native
+    // code. exits_before: blocks left before an instruction the interpreter must run.
     struct Stats {
         std::uint64_t compiled = 0, in_place = 0, native = 0, out_of_block = 0, exits_before = 0, compile_ns = 0,
                       invalidations = 0, flushes = 0;
@@ -73,8 +83,6 @@ public:
 private:
     // What a helper tells its block (the value Helper returns).
     enum Status : std::uint64_t { kOk, kAfter, kBefore, kSkip };
-    // BlockExit::kind.
-    enum ExitKind : std::uint32_t { kNormal, kExitBefore, kExitAfter };
     // Helper flags (second argument).
     static constexpr std::uint64_t kFlagMemory = 1, kFlagBranch = 2;
 
@@ -90,16 +98,11 @@ private:
     const jit::Block* compile(std::uint32_t paddr, std::uint32_t key);
     void retire(std::uint64_t cycles, std::uint64_t instructions, std::uint64_t until_compare);
 
-    // Byte offsets of Vr4300 members from Context::guest (= &cpu), for native code.
-    struct Offsets {
-        std::uint32_t gpr = 0, hi = 0, lo = 0, pc = 0, next_pc = 0, branch_taken = 0, idle_candidate = 0;
-    };
-
     Vr4300& cpu_;
     CpuBus& bus_;
     jit::BlockCache cache_;
     jit::Context ctx_{};
-    Offsets offsets_;
+    GuestOffsets offsets_;
     bool available_ = false;
     bool check_ = false;
     bool code_changed_ = false;  // invalidate_ram() dropped a block since run() cleared it

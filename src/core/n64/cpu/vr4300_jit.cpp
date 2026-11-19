@@ -1,6 +1,7 @@
-// VR4300 JIT: block building and the dispatcher. Every instruction still runs through the
-// interpreter, called from the block ("in place"); what the block adds is skipping the
-// per-instruction fetch, interrupt check and retire, which execute() does once at the end.
+// VR4300 JIT: block building and the dispatcher. The integer ALU runs as native code
+// (vr4300_jit_alu.cpp); every other instruction runs through the interpreter, called from
+// the block ("in place"). Either way the block skips the per-instruction fetch, interrupt
+// check and retire, which execute() does once at the end.
 #include "n64/cpu/vr4300_jit.hpp"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 
 #include "jit/ir.hpp"
 #include "jit/x64_backend.hpp"
+#include "n64/cpu/vr4300_jit_builder.hpp"
 
 namespace ezy::n64 {
 
@@ -33,6 +35,95 @@ std::uint64_t elapsed_ns(std::chrono::steady_clock::time_point since) {
 
 }  // namespace
 
+// ---- BlockBuilder (vr4300_jit_builder.hpp) ----
+
+std::uint32_t BlockBuilder::reg_offset(int index) const {
+    if (index == kHi) return offsets_.hi;
+    if (index == kLo) return offsets_.lo;
+    return offsets_.gpr + 8 * static_cast<std::uint32_t>(index);
+}
+
+jit::Value BlockBuilder::reg(int index) {
+    auto& id = cached_[static_cast<std::size_t>(index)];
+    if (id == kNone) id = ir_.load_guest(jit::Type::I64, reg_offset(index)).id;
+    return jit::Value{id};
+}
+
+void BlockBuilder::set_reg(int index, jit::Value value) {
+    cached_[static_cast<std::size_t>(index)] = value.id;
+    dirty_ |= std::uint64_t{1} << index;
+}
+
+jit::Value BlockBuilder::gpr(int index) { return index == 0 ? i64(0) : reg(index); }
+
+void BlockBuilder::set_gpr(int index, jit::Value value) {
+    if (index != 0) set_reg(index, value);
+}
+
+void BlockBuilder::write_back() {
+    for (int index = 0; index < kRegs; ++index) {
+        if (dirty_ & (std::uint64_t{1} << index)) {
+            ir_.store_guest(reg_offset(index), jit::Value{cached_[static_cast<std::size_t>(index)]});
+        }
+    }
+    if (pc_stale_) {
+        ir_.store_guest(offsets_.pc, i64(vaddr_));
+        ir_.store_guest(offsets_.next_pc, i64(vaddr_ + 4));
+        const jit::Value no = i32(0);
+        ir_.store_guest(offsets_.branch_taken, no, 1);
+        ir_.store_guest(offsets_.in_delay_slot, no, 1);
+    }
+}
+
+jit::ExitId BlockBuilder::add_exit(std::uint32_t instructions, std::uint32_t cycles, std::uint32_t native,
+                                   std::uint32_t kind) {
+    exits_.push_back({cycles, instructions, kind, native});
+    return ir_.add_exit();
+}
+
+void BlockBuilder::exit_before_if(jit::Value cond) {
+    const jit::ExitId exit = add_exit(done_, cycles_, native_, kExitBefore);
+    ir_.begin_exit(exit);
+    write_back();  // what the instructions before this one left
+    ir_.end_exit();
+    ir_.exit_if(cond, exit);
+}
+
+void BlockBuilder::end_native(std::uint32_t cycles) {
+    ++done_;
+    ++native_;
+    cycles_ += cycles;
+    vaddr_ += 4;
+    pc_stale_ = true;
+}
+
+void BlockBuilder::sync() {
+    write_back();
+    dirty_ = 0;
+    pc_stale_ = false;
+    cached_.fill(kNone);
+}
+
+jit::ExitId BlockBuilder::helper_exit(std::uint32_t kind, bool after) {
+    return after ? add_exit(done_ + 1, cycles_ + 1, native_, kind) : add_exit(done_, cycles_, native_, kind);
+}
+
+void BlockBuilder::end_in_place() {
+    ++done_;
+    ++cycles_;
+    vaddr_ += 4;
+}
+
+void BlockBuilder::finish() {
+    const jit::ExitId exit = add_exit(done_, cycles_, native_, kExitNormal);
+    ir_.begin_exit(exit);
+    write_back();
+    ir_.end_exit();
+    ir_.exit(exit);
+}
+
+// ---- Vr4300Jit ----
+
 Vr4300Jit::Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget)
     : cpu_(cpu), bus_(bus), cache_(bus.direct_ram_size(), code_budget) {
     available_ = cache_.code().available();
@@ -42,6 +133,7 @@ Vr4300Jit::Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget)
     offsets_.lo = offset_of(cpu, &cpu.lo_);
     offsets_.pc = offset_of(cpu, &cpu.pc_);
     offsets_.next_pc = offset_of(cpu, &cpu.next_pc_);
+    offsets_.in_delay_slot = offset_of(cpu, &cpu.in_delay_slot_);
     offsets_.branch_taken = offset_of(cpu, &cpu.branch_taken_);
     offsets_.idle_candidate = offset_of(cpu, &cpu.idle_candidate_);
     ctx_.guest = reinterpret_cast<std::uint8_t*>(&cpu);
@@ -92,11 +184,12 @@ void Vr4300Jit::flush() { cache_.flush(); }
 
 bool Vr4300Jit::kernel_mode() const { return cpu_.mode() == Vr4300::Mode::Kernel; }
 
-// What the compiled code depends on besides the words: 64-bit ops allowed, CU1 and FR.
-std::uint32_t Vr4300Jit::mode_key() const {
-    const std::uint32_t status = cpu_.cop0_.status();
-    return (cpu_.allow_64bit_ops() ? 1U : 0U) | ((status & Cop0::kCU1) ? 2U : 0U) | ((status & Cop0::kFR) ? 4U : 0U);
-}
+// What the compiled code depends on besides the words: whether 64-bit ops are allowed.
+// CU1 and FR are left out on purpose: COP1 runs in place and the interpreter checks them
+// itself, while libultra flips CU1 between threads (on MK64 most compiles were replacements
+// of the same address for the other CU1 value). A native FPU must add them back, with
+// several keys per address so both variants stay cached.
+std::uint32_t Vr4300Jit::mode_key() const { return cpu_.allow_64bit_ops() ? 1U : 0U; }
 
 std::uint64_t Vr4300Jit::run_instruction(jit::Context* ctx, std::uint64_t instr, std::uint64_t flags,
                                          std::uint64_t block_cycles) noexcept {
@@ -129,10 +222,12 @@ std::uint64_t Vr4300Jit::run(std::uint32_t instr, std::uint64_t flags, std::uint
     return kOk;
 }
 
-// Per instruction i of n: call the helper with (word, flags, n), then leave if it says so:
-//   kBefore  -> {i, i}       it did not run (ExitBefore) or a host error interrupted it
-//   kAfter   -> {i+1, i+1}   exception, code change, or its extra cycles reached the budget
-//   kSkip    -> {i+1, i+1}   a likely branch skipped the slot: a normal end of the block
+// A native instruction is emitted by emit_alu (an overflow leaves before it). For an
+// in-place instruction i: write the pending state back, call the helper with (word, flags,
+// the block's static cycles), then leave if it says so:
+//   kBefore  -> {i}       it did not run (ExitBefore) or a host error interrupted it
+//   kAfter   -> {i+1}     exception, code change, or its extra cycles reached the budget
+//   kSkip    -> {i+1}     a likely branch skipped the slot: a normal end of the block
 const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     const auto started = std::chrono::steady_clock::now();
     if (cache_.arena_bytes() > cache_.code().budget()) cache_.flush();
@@ -153,13 +248,13 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     words.reserve(max_words);
     for (std::uint32_t i = 0; i < max_words; ++i) {
         const std::uint32_t w = word(i);
-        if (classify(w) == Kind::OutOfBlock) break;
+        if (classify(w, true) == Kind::OutOfBlock) break;
         if (is_branch(w)) {
             // The block ends after the slot; a slot that does not fit, or that is itself a
             // branch or out of block, ends it before the branch.
             if (i + 1 >= max_words) break;
             const std::uint32_t slot = word(i + 1);
-            if (classify(slot) == Kind::OutOfBlock || is_branch(slot)) break;
+            if (classify(slot, true) == Kind::OutOfBlock || is_branch(slot)) break;
             words.push_back(w);
             words.push_back(slot);
             break;
@@ -179,25 +274,42 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     }
 
     const auto n = static_cast<std::uint32_t>(words.size());
+    const bool allow_64bit = (key & 1) != 0;
+    // Native or in place, and the static cycles: a native instruction's are all static (the
+    // multiplies' extra ones included); an in-place one counts 1, its extra cycles are dynamic.
+    std::vector<std::uint32_t> native_cycles(n, 0);
+    std::uint32_t static_cycles = 0;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const bool slot = i > 0 && is_branch(words[i - 1]);  // a delay slot stays in place
+        if (!slot && classify(words[i], allow_64bit) == Kind::Native) {
+            native_cycles[i] = alu_cycles(words[i], allow_64bit);
+        }
+        static_cycles += native_cycles[i] != 0 ? native_cycles[i] : 1;
+    }
+
     jit::IrBuilder b;
-    std::vector<jit::BlockExit> exits;
-    const auto add_exit = [&](std::uint32_t count, std::uint32_t kind) {
-        exits.push_back({count, count, kind});
-        return b.add_exit();
-    };
+    BlockBuilder builder(b, offsets_, kKseg0 + paddr, allow_64bit);
     const auto is = [&](jit::Value r, Status st) {
         return b.compare(jit::Cond::Eq, r, b.constant(jit::Type::I64, st));
     };
     for (std::uint32_t i = 0; i < n; ++i) {
         const std::uint32_t w = words[i];
-        const std::uint64_t flags = (classify(w) == Kind::Memory ? kFlagMemory : 0) | (is_branch(w) ? kFlagBranch : 0);
+        if (native_cycles[i] != 0) {
+            if (!emit_alu(builder, w)) throw std::logic_error("CPU JIT: a Native instruction has no emitter");
+            builder.end_native(native_cycles[i]);
+            continue;
+        }
+        builder.sync();
+        const std::uint64_t flags =
+            (classify(w, allow_64bit) == Kind::Memory ? kFlagMemory : 0) | (is_branch(w) ? kFlagBranch : 0);
         const jit::Value r = b.call(&run_instruction, b.constant(jit::Type::I64, w),
-                                    b.constant(jit::Type::I64, flags), b.constant(jit::Type::I64, n));
-        b.exit_if(is(r, kBefore), add_exit(i, kExitBefore));
-        b.exit_if(is(r, kAfter), add_exit(i + 1, kExitAfter));
-        if (flags & kFlagBranch) b.exit_if(is(r, kSkip), add_exit(i + 1, kNormal));
+                                    b.constant(jit::Type::I64, flags), b.constant(jit::Type::I64, static_cycles));
+        b.exit_if(is(r, kBefore), builder.helper_exit(kExitBefore, false));
+        b.exit_if(is(r, kAfter), builder.helper_exit(kExitAfter, true));
+        if (flags & kFlagBranch) b.exit_if(is(r, kSkip), builder.helper_exit(kExitNormal, true));
+        builder.end_in_place();
     }
-    b.exit(add_exit(n, kNormal));
+    builder.finish();
     const jit::IrBlock ir = b.finish();
 
     jit::Compiled compiled = jit::compile(ir, cache_.code());
@@ -208,8 +320,8 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     // Still failing (a block larger than the whole buffer, or unsupported): the interpreter runs it.
     block.fn = compiled.error == jit::CompileError::None ? compiled.fn : nullptr;
     block.words = n;
-    block.min_cycles = n;  // one cycle each; the extra ones are dynamic
-    const jit::Block& stored = cache_.insert(block, exits, words);
+    block.min_cycles = static_cycles;
+    const jit::Block& stored = cache_.insert(block, builder.exits(), words);
     if (block.fn != nullptr) ++stats_.compiled;
     stats_.compile_ns += elapsed_ns(started);
     return &stored;
@@ -246,7 +358,7 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
             if (block == nullptr) block = compile(paddr, key);
             if (check_) verify(*block);
             if (block->fn == nullptr) {
-                if (classify(block->code[0]) == Kind::OutOfBlock) ++stats_.out_of_block;
+                if (classify(block->code[0], true) == Kind::OutOfBlock) ++stats_.out_of_block;
                 break;
             }
             if (result.cycles + block->min_cycles >= limit) break;
@@ -261,12 +373,13 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
             const jit::BlockExit& exit = block->exits[id];
             result.cycles += exit.cycles + static_cast<std::uint64_t>(ctx_.extra_cycles);
             result.instructions += exit.instructions;
-            stats_.in_place += exit.instructions;
+            stats_.in_place += exit.instructions - exit.native;
+            stats_.native += exit.native;
             if (error_) {
                 failure = std::exchange(error_, nullptr);
                 break;
             }
-            if (exit.kind != kNormal) {  // a side exit ends the run
+            if (exit.kind != kExitNormal) {  // a side exit ends the run
                 if (exit.kind == kExitBefore) ++stats_.exits_before;
                 break;
             }

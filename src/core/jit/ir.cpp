@@ -63,9 +63,11 @@ Value IrBuilder::load_guest(Type type, std::uint32_t offset) {
     return define({.op = Op::LoadGuest, .type = integer(type), .imm = offset});
 }
 
-void IrBuilder::store_guest(std::uint32_t offset, Value value) {
+void IrBuilder::store_guest(std::uint32_t offset, Value value, unsigned bytes) {
     if (offset > 0x7FFF'FFFFU) fail("jit IR: guest offset out of range");
-    push({.op = Op::StoreGuest, .type = use(value), .a = value.id, .imm = offset});
+    const auto type = use(value);
+    if (bytes != 0) check_bytes(type, bytes);
+    push({.op = Op::StoreGuest, .type = type, .aux = static_cast<std::uint8_t>(bytes), .a = value.id, .imm = offset});
 }
 
 Value IrBuilder::load_context(ContextField field) {

@@ -1,5 +1,6 @@
 // VR4300 JIT: what a block does with each instruction (see vr4300_jit.hpp).
 #include "n64/cpu/vr4300_jit.hpp"
+#include "n64/cpu/vr4300_jit_builder.hpp"
 
 namespace ezy::n64 {
 
@@ -21,9 +22,10 @@ MemoryAccess memory_access(std::uint32_t instr) {
     }
 }
 
-Kind classify(std::uint32_t instr) {
+Kind classify(std::uint32_t instr, bool allow_64bit) {
     if ((instr >> 26) == 0x10) return Kind::OutOfBlock;  // COP0: MTC0/MFC0, ERET, TLB
     if (memory_access(instr).bytes != 0) return Kind::Memory;
+    if (alu_cycles(instr, allow_64bit) != 0) return Kind::Native;
     // Everything else, branches, SYSCALL, BREAK, traps, CACHE and COP1 included, has no
     // effect on the bus: the interpreter runs it in place and raises its exceptions itself.
     return Kind::InPlace;

@@ -105,6 +105,17 @@ private:
         return type == Type::I64 ? x86::qword_ptr(guest_, offset) : x86::dword_ptr(guest_, offset);
     }
 
+    void store_guest(const Inst& inst) {
+        const auto offset = static_cast<std::int32_t>(inst.imm);
+        const auto& value = v(inst.a);
+        switch (inst.aux) {
+            case 1: cc_.mov(x86::byte_ptr(guest_, offset), value.r8()); break;
+            case 2: cc_.mov(x86::word_ptr(guest_, offset), value.r16()); break;
+            case 4: cc_.mov(x86::dword_ptr(guest_, offset), value.r32()); break;
+            default: cc_.mov(guest(inst, inst.type), value); break;  // 0 or the whole I64
+        }
+    }
+
     // Zero-extended physical address, usable as a 64-bit index.
     x86::Gp index(std::uint32_t paddr) {
         auto index = cc_.new_gp64();
@@ -127,7 +138,7 @@ private:
                 return true;
             }
             case Op::LoadGuest: cc_.mov(def(inst), guest(inst, inst.type)); return true;
-            case Op::StoreGuest: cc_.mov(guest(inst, inst.type), v(inst.a)); return true;
+            case Op::StoreGuest: store_guest(inst); return true;
             case Op::LoadContext:
                 cc_.mov(def(inst), x86::qword_ptr(ctx_, field(context_offset(static_cast<ContextField>(inst.aux)))));
                 return true;

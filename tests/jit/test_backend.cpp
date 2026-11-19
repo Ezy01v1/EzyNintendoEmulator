@@ -256,6 +256,31 @@ TEST_CASE("IR conversions extend and truncate" * doctest::skip(!kNative)) {
     CHECK(m.guest[5] == 0x0000'0000'FFFF'FFF0ULL);
 }
 
+TEST_CASE("IR stores the low 1, 2 or 4 bytes of a value to the guest" * doctest::skip(!kNative)) {
+    Machine m;
+    IrBuilder b;
+    const auto v = b.load_guest(Type::I64, slot(0));
+    b.store_guest(slot(1) + 1, v, 1);
+    b.store_guest(slot(2) + 2, v, 2);
+    b.store_guest(slot(3) + 4, b.convert(Op::Trunc, Type::I32, v), 4);
+    b.store_guest(slot(4), b.convert(Op::Trunc, Type::I32, v), 1);
+    b.exit(b.add_exit());
+    m.guest[0] = 0x1122'3344'5566'7788ULL;
+    for (unsigned k = 1; k <= 4; ++k) m.guest[k] = ~0ULL;
+    m.run(b);
+    CHECK(m.guest[1] == 0xFFFF'FFFF'FFFF'88FFULL);  // little-endian host: byte 1
+    CHECK(m.guest[2] == 0xFFFF'FFFF'7788'FFFFULL);
+    CHECK(m.guest[3] == 0x5566'7788'FFFF'FFFFULL);
+    CHECK(m.guest[4] == 0xFFFF'FFFF'FFFF'FF88ULL);
+}
+
+TEST_CASE("IR rejects a guest store wider than its value") {
+    IrBuilder b;
+    const auto v = b.load_guest(Type::I32, slot(0));
+    CHECK_THROWS_AS(b.store_guest(slot(1), v, 8), std::logic_error);
+    CHECK_THROWS_AS(b.store_guest(slot(1), v, 3), std::logic_error);
+}
+
 TEST_CASE("IR compare, select, overflow and carry give 0 or 1" * doctest::skip(!kNative)) {
     CHECK(flag(Flag::OverflowAdd, Type::I32, 0x7FFFFFFF, 1) == 1);
     CHECK(flag(Flag::OverflowAdd, Type::I32, 0x7FFFFFFE, 1) == 0);

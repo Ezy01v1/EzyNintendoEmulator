@@ -15,6 +15,7 @@ namespace ezy::jit {
 struct BlockExit {
     std::uint32_t cycles = 0, instructions = 0;  // static counts up to this exit
     std::uint32_t kind = 0;                      // front-end meaning
+    std::uint32_t native = 0;                    // of `instructions`, those translated to native code
 };
 
 struct Block {
