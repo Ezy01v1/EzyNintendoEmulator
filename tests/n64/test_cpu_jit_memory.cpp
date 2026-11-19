@@ -1,7 +1,7 @@
 // CPU JIT: LB LBU LH LHU LW LWU LD SB SH SW SD run as native code when they reach kseg0
 // inside direct RAM, aligned; anything else (kseg1, MMIO, TLB, an unaligned address)
-// leaves the block before the instruction, for the interpreter. Native accesses go
-// through the threaded RDP's inline barrier exactly when the interpreter would wait.
+// leaves the block before the instruction, for the interpreter. The threaded RDP's inline
+// barrier leaves too, exactly when the interpreter would have to wait.
 #include <doctest/doctest.h>
 
 #include <cstdint>
@@ -211,9 +211,13 @@ TEST_CASE("CPU JIT native accesses call the RDP barrier exactly when the interpr
         CHECK(t.jit_bus.waits == kWaits);
         CHECK(t.ref_bus.guards == kAccesses);  // the interpreter asks on every access
         REQUIRE_NATIVE(t.jit);
-        CHECK(t.jit_bus.guards == kWaits);     // native code only on the slow path
+        // Native code never calls it: its slow path leaves the block before the access, and
+        // the interpreter's step() asks (and waits) for those accesses only.
+        CHECK(t.jit_bus.guards == kWaits);
         CHECK(t.jit.stats().native == t.jit_instructions);
-        CHECK(t.jit.stats().exits_before == 0);
+        // Each wait: the block leaves before the access, then the block entered at it leaves
+        // again with no instruction run, and the harness steps the interpreter.
+        CHECK(t.jit.stats().exits_before == 2 * kWaits);
     }
     SUBCASE("a failed renderer sends every access to the bus") {
         Twin t;
@@ -225,6 +229,9 @@ TEST_CASE("CPU JIT native accesses call the RDP barrier exactly when the interpr
         CHECK(t.ref_bus.guards == kAccesses);
         REQUIRE_NATIVE(t.jit);
         CHECK(t.jit_bus.guards == kAccesses);  // the code reads wait too: only the data zone is counted
+        // Each access is left to the interpreter: the first block leaves before the first one,
+        // then every block entered at an access leaves with no instruction run.
+        CHECK(t.jit.stats().exits_before == kAccesses + 1);
     }
     SUBCASE("without a view (synchronous RDP) native code never calls it") {
         Twin t;

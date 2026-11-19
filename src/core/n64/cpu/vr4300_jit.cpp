@@ -209,7 +209,6 @@ Vr4300Jit::Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget)
     ctx_.ram_size = bus.direct_ram_size();
     ctx_.code_pages = cache_.pages().table();
     ctx_.barrier = nullptr;  // execute() reads the bus's view
-    ctx_.barrier_wait = &native_barrier_wait;
     ctx_.code_write = &native_code_write;
     ctx_.user = this;
     static_assert(CpuBus::kCodePageShift == jit::CodePages::kPageShift);
@@ -222,19 +221,6 @@ Vr4300Jit::~Vr4300Jit() {
 
 void Vr4300Jit::on_code_write(void* self, std::uint32_t begin, std::uint32_t end) {
     static_cast<Vr4300Jit*>(self)->invalidate_ram(begin, end);
-}
-
-std::uint32_t Vr4300Jit::native_barrier_wait(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes,
-                                             std::uint32_t write) noexcept {
-    auto& self = *static_cast<Vr4300Jit*>(ctx->user);
-    try {
-        self.bus_.guard_memory(paddr, bytes, write != 0);
-        return 0;
-    } catch (...) {
-        // A failed renderer: execute() rethrows it, the CPU before the access.
-        self.error_ = std::current_exception();
-        return 1;
-    }
 }
 
 std::uint32_t Vr4300Jit::native_code_write(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes) noexcept {
@@ -318,8 +304,8 @@ std::uint64_t Vr4300Jit::run(std::uint32_t instr, std::uint64_t flags, std::uint
 
 // A native instruction is emitted by emit_alu (an overflow leaves before it), emit_branch
 // (a likely branch not taken leaves after it, its slot nullified) or emit_memory (an
-// access outside kseg0 RAM, unaligned, or whose barrier failed leaves before it; a store
-// that dropped compiled code leaves after it, kExitAfter). For an
+// access outside kseg0 RAM, unaligned, or that must wait for the renderer leaves before
+// it; a store that dropped compiled code leaves after it, kExitAfter). For an
 // in-place instruction i: write the pending state back, call the helper with (word, flags,
 // the block's static cycles), then leave if it says so:
 //   kBefore  -> {i}       it did not run (ExitBefore) or a host error interrupted it

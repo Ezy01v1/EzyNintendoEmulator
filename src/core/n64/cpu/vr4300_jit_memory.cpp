@@ -6,8 +6,12 @@
 //    cycles), and an aligned access never crosses a 4 KiB page. Anything else (kseg1, MMIO,
 //    the TLB segments, an address error) leaves the block before the instruction, which
 //    the interpreter then runs (and raises its exception);
-//  - the threaded RDP's barrier comes first, as Vr4300::load/store's guard_memory() call
-//    (no-op without a barrier view); a failed wait leaves before the instruction too;
+//  - the threaded RDP's barrier comes first, inline and call-free (nothing without a
+//    barrier view): when Vr4300::load/store's guard_memory() would have to look further
+//    (the page has a newer packet than completed_seen, or the renderer failed), the block
+//    leaves before the instruction, and the interpreter's step() then waits (or rethrows
+//    the renderer's failure) and makes the access. That happens a few times per run, and
+//    keeps calls, and the spills around them, out of the native code;
 //  - LB LH LW sign-extend, LBU LHU LWU zero-extend, LD loads 64 bits; a load into $0
 //    still touches memory;
 //  - a store reports its range to the code watch (note_ram_write); when that dropped

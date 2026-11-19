@@ -296,13 +296,12 @@ private:
         cc_.mov(sized(ram_, at, inst.aux == 8 ? Type::I64 : Type::I32), swapped);
     }
 
-    // The cheap part of the renderer's memory barrier; barrier_wait only when the page
-    // has a newer packet than completed_seen, or the renderer failed. With an exit, only
-    // that slow path tests barrier_wait's answer.
+    // The renderer's memory barrier, with no call: the block leaves through the barrier's
+    // exit when the page has a newer packet than completed_seen, or the renderer failed.
     bool barrier(const Inst& inst) {
         const bool write = (inst.imm & 1) != 0;
-        const auto on_failure = inst.imm >> Inst::kBarrierExitShift;  // 1 + the exit, 0: none
-        const auto done = cc_.new_label(), slow = cc_.new_label();
+        const Label slow = exits_[inst.imm >> Inst::kBarrierExitShift];
+        const auto done = cc_.new_label();
         auto view = cc_.new_gp_ptr();
         cc_.mov(view, x86::qword_ptr(ctx_, field(offsetof(Context, barrier))));
         cc_.test(view, view);
@@ -327,24 +326,7 @@ private:
         cc_.ja(slow);
         cc_.mov(table, x86::qword_ptr(view, field(offsetof(PageBarrierView, failed))));
         cc_.cmp(x86::byte_ptr(table), 0);  // an acquire load is a plain load on x86-64
-        cc_.je(done);
-        cc_.bind(slow);
-        auto wait = cc_.new_gp_ptr();
-        cc_.mov(wait, x86::qword_ptr(ctx_, field(offsetof(Context, barrier_wait))));
-        InvokeNode* node = nullptr;
-        cc_.invoke(Out(node), wait,
-                   FuncSignature::build<std::uint32_t, Context*, std::uint32_t, std::uint32_t, std::uint32_t>());
-        if (node == nullptr) return false;
-        node->set_arg(0, ctx_);
-        node->set_arg(1, v(inst.a));
-        node->set_arg(2, Imm(inst.aux));
-        node->set_arg(3, Imm(write ? 1 : 0));
-        if (on_failure != 0) {
-            auto failed = cc_.new_gp32();
-            node->set_ret(0, failed);
-            cc_.test(failed, failed);
-            cc_.jnz(exits_[on_failure - 1]);
-        }
+        cc_.jne(slow);
         cc_.bind(done);
         return true;
     }

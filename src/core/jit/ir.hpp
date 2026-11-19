@@ -34,7 +34,7 @@ struct Inst {
     std::uint32_t result = kNone;
     std::uint32_t a = kNone, b = kNone, c = kNone;
     std::uint64_t imm = 0;       // constant, guest offset, Helper address, ExitId, Barrier flags
-    // Barrier::imm: bit 0 = write; bits 32-63 = 1 + the exit taken when barrier_wait fails (0: none).
+    // Barrier::imm: bit 0 = write; bits 32-63 = the exit its slow path takes.
     static constexpr unsigned kBarrierExitShift = 32;
 };
 
@@ -76,10 +76,11 @@ public:
     void store_ram(Value paddr, Value value, unsigned bytes);  // the low `bytes` of value, big-endian
     // paddr must be below Context::ram_size and the access must not cross a 4 KiB page;
     // the front-end checks this (like load_ram).
-    void barrier(Value paddr, unsigned bytes, bool write);  // inline fast check, ctx->barrier_wait on the slow path
-    // The same, leaving through `on_failure` when barrier_wait returns nonzero. The fast path
-    // is unchanged: only the slow path tests the answer. A jump, like exit_if().
-    void barrier(Value paddr, unsigned bytes, bool write, ExitId on_failure);
+    // The renderer's memory barrier, inline and call-free (nothing to do without
+    // Context::barrier): when the page has a packet newer than completed_seen (for a write,
+    // the readers' too) or the renderer failed, the block leaves through `slow`, before the
+    // access, for code that can wait (or rethrow). A jump, like exit_if().
+    void barrier(Value paddr, unsigned bytes, bool write, ExitId slow);
     // Same precondition as barrier(): paddr below Context::ram_size, no 4 KiB page crossing.
     Value note_ram_write(Value paddr, unsigned bytes);      // I32: 1 if compiled code changed
     Value call(Helper helper, Value a, Value b, Value c);   // I64; use constant(I64, 0) for unused arguments

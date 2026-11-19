@@ -17,7 +17,7 @@ namespace ezy::n64 {
 //               branch but BC1* (vr4300_jit_branch.cpp); LB LBU LH LHU LW SB SH SW, and
 //               LWU LD SD only when allow_64bit (vr4300_jit_memory.cpp), which leave the
 //               block before themselves unless they are aligned kseg0 accesses inside
-//               direct RAM
+//               direct RAM that the threaded RDP's barrier lets through
 //   InPlace     Vr4300::execute_in_place, called from the block (BC1* included)
 //   Memory      any other load or store (LWL..SDR, LL/SC, COP1, the 64-bit ones without
 //               allow_64bit): Vr4300::execute_memory_in_place, which exits before it
@@ -107,10 +107,6 @@ private:
                                          std::uint64_t block_cycles) noexcept;
     std::uint64_t run(std::uint32_t instr, std::uint64_t flags, std::uint64_t block_cycles);
     static void on_code_write(void* self, std::uint32_t begin, std::uint32_t end);
-    // Context::barrier_wait: guard_memory() for a native access; a C++ exception is kept
-    // for execute() and the access's block leaves before it (returns 1).
-    static std::uint32_t native_barrier_wait(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes,
-                                             std::uint32_t write) noexcept;
     // Context::code_write: a native store over a marked page; 1 if it dropped a block.
     static std::uint32_t native_code_write(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes) noexcept;
     void verify(const jit::Block& block) const;

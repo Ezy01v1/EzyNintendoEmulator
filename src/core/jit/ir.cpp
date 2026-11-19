@@ -140,20 +140,14 @@ void IrBuilder::store_ram(Value paddr, Value value, unsigned bytes) {
     push({.op = Op::StoreRam, .type = type, .aux = static_cast<std::uint8_t>(bytes), .a = paddr.id, .b = value.id});
 }
 
-void IrBuilder::barrier(Value paddr, unsigned bytes, bool write) {
-    if (use(paddr) != Type::I32) fail("jit IR: a physical address is I32");
-    check_bytes(Type::I64, bytes);
-    push({.op = Op::Barrier, .aux = static_cast<std::uint8_t>(bytes), .a = paddr.id, .imm = write ? 1U : 0U});
-}
-
-void IrBuilder::barrier(Value paddr, unsigned bytes, bool write, ExitId on_failure) {
-    check_exit(on_failure);
+void IrBuilder::barrier(Value paddr, unsigned bytes, bool write, ExitId slow) {
+    check_exit(slow);
     if (region_ != kBody) fail("jit IR: an exit region cannot jump");
     if (use(paddr) != Type::I32) fail("jit IR: a physical address is I32");
     check_bytes(Type::I64, bytes);
-    auto& info = exits_[on_failure];
+    auto& info = exits_[slow];
     info.first_jump = std::min(info.first_jump, static_cast<std::uint32_t>(body_.size()));
-    const std::uint64_t flags = (write ? 1U : 0U) | ((std::uint64_t{on_failure} + 1) << Inst::kBarrierExitShift);
+    const std::uint64_t flags = (write ? 1U : 0U) | (std::uint64_t{slow} << Inst::kBarrierExitShift);
     push({.op = Op::Barrier, .aux = static_cast<std::uint8_t>(bytes), .a = paddr.id, .imm = flags});
 }
 

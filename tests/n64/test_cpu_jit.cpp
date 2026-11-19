@@ -458,21 +458,27 @@ TEST_CASE("CPU JIT keeps idle loop detection working") {
     CHECK(t.jit_cpu.idle_loop_cycles() == 2);
 }
 
-TEST_CASE("CPU JIT rethrows a host error raised inside a block") {
+TEST_CASE("CPU JIT leaves a block at an instruction boundary when the RDP worker failed") {
     Twin t;
     REQUIRE_NATIVE(t.jit);
-    // The threaded RDP still has a packet writing that page: the native LW's barrier calls
-    // the bus, which fails. The block leaves before the LW, the instructions before it retired.
-    t.jit_bus.pend(kData, false, 1, 1);
+    // The renderer failed: the native LW's inline barrier sends it to the slow path, so the
+    // block leaves before the LW, the instructions before it retired. The interpreter's
+    // step() then makes the access through guard_memory, which rethrows the failure.
+    t.jit_bus.failed = true;
     t.jit_bus.throw_at = kData + 0x10;
     t.program(kCode, {addiu(8, 0, 1), lui(9, 0x8004), lw(10, 9, 0x10), addiu(11, 0, 1), kStop});
     t.start(kKseg0 + kCode);
-    CHECK_THROWS_AS(t.jit.execute(1000), std::runtime_error);
-    CHECK(t.jit_cpu.gpr(11) == 0);
-    CHECK(t.jit_cpu.gpr(8) == 1);
+    const auto ran = t.jit.execute(1000);
+    CHECK(ran.instructions == 2);  // a block ran: ADDIU, LUI
+    CHECK(t.jit.stats().native == 2);
+    CHECK(t.jit.stats().exits_before == 1);
     CHECK(t.jit_cpu.pc() == kKseg0 + kCode + 8);  // at the LW, which did not run
     for (int k = 0; k < 2; ++k) t.ref_cpu.step();
-    CHECK(state_of(t.ref_cpu) == state_of(t.jit_cpu));
+    CHECK(state_of(t.ref_cpu) == state_of(t.jit_cpu));  // exactly the boundary step() leaves
+    CHECK_THROWS_AS(t.jit_cpu.step(), std::runtime_error);  // the failure reaches the caller
+    CHECK(t.jit_cpu.gpr(10) == 0);
+    CHECK(t.jit_cpu.gpr(11) == 0);
+    t.jit_bus.failed = false;
     t.jit_bus.throw_at = ~0U;
     t.jit.flush();
     CHECK(t.jit.execute(1000).instructions > 0);
