@@ -10,6 +10,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <utility>
 
 #include "debug_ui.hpp"
 #include "file_util.hpp"
@@ -148,7 +149,9 @@ std::unique_ptr<n64::N64> create_n64(std::span<const std::uint8_t> rom, bool gfx
         n64->bus().set_audio_hle(true);
         n64->bus().set_gfx_hle(gfx_hle);
         if (cpu_jit && !n64->set_cpu_mode(n64::CpuMode::Jit)) {
-            std::cerr << "Warning: this build has no CPU JIT; the CPU runs in the interpreter\n";
+            static bool warned = false;  // create_n64 runs again on every reset
+            if (!std::exchange(warned, true))
+                std::cerr << "Warning: this build has no CPU JIT; the CPU runs in the interpreter\n";
         }
     }
     return n64;
