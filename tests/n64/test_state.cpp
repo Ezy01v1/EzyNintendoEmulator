@@ -2320,7 +2320,12 @@ TEST_CASE("N64 with the CPU JIT loads a state and continues exactly like the int
         const auto state = n64->save_state();
         n64->run_frame();
         REQUIRE(n64->load_state(state));
-        for (int i = 0; i < 3; ++i) n64->run_frame();
+        n64->run_frame();
+        // A truncated state is refused: the undo path restores the machine (and flushes the JIT).
+        auto truncated = state;
+        truncated.resize(truncated.size() - 8);
+        CHECK_FALSE(n64->load_state(truncated));
+        for (int i = 0; i < 2; ++i) n64->run_frame();
         CHECK(n64->cpu().gpr(9) > 1000);  // the loop in RDRAM ran
         if (n64->cpu_jit() != nullptr) CHECK(n64->cpu_jit()->stats().in_place > 1000);
         return n64->save_state();

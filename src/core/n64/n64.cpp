@@ -65,7 +65,7 @@ std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<co
     return n64;
 }
 
-void N64::step() {
+void N64::skip_idle_loop() {
     // Idle loop: jump over whole iterations up to just before the next event or Compare, so
     // everything happens at the same cycle as when stepping one instruction at a time.
     //
@@ -88,12 +88,18 @@ void N64::step() {
             cpu_.skip_idle_cycles(stop - start);
         }
     }
+}
+
+void N64::step() {
+    skip_idle_loop();
     // The JIT runs up to just before the next event (or Compare, which it watches itself),
     // so no event falls inside a block and every one still runs at its cycle.
     if (cpu_jit_) {
         const std::uint64_t now = scheduler_.now(), next = scheduler_.earliest_except(0);
         const std::uint64_t budget = next > now ? next - now : 0;  // ~0 (nothing pending) included
         if (budget != 0) {
+            // A throw from execute() (only check mode throws, and it is fatal) skips the
+            // scheduler advance below: what ran is retired in the CPU but not in time.
             const Vr4300Jit::Result r = cpu_jit_->execute(budget);
             if (r.instructions != 0) {
                 scheduler_.advance(r.cycles);
@@ -102,6 +108,15 @@ void N64::step() {
             }
         }
     }
+    step_cpu();
+}
+
+void N64::step_interpreted() {
+    skip_idle_loop();
+    step_cpu();
+}
+
+void N64::step_cpu() {
     scheduler_.advance(static_cast<std::uint64_t>(cpu_.step()));
     run_due_events(false);
 }

@@ -32,7 +32,7 @@ public:
     [[nodiscard]] double frame_seconds() const override;
 
     void run_frame() override;
-    void step_instruction() override { n64_->step(); }
+    void step_instruction() override { n64_->step_interpreted(); }  // one instruction, even with the JIT
     void reset() override;
 
     void handle_key(SDL_Scancode scancode, bool pressed) override;

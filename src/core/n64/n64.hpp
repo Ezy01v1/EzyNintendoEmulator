@@ -24,8 +24,9 @@ void set_default_cpu_mode(CpuMode mode);
 
 // The whole console: what the frontend and the runner talk to.
 //
-// Main loop: the CPU runs one instruction, the scheduler advances by the cycles it took,
-// and every event that is due (VI lines, DMA completions, RSP and RDP work) is dispatched to the bus.
+// Main loop: each step() the CPU runs one instruction (or, with the JIT, blocks of them up
+// to the next event), the scheduler advances by the cycles it took, and every event that is
+// due (VI lines, DMA completions, RSP and RDP work) is dispatched to the bus.
 class N64 {
 public:
     // nullptr if the file isn't an N64 ROM. Without a PIF ROM the console boots through
@@ -51,6 +52,9 @@ public:
     [[nodiscard]] Vr4300Jit* cpu_jit() { return cpu_jit_.get(); }
 
     void step();
+    // step() without the JIT: exactly one instruction (after an idle-loop skip), for the
+    // debugger's single step.
+    void step_interpreted();
 
     // Runs the due events; see n64.cpp.
     std::optional<std::uint64_t> run_due_events(bool watch_interrupt);
@@ -72,6 +76,9 @@ public:
 
 private:
     explicit N64(Cartridge cart, RdpMode mode, RspMode rsp_mode);
+
+    void skip_idle_loop();
+    void step_cpu();  // one interpreted instruction, then the due events
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {
