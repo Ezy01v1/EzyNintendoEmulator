@@ -293,6 +293,9 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
   - [x] Comprobación de barreras más barata (`completed_seen_`): con HLE 51,9 → **53,8 campos/s**.
   - Ahora el límite es el hilo principal (la CPU emulada, ~65 % de sus muestras); el RDP en hilo
     tiene margen (~3,4 s de dibujo en 400 campos). Siguiente palanca grande: recompilador de CPU.
+  - [ ] Recompilador de CPU (JIT compartido N64 → GameCube/Wii): diseño escrito en
+    `docs/superpowers/specs/2026-11-18-cpu-jit-core-design.md`, revisado; falta que el usuario lo
+    apruebe (y el criterio de salida de la Fase 4). Después: plan con writing-plans; nada de código antes.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -809,3 +812,8 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   campos/s (+3,7 %)**, 4/5; sin HLE 43,4 → 44,5 (+2,5 %), 2/3. Estados a 1900 idénticos a los del RDP
   síncrono con y sin HLE, continuación cruzada 1700+120, ocho suites. Perfil: el hilo principal es
   ~65 % CPU emulada; el siguiente salto grande es el recompilador de CPU.
+- 2026-11-18 (6) — Diseño del recompilador de CPU: núcleo general (IR pequeño + backend x86-64 con
+  AsmJit) con entrada MIPS para el VR4300, resultado exacto al intérprete por presupuesto de ciclos
+  (un bloque corre entero solo si cabe antes del próximo evento y de Compare), meta MK64 ≥ 60 campos/s.
+  Revisión independiente: corregidos los escritores del RDP/HLE para invalidar, la clave por PC virtual
+  (solo kseg0 en este proyecto), la descarga de AsmJit y `idle_candidate_`. Pendiente de aprobación.
