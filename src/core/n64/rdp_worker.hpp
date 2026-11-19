@@ -85,6 +85,9 @@ private:
     std::array<Cached, kCached> cached_{};
     unsigned next_slot_ = 1, next_cached_ = 0;
     std::uint64_t submitted_ = 0;
+    // The producer's last reading of completed(): wait_memory() skips the consumers' counters
+    // (cache lines they keep writing) while the pages it checks are older than this.
+    mutable std::uint64_t completed_seen_ = 0;
     mutable std::uint64_t waits_ = 0;
     std::uint64_t queue_waits_ = 0;
     // The producer publishes `pushed_`. `submitted_ - min(taken)` is the number of queued

@@ -116,7 +116,18 @@ void RdpWorker::wait_memory(std::uint32_t address, std::size_t bytes, bool write
             if (write) sequence = std::max(sequence, slot_sequence_[readers_[page]]);
         }
     }
+    // Most accesses touch pages whose packets finished long ago: decide that without the
+    // consumers' counters. failed_ is rarely written, so reading it stays cheap; a failure
+    // goes on to wait(), which rethrows it.
+    if (failed_.load(std::memory_order_acquire)) {
+        wait(sequence);
+        return;
+    }
+    if (sequence <= completed_seen_) return;
+    completed_seen_ = completed();
+    if (sequence <= completed_seen_) return;
     wait(sequence);
+    completed_seen_ = std::max(completed_seen_, sequence);
 }
 
 void RdpWorker::run(std::size_t index) {

@@ -42,7 +42,7 @@ public:
     [[nodiscard]] RdpWorker::Stats stats() const { return worker_ ? worker_->stats() : RdpWorker::Stats{}; }
     void drain() const { if (worker_) worker_->drain(); }
     void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const {
-        if (worker_ && worker_->pending()) worker_->wait_memory(address, bytes, write);
+        if (worker_) worker_->wait_memory(address, bytes, write);  // cheap when nothing touches the range
     }
     [[nodiscard]] std::uint32_t read(std::uint32_t offset, std::uint64_t now) const;
     void write(std::uint32_t offset, std::uint32_t value, Scheduler& scheduler, std::uint64_t when);

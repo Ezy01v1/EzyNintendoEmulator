@@ -290,8 +290,9 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
       defecto en `ezyemu` y abrir el PR de `n64/gfx-hle-port`.
   - [x] Barreras por rango para los DMA del PI y del SI (antes drenaban todo el RDP): con HLE
     gráfico la carrera pasa de 44,5 a **51,6 campos/s** (+16 %). Ver bitácora 2026-11-18 (4).
-  - Siguiente palanca: medir de nuevo el reparto CPU / hilo del RDP con HLE antes de elegir
-    entre acelerar el rasterizador o el recompilador de CPU.
+  - [x] Comprobación de barreras más barata (`completed_seen_`): con HLE 51,9 → **53,8 campos/s**.
+  - Ahora el límite es el hilo principal (la CPU emulada, ~65 % de sus muestras); el RDP en hilo
+    tiene margen (~3,4 s de dibujo en 400 campos). Siguiente palanca grande: recompilador de CPU.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -798,3 +799,13 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   continuación cruzada 1700+120 con y sin HLE, systemtest en hilo 2984/3721, ocho suites. Sin
   emparejar, la misma sesión dio de 38 a 52 campos/s: comparar solo parejas. Informe:
   `docs/performance/2026-11-18-n64-dma-barriers.md`.
+- 2026-11-18 (5) — Tras quitar los drenados, el hilo principal manda y `Rdp::prepare_memory` seguía
+  en 13,4 % de sus muestras con una sola espera real: era el costo de *comprobar*. Cada acceso de
+  la CPU a RDRAM leía con `acquire` los contadores `completed` de las franjas del RDP, que esos
+  hilos escriben tras cada paquete (líneas de caché rebotando entre núcleos). Ahora
+  `RdpWorker::wait_memory` mira primero sus tablas de páginas y una copia local (`completed_seen_`);
+  solo relee los contadores si la página tiene un paquete más nuevo. `failed_` se sigue leyendo en
+  cada llamada (la prueba de propagación de fallos lo exige). Parejas: con HLE 51,9 → **53,8
+  campos/s (+3,7 %)**, 4/5; sin HLE 43,4 → 44,5 (+2,5 %), 2/3. Estados a 1900 idénticos a los del RDP
+  síncrono con y sin HLE, continuación cruzada 1700+120, ocho suites. Perfil: el hilo principal es
+  ~65 % CPU emulada; el siguiente salto grande es el recompilador de CPU.
