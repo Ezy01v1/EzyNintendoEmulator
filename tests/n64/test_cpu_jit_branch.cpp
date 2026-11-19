@@ -272,6 +272,35 @@ TEST_CASE("CPU JIT native self-branch arms idle loop skipping") {
         REQUIRE_NATIVE(t.jit);
         CHECK(t.jit.stats().in_place == 0);
     }
+    // The register-dependent forms arm it through a select (BNE) or after the likely
+    // branch's skip exit (BEQL). As above, the loop is rewritten into B . afterwards.
+    struct SelfBranch {
+        const char* name;
+        std::vector<std::uint32_t> words;  // the self-branch is the third word, its slot a NOP
+    };
+    const SelfBranch self_branches[] = {
+        {"BNE r8, r0, . taken once", {addiu(8, 0, 1), addiu(9, 0, 0), bne(8, 0, -1), nop()}},
+        {"BEQL r8, r9, . likely taken", {addiu(8, 0, 1), addiu(9, 0, 1), beql(8, 9, -1), nop()}},
+    };
+    for (const SelfBranch& s : self_branches) {
+        SUBCASE(s.name) {
+            Twin t;
+            REQUIRE_NATIVE(t.jit);
+            t.program(kCode, s.words);
+            t.start(kBase);
+            CHECK(t.jit.execute(5).instructions == 4);  // the first block only: taken once
+            for (int k = 0; k < 4; ++k) t.ref_cpu.step();
+            CHECK(t.jit_cpu.pc() == kBase + 8);
+            t.poke32(kCode + 8, beq(0, 0, -1));
+            t.jit.invalidate_ram(kCode + 8, kCode + 12);
+            CHECK(t.ref_cpu.idle_loop_cycles() == 2);
+            CHECK(t.jit_cpu.idle_loop_cycles() == 2);
+            CHECK(t.jit.stats().native == 4);
+            CHECK(t.jit.stats().in_place == 0);
+            t.ref_cycles = t.jit_cycles = 0;
+            CHECK(t.same());
+        }
+    }
 }
 
 TEST_CASE("CPU JIT native JR and JALR to an unaligned target leave the fetch to the interpreter") {

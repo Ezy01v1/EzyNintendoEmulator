@@ -93,8 +93,9 @@ private:
     // body, or an exit's).
     void write_back();
     void store_registers();  // the pending registers only
-    // The pc state `state` at the current instruction (not Clean).
-    void store_pc_state(PcState state);
+    // The pc state `state` for the instruction at `at` (Sequential, InSlot: its pc_;
+    // AfterSlot only uses N). Clean stores nothing.
+    void store_pc_state(PcState state, std::uint64_t at);
     jit::Value next_value();  // N as an IR value
     jit::ExitId add_exit(std::uint32_t instructions, std::uint32_t cycles, std::uint32_t native, std::uint32_t kind);
 

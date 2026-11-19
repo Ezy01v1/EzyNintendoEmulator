@@ -66,7 +66,7 @@ void BlockBuilder::set_idle_candidate(jit::Value value) { ir_.store_guest(offset
 
 jit::Value BlockBuilder::next_value() { return next_is_imm_ ? i64(next_imm_) : next_; }
 
-void BlockBuilder::store_pc_state(PcState state) {
+void BlockBuilder::store_pc_state(PcState state, std::uint64_t at) {
     const auto flags = [this](bool taken, bool slot) {
         ir_.store_guest(offsets_.branch_taken, i32(taken ? 1 : 0), 1);
         ir_.store_guest(offsets_.in_delay_slot, i32(slot ? 1 : 0), 1);
@@ -74,12 +74,12 @@ void BlockBuilder::store_pc_state(PcState state) {
     switch (state) {
         case PcState::Clean: break;
         case PcState::Sequential:
-            ir_.store_guest(offsets_.pc, i64(vaddr_));
-            ir_.store_guest(offsets_.next_pc, i64(vaddr_ + 4));
+            ir_.store_guest(offsets_.pc, i64(at));
+            ir_.store_guest(offsets_.next_pc, i64(at + 4));
             flags(false, false);
             break;
         case PcState::InSlot:
-            ir_.store_guest(offsets_.pc, i64(vaddr_));
+            ir_.store_guest(offsets_.pc, i64(at));
             ir_.store_guest(offsets_.next_pc, next_value());
             flags(true, false);
             break;
@@ -102,7 +102,7 @@ void BlockBuilder::store_registers() {
 
 void BlockBuilder::write_back() {
     store_registers();
-    store_pc_state(pc_state_);
+    store_pc_state(pc_state_, vaddr_);
 }
 
 jit::ExitId BlockBuilder::add_exit(std::uint32_t instructions, std::uint32_t cycles, std::uint32_t native,
@@ -123,11 +123,8 @@ void BlockBuilder::skip_slot_if(jit::Value not_taken) {
     // The branch retires; step() then leaves the CPU sequential at the slot + 4.
     const jit::ExitId exit = add_exit(done_ + 1, cycles_ + 1, native_ + 1, kExitNormal);
     ir_.begin_exit(exit);
-    const std::uint64_t at = vaddr_;
     store_registers();
-    vaddr_ = at + 8;
-    store_pc_state(PcState::Sequential);
-    vaddr_ = at;
+    store_pc_state(PcState::Sequential, vaddr_ + 8);
     ir_.end_exit();
     ir_.exit_if(not_taken, exit);
 }
