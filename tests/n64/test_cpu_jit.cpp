@@ -590,3 +590,22 @@ TEST_CASE("CPU JIT sees a store that rewrites the block it is running") {
     REQUIRE_NATIVE(t.jit);
     CHECK(t.jit.stats().invalidations > 0);
 }
+
+TEST_CASE("CPU JIT leaves a jump to an unaligned pc to the interpreter") {
+    // JR to kBase + 0x41 after a block at kBase + 0x40 was compiled: the interpreter's next
+    // fetch raises AdEL; no block may run (or be built) at the unaligned address.
+    constexpr std::uint64_t kBase = kKseg0 + kCode;
+    Twin t;
+    t.lockstep = true;
+    t.program(kCode, {j(0x02, kCode + 0x40), nop()});
+    t.program(kCode + 0x40, {addiu(10, 10, 1), lui(8, 0x8000), ori(8, 8, kCode + 0x41), jr(8), addiu(9, 0, 1)});
+    t.poke32(0x180, kStop);
+    t.start(kBase);
+    t.run_until_pc(kVector);
+    CHECK(t.same());
+    CHECK(((t.jit_cpu.cop0().cause() >> 2) & 31) == 4);  // AdEL
+    CHECK(t.jit_cpu.cop0().read(Cop0::kBadVAddr) == kBase + 0x41);
+    CHECK(t.jit_cpu.cop0().read(Cop0::kEpc) == kBase + 0x41);
+    CHECK(t.jit_cpu.gpr(9) == 1);
+    if (t.jit.available()) CHECK(t.jit_instructions > 0);
+}

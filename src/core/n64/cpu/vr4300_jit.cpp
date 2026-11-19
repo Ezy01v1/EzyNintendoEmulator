@@ -24,6 +24,11 @@ std::uint32_t offset_of(const Vr4300& cpu, const void* member) {
                                       reinterpret_cast<const std::uint8_t*>(&cpu));
 }
 
+std::uint64_t elapsed_ns(std::chrono::steady_clock::time_point since) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - since).count());
+}
+
 }  // namespace
 
 Vr4300Jit::Vr4300Jit(Vr4300& cpu, CpuBus& bus, std::size_t code_budget)
@@ -152,7 +157,9 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     if (words.empty()) {  // the interpreter runs this pc; cached so it is not scanned again
         const std::uint32_t first = word(0);
         block.words = 1;
-        return &cache_.insert(block, {}, std::span<const std::uint32_t>(&first, 1));
+        const jit::Block& stored = cache_.insert(block, {}, std::span<const std::uint32_t>(&first, 1));
+        stats_.compile_ns += elapsed_ns(started);
+        return &stored;
     }
 
     const auto n = static_cast<std::uint32_t>(words.size());
@@ -188,8 +195,7 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     block.min_cycles = n;  // one cycle each; the extra ones are dynamic
     const jit::Block& stored = cache_.insert(block, exits, words);
     if (block.fn != nullptr) ++stats_.compiled;
-    stats_.compile_ns += static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
+    stats_.compile_ns += elapsed_ns(started);
     return &stored;
 }
 
@@ -217,6 +223,7 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
         for (;;) {
             const std::uint64_t pc = cpu_.pc_;
             if (pc - kKseg0 >= 0x20000000ULL) break;  // kseg0 only
+            if (pc & 3) break;  // a JR to an unaligned target: step()'s fetch raises AdEL
             const auto paddr = static_cast<std::uint32_t>(pc & 0x1FFFFFFF);
             if (std::uint64_t{paddr} + 4 > bus_.direct_ram_size()) break;
             const jit::Block* block = cache_.find(paddr, key);

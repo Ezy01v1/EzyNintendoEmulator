@@ -47,6 +47,7 @@ TEST_CASE("BlockCache finds a block by physical address and mode key only") {
     CHECK(cache.find(0x1000, 1) != nullptr);
     CHECK(cache.find(0x1000, 2) == nullptr);
     CHECK(cache.find(0x1004, 1) == nullptr);
+    CHECK(cache.find(0x1001, 1) == nullptr);  // same slot, not the block's address
     CHECK(cache.find(kRam + 0x1000, 1) == nullptr);
     CHECK(cache.pages().marked(0x1000, 0x1004));
     CHECK(cache.stats().blocks == 1);

@@ -36,14 +36,15 @@ public:
     BlockCache(const BlockCache&) = delete;
     BlockCache& operator=(const BlockCache&) = delete;
 
-    // nullptr if absent or compiled for another key. Two loads plus the key compare.
+    // nullptr if absent or compiled for another key (or paddr is not the block's own, e.g.
+    // unaligned). Two loads plus the key and address compares.
     [[nodiscard]] const Block* find(std::uint32_t paddr, std::uint32_t key) const {
         const std::uint32_t page = paddr >> CodePages::kPageShift;
         if (page >= top_.size()) return nullptr;
         const Block* const* slots = top_[page].get();
         if (slots == nullptr) return nullptr;
         const Block* b = slots[(paddr >> 2) & (kSlots - 1)];
-        return (b != nullptr && b->key == key) ? b : nullptr;
+        return (b != nullptr && b->key == key && b->paddr == paddr) ? b : nullptr;
     }
 
     // Copies exits and code into an arena (freed only by flush), marks the page and
