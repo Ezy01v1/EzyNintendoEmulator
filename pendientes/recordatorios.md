@@ -293,11 +293,20 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
   - [x] Comprobación de barreras más barata (`completed_seen_`): con HLE 51,9 → **53,8 campos/s**.
   - Ahora el límite es el hilo principal (la CPU emulada, ~65 % de sus muestras); el RDP en hilo
     tiene margen (~3,4 s de dibujo en 400 campos). Siguiente palanca grande: recompilador de CPU.
-  - [ ] Recompilador de CPU (JIT compartido N64 → GameCube/Wii): diseño escrito en
-    `docs/superpowers/specs/2026-11-18-cpu-jit-core-design.md`, **aprobado** 2026-11-18 (con el criterio
-    de la Fase 4: mediana ≥ +10 %, ≥ 4/5 pares). Plan de las Fases 1–3:
-    `docs/superpowers/plans/2026-11-18-cpu-jit-core.md` (Tareas 0–11); falta que el usuario lo revise
-    y elija cómo ejecutarlo. La Fase 4 tendrá su propio plan tras la medición de la Tarea 11.
+  - [x] Recompilador de CPU, Fases 1–3 (rama `n64/cpu-jit`, 2026-11-19): núcleo `ezy_jit` + entrada
+    MIPS, activable con `--cpu-jit` (runner, ezyemu, tests). Idéntico al intérprete en MK64, Spider-Man,
+    systemtest y 91 ROMs PeterLemon. Carrera con HLE: **55,7 → 62,9 campos/s** (+12,8 %, 5/5 pares;
+    >60 = velocidad NTSC). Ver `docs/performance/2026-11-18-n64-cpu-jit.md`.
+    - [ ] Que el usuario juegue MK64 con `ezyemu ... --gfx-hle --cpu-jit` (mando, F2/F4, reset); si va
+      bien, decidir si se activa por defecto y abrir PR(s) de `n64/gfx-hle-port` y `n64/cpu-jit`.
+    - [ ] Fase 4 (plan nuevo con brainstorming del usuario): el perfil del JIT da 47 % del hilo principal
+      a compilar con `asmjit::x86::Compiler` (asignación de registros). Candidatos en orden: compilar
+      más barato (Assembler con registros fijos, salidas compartidas), FPU nativa, enlace de bloques,
+      caché de registros entre instrucciones. Al hacer FPU nativa: volver a meter CU1/FR en la clave
+      con varias claves por dirección (Ruling R5).
+    - Menores pendientes de la revisión: ver la lista en el mensaje final de la sesión 2026-11-19
+      (SC sin LLbit, prueba RDP solo de fill, IR muerta tras likely nunca tomado, doble salida lenta).
+    - Archivo suelto `E:\scratch_t10.txt` (fuera del repo) creado por un subagente: borrarlo a mano.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -822,3 +831,10 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
 - 2026-11-18 (7) — El usuario aprobó el diseño del JIT de CPU y el criterio de la Fase 4. Escrito el plan
   de las Fases 1–3 (perfil, AsmJit compartido, IR + backend, caché, despachador "en el sitio",
   invalidación, integración, ALU/saltos/memoria nativos, medición).
+- 2026-11-19 — JIT de CPU Fases 1–3 ejecutadas con subagentes (rama `n64/cpu-jit`, 24 commits): perfil
+  (intérprete ~86 % del hilo principal, TLB 0 %), AsmJit compartido, IR + backend x86-64, caché de bloques,
+  despachador exacto por presupuesto, invalidación en todos los escritores de RDRAM, `--cpu-jit`/
+  `--cpu-jit-check`, ALU/saltos/memoria kseg0 nativos con barrera RDP en línea. Todo idéntico al
+  intérprete (estados MK64 1900 en 4 combinaciones, continuación cruzada, imágenes, Spider-Man,
+  systemtest 2984/3721, PeterLemon 91/91 con `--cpu-jit-check` en CTest Release). Medición: HLE
+  55,74 → 62,85 (+12,8 %, 5/5), LLE 43,64 → 62,77 (+43,8 %, 3/3). Criterio de la Fase 4 cumplido.
