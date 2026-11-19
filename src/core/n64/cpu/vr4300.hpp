@@ -29,9 +29,9 @@ public:
     int step();
 
     // For the JIT (vr4300_jit.hpp). These two methods return only Ok, Exception and
-    // ExitBefore; the JIT itself produces CodeChanged (the instruction rewrote compiled code)
-    // and HostError (a C++ exception, e.g. an RDP worker failure, was caught and stored).
-    enum class InPlace : std::uint8_t { Ok, Exception, ExitBefore, CodeChanged, HostError };
+    // ExitBefore; the JIT itself produces CodeChanged (the instruction rewrote compiled code).
+    // A C++ exception from an instruction is not a status: the JIT's run() stores it in error_.
+    enum class InPlace : std::uint8_t { Ok, Exception, ExitBefore, CodeChanged };
     // step() without the interrupt check, fetch and retire: current_pc_ = pc_, in_delay_slot_
     // = branch_taken_, pc_ = next_pc_, next_pc_ += 4, execute(instr), gpr_[0] = 0. `cycles`
     // gets what the instruction took (>= 1). Ok or Exception.

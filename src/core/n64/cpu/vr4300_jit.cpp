@@ -225,6 +225,8 @@ void Vr4300Jit::on_code_write(void* self, std::uint32_t begin, std::uint32_t end
 
 std::uint32_t Vr4300Jit::native_code_write(jit::Context* ctx, std::uint32_t paddr, std::uint32_t bytes) noexcept {
     auto& self = *static_cast<Vr4300Jit*>(ctx->user);
+    // The catch is defensive: BlockCache::invalidate cannot throw, but an exception must not
+    // cross the native frame.
     try {
         // What CpuBus::note_ram_write -> on_code_write does; the store's range is within a page.
         return self.cache_.invalidate(paddr, paddr + bytes) ? 1 : 0;
@@ -291,7 +293,7 @@ std::uint64_t Vr4300Jit::run(std::uint32_t instr, std::uint64_t flags, std::uint
     // A store over compiled code: the code watch already dropped those blocks (this one's
     // memory stays valid until a flush); leave, since this block may be one of them.
     if (status == Vr4300::InPlace::Ok && code_changed_) status = Vr4300::InPlace::CodeChanged;
-    if (status == Vr4300::InPlace::ExitBefore || status == Vr4300::InPlace::HostError) return kBefore;
+    if (status == Vr4300::InPlace::ExitBefore) return kBefore;
     ctx_.extra_cycles += cycles - 1;
     if (status != Vr4300::InPlace::Ok) return kAfter;  // Exception, CodeChanged: it retired
     // Extra cycles: done + extra + remaining static = the block's static cycles + extra. If
@@ -483,6 +485,9 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
                 if (exit.kind == kExitBefore) ++stats_.exits_before;
                 break;
             }
+            // At an idle loop: stop so N64::step() can skip it in one go (that batches past
+            // the RSP, RDP and SP DMA events, which dispatching this block would not).
+            if (cpu_.pc_ == cpu_.idle_candidate_ && cpu_.idle_loop_cycles() != 0) break;
         }
     } catch (...) {  // from compile() (the memory guard) or verify()
         failure = std::current_exception();

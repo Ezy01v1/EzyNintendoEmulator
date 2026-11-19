@@ -506,7 +506,7 @@ TEST_CASE("CPU JIT rethrows an RDP worker failure raised inside a block") {
     CHECK(t.same());
 }
 
-TEST_CASE("CPU JIT rethrows an error from a store's code watch after retiring the store") {
+TEST_CASE("CPU JIT rethrows an error from an in-place store's code watch after retiring the store") {
     Twin t;
     REQUIRE_NATIVE(t.jit);
     // An in-place store (SWL) over a page holding compiled code reports it to the code watch;
