@@ -1,6 +1,6 @@
-// VR4300 JIT: block building and the dispatcher. The integer ALU runs as native code
-// (vr4300_jit_alu.cpp); every other instruction runs through the interpreter, called from
-// the block ("in place"). Either way the block skips the per-instruction fetch, interrupt
+// VR4300 JIT: block building and the dispatcher. The integer ALU and the branches run as
+// native code (vr4300_jit_alu.cpp, vr4300_jit_branch.cpp); every other instruction runs
+// through the interpreter, called from the block ("in place"). Either way the block skips the per-instruction fetch, interrupt
 // check and retire, which execute() does once at the end.
 #include "n64/cpu/vr4300_jit.hpp"
 
@@ -60,19 +60,49 @@ void BlockBuilder::set_gpr(int index, jit::Value value) {
     if (index != 0) set_reg(index, value);
 }
 
-void BlockBuilder::write_back() {
+jit::Value BlockBuilder::idle_candidate() { return ir_.load_guest(jit::Type::I64, offsets_.idle_candidate); }
+
+void BlockBuilder::set_idle_candidate(jit::Value value) { ir_.store_guest(offsets_.idle_candidate, value); }
+
+jit::Value BlockBuilder::next_value() { return next_is_imm_ ? i64(next_imm_) : next_; }
+
+void BlockBuilder::store_pc_state(PcState state) {
+    const auto flags = [this](bool taken, bool slot) {
+        ir_.store_guest(offsets_.branch_taken, i32(taken ? 1 : 0), 1);
+        ir_.store_guest(offsets_.in_delay_slot, i32(slot ? 1 : 0), 1);
+    };
+    switch (state) {
+        case PcState::Clean: break;
+        case PcState::Sequential:
+            ir_.store_guest(offsets_.pc, i64(vaddr_));
+            ir_.store_guest(offsets_.next_pc, i64(vaddr_ + 4));
+            flags(false, false);
+            break;
+        case PcState::InSlot:
+            ir_.store_guest(offsets_.pc, i64(vaddr_));
+            ir_.store_guest(offsets_.next_pc, next_value());
+            flags(true, false);
+            break;
+        case PcState::AfterSlot:
+            ir_.store_guest(offsets_.pc, next_value());
+            ir_.store_guest(offsets_.next_pc, next_is_imm_ ? i64(next_imm_ + 4)
+                                                          : ir_.binary(jit::Op::Add, next_, i64(4)));
+            flags(false, true);
+            break;
+    }
+}
+
+void BlockBuilder::store_registers() {
     for (int index = 0; index < kRegs; ++index) {
         if (dirty_ & (std::uint64_t{1} << index)) {
             ir_.store_guest(reg_offset(index), jit::Value{cached_[static_cast<std::size_t>(index)]});
         }
     }
-    if (pc_stale_) {
-        ir_.store_guest(offsets_.pc, i64(vaddr_));
-        ir_.store_guest(offsets_.next_pc, i64(vaddr_ + 4));
-        const jit::Value no = i32(0);
-        ir_.store_guest(offsets_.branch_taken, no, 1);
-        ir_.store_guest(offsets_.in_delay_slot, no, 1);
-    }
+}
+
+void BlockBuilder::write_back() {
+    store_registers();
+    store_pc_state(pc_state_);
 }
 
 jit::ExitId BlockBuilder::add_exit(std::uint32_t instructions, std::uint32_t cycles, std::uint32_t native,
@@ -89,18 +119,45 @@ void BlockBuilder::exit_before_if(jit::Value cond) {
     ir_.exit_if(cond, exit);
 }
 
+void BlockBuilder::skip_slot_if(jit::Value not_taken) {
+    // The branch retires; step() then leaves the CPU sequential at the slot + 4.
+    const jit::ExitId exit = add_exit(done_ + 1, cycles_ + 1, native_ + 1, kExitNormal);
+    ir_.begin_exit(exit);
+    const std::uint64_t at = vaddr_;
+    store_registers();
+    vaddr_ = at + 8;
+    store_pc_state(PcState::Sequential);
+    vaddr_ = at;
+    ir_.end_exit();
+    ir_.exit_if(not_taken, exit);
+}
+
 void BlockBuilder::end_native(std::uint32_t cycles) {
     ++done_;
     ++native_;
     cycles_ += cycles;
     vaddr_ += 4;
-    pc_stale_ = true;
+    pc_state_ = pc_state_ == PcState::InSlot ? PcState::AfterSlot : PcState::Sequential;
+}
+
+void BlockBuilder::end_branch(jit::Value next) {
+    end_native(1);
+    pc_state_ = PcState::InSlot;
+    next_ = next;
+    next_is_imm_ = false;
+}
+
+void BlockBuilder::end_branch(std::uint64_t next) {
+    end_native(1);
+    pc_state_ = PcState::InSlot;
+    next_imm_ = next;
+    next_is_imm_ = true;
 }
 
 void BlockBuilder::sync() {
     write_back();
     dirty_ = 0;
-    pc_stale_ = false;
+    pc_state_ = PcState::Clean;
     cached_.fill(kNone);
 }
 
@@ -222,12 +279,13 @@ std::uint64_t Vr4300Jit::run(std::uint32_t instr, std::uint64_t flags, std::uint
     return kOk;
 }
 
-// A native instruction is emitted by emit_alu (an overflow leaves before it). For an
+// A native instruction is emitted by emit_alu (an overflow leaves before it) or
+// emit_branch (a likely branch not taken leaves after it, its slot nullified). For an
 // in-place instruction i: write the pending state back, call the helper with (word, flags,
 // the block's static cycles), then leave if it says so:
 //   kBefore  -> {i}       it did not run (ExitBefore) or a host error interrupted it
 //   kAfter   -> {i+1}     exception, code change, or its extra cycles reached the budget
-//   kSkip    -> {i+1}     a likely branch skipped the slot: a normal end of the block
+//   kSkip    -> {i+1}     an in-place likely branch (BC1*L) skipped the slot: a normal end
 const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     const auto started = std::chrono::steady_clock::now();
     if (cache_.arena_bytes() > cache_.code().budget()) cache_.flush();
@@ -280,9 +338,12 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     std::vector<std::uint32_t> native_cycles(n, 0);
     std::uint32_t static_cycles = 0;
     for (std::uint32_t i = 0; i < n; ++i) {
-        const bool slot = i > 0 && is_branch(words[i - 1]);  // a delay slot stays in place
-        if (!slot && classify(words[i], allow_64bit) == Kind::Native) {
-            native_cycles[i] = alu_cycles(words[i], allow_64bit);
+        const std::uint32_t w = words[i];
+        // The slot of an in-place branch (BC1*) stays in place: only the CPU knows the
+        // next_pc_ that branch left.
+        const bool after_in_place_branch = i > 0 && is_branch(words[i - 1]) && native_cycles[i - 1] == 0;
+        if (!after_in_place_branch && classify(w, allow_64bit) == Kind::Native) {
+            native_cycles[i] = is_branch(w) ? 1 : alu_cycles(w, allow_64bit);
         }
         static_cycles += native_cycles[i] != 0 ? native_cycles[i] : 1;
     }
@@ -295,6 +356,10 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     for (std::uint32_t i = 0; i < n; ++i) {
         const std::uint32_t w = words[i];
         if (native_cycles[i] != 0) {
+            if (is_branch(w)) {
+                if (!emit_branch(builder, w)) throw std::logic_error("CPU JIT: a native branch has no emitter");
+                continue;  // emit_branch ended it
+            }
             if (!emit_alu(builder, w)) throw std::logic_error("CPU JIT: a Native instruction has no emitter");
             builder.end_native(native_cycles[i]);
             continue;

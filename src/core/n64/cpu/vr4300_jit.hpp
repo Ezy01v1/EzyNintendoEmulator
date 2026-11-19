@@ -12,9 +12,10 @@
 namespace ezy::n64 {
 
 // How a block treats an instruction (vr4300_jit_decode.cpp):
-//   Native      translated to IR: the integer ALU (vr4300_jit_alu.cpp); the 64-bit ops
-//               only when allow_64bit (else InPlace: the interpreter raises RI)
-//   InPlace     Vr4300::execute_in_place, called from the block
+//   Native      translated to IR: the integer ALU (vr4300_jit_alu.cpp), the 64-bit ops
+//               only when allow_64bit (else InPlace: the interpreter raises RI); every
+//               branch but BC1* (vr4300_jit_branch.cpp)
+//   InPlace     Vr4300::execute_in_place, called from the block (BC1* included)
 //   Memory      a load or store: Vr4300::execute_memory_in_place, which exits before it
 //               unless it is a kernel-mode kseg0/kseg1 access inside direct RAM
 //   OutOfBlock  COP0: the block ends before it and Vr4300::step() runs it
@@ -22,6 +23,9 @@ enum class Kind : std::uint8_t { Native, InPlace, Memory, OutOfBlock };
 [[nodiscard]] Kind classify(std::uint32_t instr, bool allow_64bit);
 // J JAL JR JALR, B*, B*L, the REGIMM branches (and their -AL forms), BC1*.
 [[nodiscard]] bool is_branch(std::uint32_t instr);
+// The static cycles of an integer ALU instruction under this mode (1; MULT/MULTU 6;
+// DMULT/DMULTU 9), 0 if it is not one (vr4300_jit_alu.cpp). Native branches take 1.
+[[nodiscard]] std::uint32_t alu_cycles(std::uint32_t instr, bool allow_64bit);
 // The memory range a Memory instruction touches: `bytes` at its address, rounded down to
 // `bytes` for LWL/LWR/LDL/LDR/SWL/SWR/SDL/SDR. bytes == 0: not a Memory instruction.
 struct MemoryAccess {
@@ -43,7 +47,8 @@ struct GuestOffsets {
 // them in place of Vr4300::step(), with the same result instruction for instruction.
 // A block ends after a branch and its delay slot, before an OutOfBlock instruction, at
 // kMaxBlockInstructions, or at the end of its 4 KiB page or of direct RAM. A delay slot
-// always runs in place.
+// is native or in place like any other instruction, except after BC1* (in place itself),
+// whose slot stays in place too.
 class Vr4300Jit {
 public:
     // Registers itself as the bus's code watch (CpuBus::set_code_watch) until destroyed.

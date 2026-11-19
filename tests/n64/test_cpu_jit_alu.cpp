@@ -151,7 +151,7 @@ TEST_CASE("CPU JIT writes the pc state before helpers and on exits") {
         t.start(kBase);
         t.run_until_pc(kBase + 16);
         CHECK(t.same());
-        if (t.jit.available()) CHECK(t.jit.stats().native == 2);
+        if (t.jit.available()) CHECK(t.jit.stats().native == 4);  // the branch and its slot too
     }
     SUBCASE("native instructions, then an in-place DIV, then an MMIO load that exits before") {
         Twin t(TwinOptions{.mem = 0x200000, .direct = 0x100000});
@@ -169,7 +169,7 @@ TEST_CASE("CPU JIT writes the pc state before helpers and on exits") {
     }
 }
 
-TEST_CASE("CPU JIT keeps a branch's delay slot in place") {
+TEST_CASE("CPU JIT runs a branch and its delay slot natively") {
     Twin t;
     t.lockstep = true;
     t.program(kCode, {addiu(8, 0, 1), bne(8, 0, 2), addiu(9, 0, 2), addiu(10, 0, 3), addu(11, 8, 9), kStop});
@@ -179,8 +179,8 @@ TEST_CASE("CPU JIT keeps a branch's delay slot in place") {
     CHECK(t.jit_cpu.gpr(10) == 0);
     CHECK(t.jit_cpu.gpr(11) == 3);
     REQUIRE_NATIVE(t.jit);
-    CHECK(t.jit.stats().native == 2);    // 0x00 and 0x10
-    CHECK(t.jit.stats().in_place == 2);  // the branch and its slot
+    CHECK(t.jit.stats().native == 4);  // 0x00, the branch, its slot and 0x10
+    CHECK(t.jit.stats().in_place == 0);
 }
 
 TEST_CASE("CPU JIT keeps its blocks when only CU1 changes") {

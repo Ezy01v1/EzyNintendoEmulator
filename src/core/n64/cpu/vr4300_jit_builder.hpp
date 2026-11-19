@@ -18,10 +18,17 @@ enum ExitKind : std::uint32_t { kExitNormal, kExitBefore, kExitAfter };
 // The state native instructions leave is lazy:
 //  - registers (GPRs, HI, LO) stay in IR values; a write is stored back only before a
 //    helper call and on the exits taken while it is still pending;
-//  - native instructions do not write pc_/next_pc_/branch_taken_/in_delay_slot_; when one
-//    ran since the last write, the same places store what step() would have left before
-//    the next instruction: pc_ = its address, next_pc_ = pc_ + 4, both flags false.
-// After a helper call nothing is pending: the helper ran the interpreter on the real state.
+//  - native instructions do not write pc_/next_pc_/branch_taken_/in_delay_slot_; the
+//    same places store what step() would have left before the next instruction, which
+//    depends on where the block is (PcState):
+//      Sequential  pc_ = its address, next_pc_ = pc_ + 4, both flags false
+//      InSlot      after a native branch, before its delay slot: pc_ = the slot,
+//                  next_pc_ = N (the target if taken, else the slot + 4),
+//                  branch_taken_ = true, in_delay_slot_ = false
+//      AfterSlot   after a native slot: pc_ = N, next_pc_ = N + 4, branch_taken_ =
+//                  false, in_delay_slot_ = true (the slot was one)
+// After a helper call nothing is pending (Clean): the helper ran the interpreter on the
+// real state.
 class BlockBuilder {
 public:
     // `vaddr`: the kseg0 address of the block's first instruction.
@@ -41,10 +48,23 @@ public:
     void set_lo(jit::Value value) { set_reg(kLo, value); }
     jit::Value i64(std::uint64_t value) { return ir_.constant(jit::Type::I64, value); }
     jit::Value i32(std::uint32_t value) { return ir_.constant(jit::Type::I32, value); }
+    // The current instruction's (virtual, kseg0) address.
+    [[nodiscard]] std::uint64_t address() const { return vaddr_; }
+    // Vr4300::idle_candidate_ (I64), stored right away: it is not part of the lazy state.
+    jit::Value idle_candidate();
+    void set_idle_candidate(jit::Value value);
     // When cond (I32) is nonzero, leaves the block with the CPU exactly before the current
     // instruction, which is not retired: the interpreter's next step() runs it (and raises
     // its exception). Call it before the instruction writes anything.
     void exit_before_if(jit::Value cond);
+    // For a branch-likely: when not_taken (I32) is nonzero, leaves the block right after
+    // the current instruction, its delay slot nullified (a normal end: the next block
+    // starts at the slot + 4). Call it after the branch's writes (the link).
+    void skip_slot_if(jit::Value not_taken);
+    // Ends the current instruction, a native branch (1 static cycle); next (I64) is the
+    // next_pc_ it leaves, N above. The block's next instruction is its delay slot.
+    void end_branch(jit::Value next);
+    void end_branch(std::uint64_t next);
 
     // For compile().
     // Ends the current instruction, emitted natively, taking `cycles` static cycles.
@@ -60,18 +80,22 @@ public:
     void finish();
 
     [[nodiscard]] const std::vector<jit::BlockExit>& exits() const { return exits_; }
-    [[nodiscard]] std::uint32_t native_count() const { return native_; }
 
 private:
     static constexpr std::uint32_t kNone = ~0U;
     static constexpr int kHi = 32, kLo = 33, kRegs = 34;
+    enum class PcState : std::uint8_t { Clean, Sequential, InSlot, AfterSlot };
 
     jit::Value reg(int index);
     void set_reg(int index, jit::Value value);
     [[nodiscard]] std::uint32_t reg_offset(int index) const;
-    // Stores the pending registers and, if stale, the pc state for the current instruction
-    // (into the current region: the body, or an exit's).
+    // Stores the pending registers and the pending pc state (into the current region: the
+    // body, or an exit's).
     void write_back();
+    void store_registers();  // the pending registers only
+    // The pc state `state` at the current instruction (not Clean).
+    void store_pc_state(PcState state);
+    jit::Value next_value();  // N as an IR value
     jit::ExitId add_exit(std::uint32_t instructions, std::uint32_t cycles, std::uint32_t native, std::uint32_t kind);
 
     jit::IrBuilder& ir_;
@@ -80,15 +104,21 @@ private:
     bool allow_64bit_;
     std::array<std::uint32_t, kRegs> cached_{};  // IR value id per register, kNone if not loaded
     std::uint64_t dirty_ = 0;                     // registers written since their last store
-    bool pc_stale_ = false;                       // a native instruction ran since the last pc write
+    PcState pc_state_ = PcState::Clean;           // Clean: the CPU holds the pc state
+    // N (see PcState): an IR value, or a constant when next_is_imm_.
+    jit::Value next_{};
+    std::uint64_t next_imm_ = 0;
+    bool next_is_imm_ = false;
     std::uint32_t done_ = 0, cycles_ = 0, native_ = 0;  // before the current instruction
     std::vector<jit::BlockExit> exits_;
 };
 
-// Native integer ALU (vr4300_jit_alu.cpp). alu_cycles: the static cycles of `instr` if it
-// is one under this mode (1; MULT/MULTU 6; DMULT/DMULTU 9), else 0. emit_alu emits it into
-// the builder, or returns false (emitting nothing) when it is not one.
-[[nodiscard]] std::uint32_t alu_cycles(std::uint32_t instr, bool allow_64bit);
+// Native integer ALU (vr4300_jit_alu.cpp): emits `instr` into the builder, or returns
+// false (emitting nothing) when it is not one under the builder's mode (alu_cycles == 0).
 bool emit_alu(BlockBuilder& builder, std::uint32_t instr);
+// Native branches (vr4300_jit_branch.cpp): J JAL JR JALR, B* and B*L, the REGIMM
+// branches and their -AL forms (not BC1*). Emits `instr` and ends it (end_branch), or
+// returns false (emitting nothing) when it is not one.
+bool emit_branch(BlockBuilder& builder, std::uint32_t instr);
 
 }  // namespace ezy::n64
