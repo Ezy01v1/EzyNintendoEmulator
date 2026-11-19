@@ -8,6 +8,7 @@
 #include "jit/context.hpp"
 #include "n64/cpu/cpu_bus.hpp"
 #include "n64/cpu/vr4300.hpp"
+#include "n64/cpu/vr4300_decode.hpp"
 
 namespace ezy::n64 {
 
@@ -30,14 +31,6 @@ enum class Kind : std::uint8_t { Native, InPlace, Memory, OutOfBlock };
 // The static cycles of an integer ALU instruction under this mode (1; MULT/MULTU 6;
 // DMULT/DMULTU 9), 0 if it is not one (vr4300_jit_alu.cpp). Native branches take 1.
 [[nodiscard]] std::uint32_t alu_cycles(std::uint32_t instr, bool allow_64bit);
-// The memory range a Memory instruction touches: `bytes` at its address, rounded down to
-// `bytes` for LWL/LWR/LDL/LDR/SWL/SWR/SDL/SDR. bytes == 0: not a Memory instruction.
-struct MemoryAccess {
-    std::uint8_t bytes = 0;
-    bool aligned_down = false;
-    bool store = false;
-};
-[[nodiscard]] MemoryAccess memory_access(std::uint32_t instr);
 // Whether a load or store runs natively under this mode (vr4300_jit_memory.cpp).
 [[nodiscard]] bool is_native_memory(std::uint32_t instr, bool allow_64bit);
 

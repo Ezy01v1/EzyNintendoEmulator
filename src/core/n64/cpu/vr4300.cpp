@@ -3,7 +3,7 @@
 
 #include <cstdio>
 
-#include "n64/cpu/vr4300_jit.hpp"
+#include "n64/cpu/vr4300_decode.hpp"
 
 namespace ezy::n64 {
 
