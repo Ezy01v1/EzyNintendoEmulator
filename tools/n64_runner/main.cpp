@@ -347,7 +347,14 @@ int run(int raw_argc, char* raw_argv[]) {
         if (!other) return 1;
         other->bus().set_audio_hle(audio_hle);
         other->bus().set_gfx_hle(gfx_hle);
-        if (!apply_cpu_mode(*other, !cpu_jit, cpu_jit_check)) return 1;
+        // Cross the CPU mode when the JIT exists; an explicit --cpu-jit without it already failed above.
+        const bool cross_cpu = cpu_jit || other->set_cpu_mode(ezy::n64::CpuMode::Jit);
+        if (cross_cpu) {
+            if (!apply_cpu_mode(*other, !cpu_jit, cpu_jit_check)) return 1;
+        } else {
+            other->set_cpu_mode(ezy::n64::CpuMode::Interpreter);
+            std::cout << "CPU mode not crossed: this build or host has no CPU JIT\n";
+        }
         if (!other->load_state(state) || other->save_state() != state) return 1;
         for (int i = 0; i < 120; ++i) { n64->run_frame(); other->run_frame(); }
         if (n64->save_state() != other->save_state() || n64->image().argb != other->image().argb) {
