@@ -173,7 +173,6 @@ void IrBuilder::begin_exit(ExitId exit) {
 
 void IrBuilder::end_exit() {
     if (region_ == kBody) fail("jit IR: end_exit without begin_exit");
-    exits_[region_].closed = true;
     region_ = kBody;
 }
 

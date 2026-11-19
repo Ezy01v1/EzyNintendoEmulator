@@ -71,7 +71,10 @@ public:
     Value carry_add(Value a, Value b);                      // I32 0/1, unsigned carry out
     Value load_ram(Type type, Value paddr, unsigned bytes); // big-endian, zero-extended; paddr is I32, checked by the front-end
     void store_ram(Value paddr, Value value, unsigned bytes);  // the low `bytes` of value, big-endian
+    // paddr must be below Context::ram_size and the access must not cross a 4 KiB page;
+    // the front-end checks this (like load_ram).
     void barrier(Value paddr, unsigned bytes, bool write);  // inline fast check, ctx->barrier_wait on the slow path
+    // Same precondition as barrier(): paddr below Context::ram_size, no 4 KiB page crossing.
     Value note_ram_write(Value paddr, unsigned bytes);      // I32: 1 if compiled code changed
     Value call(Helper helper, Value a, Value b, Value c);   // I64; use constant(I64, 0) for unused arguments
     ExitId add_exit();                                      // ids 0..n-1 in order; the block returns the id
@@ -89,7 +92,7 @@ private:
         std::uint32_t position;  // index in its region's op list
     };
     struct ExitInfo {
-        bool opened = false, closed = false;
+        bool opened = false;
         std::uint32_t needs = 0;               // jumps must come at or after this body index
         std::uint32_t first_jump = Inst::kNone;
     };
