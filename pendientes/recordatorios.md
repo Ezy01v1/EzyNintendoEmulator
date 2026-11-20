@@ -307,6 +307,12 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
     - Menores pendientes de la revisión: ver la lista en el mensaje final de la sesión 2026-11-19
       (SC sin LLbit, prueba RDP solo de fill, IR muerta tras likely nunca tomado, doble salida lenta).
     - Archivo suelto `E:\scratch_t10.txt` (fuera del repo) creado por un subagente: borrarlo a mano.
+  - [x] Imagen de MK64 "cortada" (letreros tapados por la colina, valla sobre el letrero): el Z por píxel
+    del RDP usaba z >> 10 en vez de z >> 13 y saturaba todo lo lejano; DZ ahora redondea hacia arriba.
+    Comparado contra ares v148 (paraLLEl-RDP) en el mismo instante de la demo. Commit 73bc414.
+  - [ ] Siguiente en lo visual: filtro del VI (antialias + suavizado, lo que hace que el N64 real se vea
+    suave; ezyemu muestra el framebuffer crudo) y la fila de basura en la última línea de la imagen.
+    Referencia: ares en `E:\ProyectosProgramDisc4\ezynintendoeferenciares-v148` (fuera del repo).
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -838,3 +844,9 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   intérprete (estados MK64 1900 en 4 combinaciones, continuación cruzada, imágenes, Spider-Man,
   systemtest 2984/3721, PeterLemon 91/91 con `--cpu-jit-check` en CTest Release). Medición: HLE
   55,74 → 62,85 (+12,8 %, 5/5), LLE 43,64 → 62,77 (+43,8 %, 3/3). Criterio de la Fase 4 cumplido.
+- 2026-11-19 (2) — El usuario jugó MK64 con `--gfx-hle --cpu-jit`: fluido, un tirón. Defectos visuales: no eran
+  del HLE ni del JIT (mismo cuadro idéntico con LLE). Con ares v148 como referencia y una sonda de un píxel:
+  todo lo lejano llegaba con Z = 0x3FFFF. Causa: escala del Z por píxel (faltaba >> 3 de `z_correct` de
+  angrylion, más el ajuste por la primera submuestra cubierta y el recorte de bits 17/18). También DZ de
+  triángulos como `normalize_dzpix` (parte entera, redondeo hacia arriba). Tests de Z pasados a z << 13.
+  11/11 suites, 183 pruebas Release (PeterLemon + systemtest, con y sin JIT). Runner: `--load-state`.
