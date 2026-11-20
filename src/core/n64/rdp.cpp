@@ -108,11 +108,41 @@ unsigned clamp_shade(std::int64_t start, const TextureGradient& gradient, int pi
     return (value & 0x80) ? 0 : 255;
 }
 
-// Z is 15.17 fixed point; the depth unit works on 18 bits and saturates outside them.
-std::uint32_t clamp_depth(std::int64_t z) {
-    const auto value = static_cast<std::uint32_t>(z >> 10) & 0x3FFFFF;
-    if (value & 0x200000) return 0;
-    return std::min(value, 0x3FFFFU);
+// The pixel's Z for the depth unit (angrylion's z_correct). The accumulator is s15.16; the
+// depth unit keeps 15.3 bits. A partly covered pixel moves Z from the pixel corner to its
+// first covered subsample (offset_x, offset_y in quarter pixels, using the X and Y slopes
+// >> 10). Then bit 18 saturates to the far plane and bits 17 and 18 together (negative)
+// clamp to zero.
+std::uint32_t correct_depth(std::int64_t z, unsigned coverage, int offset_x, int offset_y, std::int32_t dzdx,
+                            std::int32_t dzdy) {
+    auto value = static_cast<std::int32_t>((z >> 10) & 0x3FFFFF);
+    if (coverage == 8) {
+        value >>= 3;
+    } else {
+        value = ((value << 2) + offset_x * (dzdx >> 10) + offset_y * (dzdy >> 10)) >> 5;
+    }
+    switch ((value & 0x60000) >> 17) {
+        case 2: return 0x3FFFF;
+        case 3: return 0;
+        default: return static_cast<std::uint32_t>(value) & 0x3FFFF;
+    }
+}
+
+// The per-pixel DZ of a triangle from its Z slopes (angrylion's spans_dzpix): the integer
+// parts' magnitudes, summed, then rounded up to the next power of two (normalize_dzpix).
+unsigned triangle_dz(std::int32_t dzdx, std::int32_t dzdy) {
+    const auto magnitude = [](std::int32_t slope) {
+        const auto integer = static_cast<unsigned>(slope >> 16) & 0xFFFF;
+        return (integer & 0x8000) ? (~integer & 0x7FFF) : integer;
+    };
+    const unsigned sum = (magnitude(dzdx) + magnitude(dzdy)) & 0xFFFF;
+    if (sum & 0xC000) return 0x8000;
+    if (sum == 0) return 1;
+    if (sum == 1) return 3;
+    for (unsigned bit = 0x2000; bit != 0; bit >>= 1) {
+        if (sum & bit) return bit << 1;
+    }
+    return 0;
 }
 
 // 18-bit Z is stored as a 3-bit count of leading ones and an 11-bit mantissa.
@@ -375,12 +405,9 @@ void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
         };
         z = {word(depth_at, 32), word(depth_at, 0), word(depth_at + 1, 32), word(depth_at + 1, 0)};
     }
-    // Pixel DZ is the sum of the X and Y slopes (or the primitive's DZ), rounded to a power of two.
-    const auto magnitude = [](std::int32_t slope) { return static_cast<std::int64_t>(slope < 0 ? ~slope : slope); };
-    const unsigned pixel_dz = highest_power_of_two(
-        (solid_.modes & (1U << 2)) ? prim_depth_ & 0xFFFF
-                                   : static_cast<unsigned>(std::min<std::int64_t>(
-                                         (magnitude(z.dx) + magnitude(z.dy)) >> 16, 0x7FFF)));
+    // Pixel DZ comes from the Z slopes, or is the primitive's DZ as given.
+    const unsigned pixel_dz = (solid_.modes & (1U << 2)) ? highest_power_of_two(prim_depth_ & 0xFFFF)
+                                                         : triangle_dz(z.dx, z.dy);
     const bool late = (major.step < 0) == major_left;
     for (int y = top >> 2; 4 * y < bottom; ++y) {
         if (!field_matches(static_cast<unsigned>(y))) continue;
@@ -435,8 +462,27 @@ void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
             }
             std::uint32_t pixel_z = 0;
             if (coverage != 0 && use_depth) {
-                pixel_z = (solid_.modes & (1U << 2)) ? ((prim_depth_ >> 16) & 0x7FFF) << 3
-                                                     : clamp_depth(start_z + std::int64_t{z.dx} * (x - texture_x));
+                if (solid_.modes & (1U << 2)) {
+                    pixel_z = ((prim_depth_ >> 16) & 0x7FFF) << 3;
+                } else {
+                    // The first covered subsample: topmost row, then leftmost of its two
+                    // samples (even rows sit at quarter-pixel columns 0 and 2, odd rows at 1 and 3).
+                    int offset_x = 0, offset_y = 0;
+                    for (unsigned row = 0; row < samples.size(); ++row) {
+                        const int odd = static_cast<int>(row & 1);
+                        const int sample = x * 8 + odd * 2;
+                        if (samples[row].covers(sample)) {
+                            offset_y = static_cast<int>(row), offset_x = odd;
+                            break;
+                        }
+                        if (samples[row].covers(sample + 4)) {
+                            offset_y = static_cast<int>(row), offset_x = 2 + odd;
+                            break;
+                        }
+                    }
+                    pixel_z = correct_depth(start_z + std::int64_t{z.dx} * (x - texture_x), coverage, offset_x,
+                                            offset_y, z.dx, z.dy);
+                }
                 if (!depth_test(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, pixel_dz, coverage, rdram)) {
                     continue;
                 }

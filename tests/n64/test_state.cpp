@@ -1109,7 +1109,7 @@ TEST_CASE("RDP depth triangles hide farther pixels and store compressed Z") {
     constexpr int pixel = 65536;
     for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);  // farthest depth
     // Z-buffered triangle (0x09) covering x = left..4 on rows 0 and 1, at a constant depth.
-    // Z has 10 fractional bits below the 18 the depth unit uses.
+    // Z is s15.16; the depth unit keeps 15.3 bits (z >> 13).
     const auto triangle = [](unsigned left, std::uint32_t z) {
         return std::array{
             rdp_triangle_header(true, 0, 0, 8) | (0x01ULL << 56),
@@ -1132,9 +1132,9 @@ TEST_CASE("RDP depth triangles hide farther pixels and store compressed Z") {
         commands.push_back(0x3A00000000000000ULL | color);
         for (const auto word : triangle(left, z)) commands.push_back(word);
     };
-    add(0, 0x4000U << 10, 0xFF0000FF);  // red, middle depth
-    add(2, 0x8000U << 10, 0x00FF00FF);  // green, behind red
-    add(3, 0x2000U << 10, 0x0000FFFF);  // blue, in front of red
+    add(0, 0x4000U << 13, 0xFF0000FF);  // red, middle depth
+    add(2, 0x8000U << 13, 0x00FF00FF);  // green, behind red
+    add(3, 0x2000U << 13, 0x0000FFFF);  // blue, in front of red
     commands.push_back(kSyncFull);
     std::uint32_t end = 0x1000;
     for (const auto command : commands) bus.write64(end, command), end += 8;
@@ -1152,6 +1152,48 @@ TEST_CASE("RDP depth triangles hide farther pixels and store compressed Z") {
         }
     }
     CHECK(bus.read32(0x6010) == 0xFFFCFFFC);  // row 2 untouched
+}
+
+TEST_CASE("RDP keeps far depths apart instead of saturating them") {
+    // Z coefficients are s15.16 and the depth unit keeps 15.3 (z >> 13). MK64's distant
+    // scenery sits near the far plane: a sign at Z 0x7000 must still hide a hill at 0x7800
+    // drawn after it (it saturated to 0x3FFFF, which always passes).
+    const auto n64 = N64::create(counting_rom("RDP FAR Z"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);
+    std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        0x3E00000000006000ULL,
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        0x2F0000C000000230ULL,   // opaque Z, compare and update
+        0x3C00001F000000C0ULL,
+    };
+    const auto add = [&](std::uint32_t z_integer, std::uint32_t color) {
+        commands.push_back(0x3A00000000000000ULL | color);
+        for (const auto word : {rdp_triangle_header(true, 0, 0, 4) | (0x01ULL << 56), rdp_edge(4 * pixel, 0),
+                                rdp_edge(0, 0), rdp_edge(0, 0), std::uint64_t{z_integer << 16} << 32,
+                                std::uint64_t{0}}) {
+            commands.push_back(word);
+        }
+    };
+    add(0x7000, 0xFF0000FF);  // red sign, nearer
+    add(0x7800, 0x00FF00FF);  // green hill, farther, drawn after
+    commands.push_back(kSyncFull);
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 40; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read32(0x4000 + 4 * x) == 0xFF0000E0U);
+        // 0x7000 << 3 = 0x38000: exponent 3 (three leading ones), mantissa 0 -> 0x1800 << 2.
+        // A flat triangle's DZ sum is 0, which the RDP normalizes to 1 (code 0).
+        CHECK(bus.read16(0x6000 + 2 * x) == 0x6000);
+    }
 }
 
 TEST_CASE("RDP decal Z mode only draws pixels coplanar with the depth buffer") {
@@ -1175,11 +1217,11 @@ TEST_CASE("RDP decal Z mode only draws pixels coplanar with the depth buffer") {
             commands.push_back(word);
         }
     };
-    add(0, 0x4000U << 10, 0xFF0000FF);           // red base surface
+    add(0, 0x4000U << 13, 0xFF0000FF);           // red base surface
     commands.push_back(0x2F0000C000000E10ULL);   // decal Z, compare only
     // Flat memory DZ at a low exponent widens to 16, so the coplanar range is 16 << 3 = 128.
-    add(2, (0x4000U - 0x40) << 10, 0x00FF00FF);  // green decal, within the DZ range
-    add(3, (0x4000U - 0x100) << 10, 0x0000FFFF); // blue is nearer than the range, so not coplanar
+    add(2, (0x4000U - 0x40) << 13, 0x00FF00FF);  // green decal, within the DZ range
+    add(3, (0x4000U - 0x100) << 13, 0x0000FFFF); // blue is nearer than the range, so not coplanar
     commands.push_back(kSyncFull);
     std::uint32_t end = 0x1000;
     for (const auto command : commands) bus.write64(end, command), end += 8;
@@ -1200,7 +1242,7 @@ TEST_CASE("RDP depth writes the DZ code from the Z slopes and uses it for non-ov
     auto& bus = n64->bus();
     constexpr int pixel = 65536;
     for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);
-    // Constant Z with DzDy = 0x0100'0000: DZ = 0x100, code 8, stored top bits 2.
+    // Constant Z with DzDy = 0x0100'0000: DZ 0x100 rounds up to 0x200, code 9, stored top bits 2.
     const std::vector<std::uint64_t> commands{
         0x3F18000300004000ULL,
         0x3E00000000006000ULL,
@@ -1209,7 +1251,7 @@ TEST_CASE("RDP depth writes the DZ code from the Z slopes and uses it for non-ov
         0x3C00001F000000C0ULL,
         0x3A000000FF0000FFULL,
         rdp_triangle_header(true, 0, 0, 8) | (0x01ULL << 56), rdp_edge(4 * pixel, 0), rdp_edge(0, 0),
-        rdp_edge(0, 0), std::uint64_t{0x4000U << 10} << 32, 0x01000000ULL,
+        rdp_edge(0, 0), std::uint64_t{0x4000U << 13} << 32, 0x01000000ULL,
         kSyncFull,
     };
     std::uint32_t end = 0x1000;
@@ -1244,9 +1286,9 @@ std::array<std::uint32_t, 4> draw_depth_pair(N64& n64, std::uint32_t base_dzdy, 
             commands.push_back(word);
         }
     };
-    add(0x4000U << 10, base_dzdy, 0xFF0000FF);  // red base surface
+    add(0x4000U << 13, base_dzdy, 0xFF0000FF);  // red base surface
     commands.push_back(second_modes);
-    add(second_z << 10, 0, 0x00FF00FF);         // green
+    add(second_z << 13, 0, 0x00FF00FF);         // green
     commands.push_back(kSyncFull);
     std::uint32_t end = 0x1000;
     for (const auto command : commands) bus.write64(end, command), end += 8;
@@ -1264,8 +1306,8 @@ std::array<std::uint32_t, 4> draw_depth_pair(N64& n64, std::uint32_t base_dzdy, 
 TEST_CASE("RDP keeps the low DZ bits in RDRAM hidden bits") {
     const auto n64 = N64::create(counting_rom("RDP HIDDEN DZ"));
     REQUIRE(n64);
-    // DzDy 0x700 rounds to DZ 0x400, code 10: top bits 2 in RDRAM, low bits 2 hidden.
-    // Memory DZ 0x400 widens to 0x800, so the decal range is 0x800 << 3 = 0x4000; losing the
+    // DzDy 0x700 rounds up to DZ 0x800, code 11: top bits 2 in RDRAM, low bits 3 hidden.
+    // Memory DZ 0x800 widens to 0x1000, so the decal range is 0x1000 << 3 = 0x8000; losing the
     // hidden bits would leave 0x100 -> 0x200 and a range of only 0x1000.
     const auto row = draw_depth_pair(*n64, 0x07000000U, 0x2F0000C000000E10ULL, 0x4000 - 0x2000);
     for (unsigned x = 0; x < 4; ++x) {
@@ -1284,9 +1326,10 @@ TEST_CASE("RDP keeps the low DZ bits in RDRAM hidden bits") {
 TEST_CASE("RDP interpenetrating Z scales coverage where surfaces intersect") {
     const auto n64 = N64::create(counting_rom("RDP INTERPENETRATE"));
     REQUIRE(n64);
-    // Base DZ 0x100 widens to 0x200 (shift 9). The green pixel is 0x400 in front, inside the
-    // range: coverage becomes ((0x4000 >> 9) - (0x3C00 >> 9)) * 8 >> 3 = 2, stored as 1 by clamp.
-    const auto row = draw_depth_pair(*n64, 0x01000000U, 0x2F0000C000000430ULL, 0x4000 - 0x400);
+    // Base DZ 0x100 rounds up to 0x200 and widens to 0x400 (shift 10). The green pixel is 0x800
+    // in front, inside the range: coverage becomes ((0x4000 >> 10) - (0x3800 >> 10)) * 8 >> 3 = 2,
+    // stored as 1 by clamp.
+    const auto row = draw_depth_pair(*n64, 0x01000000U, 0x2F0000C000000430ULL, 0x4000 - 0x800);
     for (unsigned x = 0; x < 4; ++x) {
         CAPTURE(x);
         CHECK(row[x] == 0x00FF0020U);
@@ -1308,7 +1351,7 @@ TEST_CASE("RDP alpha compare keeps the depth buffer for dropped pixels") {
         0x3C00001F000000C0ULL,   // alpha D = primitive alpha
         0x3A000000FF000040ULL,   // primitive alpha 0x40 is below the threshold
         rdp_triangle_header(true, 0, 0, 8) | (0x01ULL << 56), rdp_edge(4 * pixel, 0), rdp_edge(0, 0),
-        rdp_edge(0, 0), std::uint64_t{0x4000U << 10} << 32, 0,
+        rdp_edge(0, 0), std::uint64_t{0x4000U << 13} << 32, 0,
         kSyncFull,
     };
     std::uint32_t end = 0x1000;
