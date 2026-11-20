@@ -93,7 +93,11 @@ códigos DZ del Z-buffer. Sin los bits bajos el antialias del VI casi no actúa 
 
 Decisión del agente: el RDP escribe también los dos bits bajos de la cobertura en los bits
 ocultos al escribir color de 16 bits, y `memory_coverage` los lee de ahí, como el hardware. Los
-rellenos (fill) siguen escribiendo los ocultos como hoy. El formato de estados no cambia (la
+rellenos (fill) copian el bit bajo de cada halfword a sus bits ocultos (3 o 0), como el
+hardware; hoy los borran, lo que dejaría el fondo con cobertura parcial y el VI lo suavizaría.
+En el antialias, `penmin`/`penmax` son el segundo menor y el segundo mayor del conjunto
+(decisión del agente: la implementación de angrylion tiene una asimetría que parece un efecto
+de su optimización; se valida contra ares). El formato de estados no cambia (la
 tabla ya se guarda desde la versión 11; solo cambia su contenido). Es la primera tarea, con
 sus propias pruebas, y debe mantener las 183 pruebas Release (PeterLemon compara contra
 hardware real).
