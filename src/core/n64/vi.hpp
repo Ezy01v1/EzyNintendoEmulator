@@ -7,6 +7,7 @@
 
 #include "n64/cartridge.hpp"
 #include "n64/mi.hpp"
+#include "n64/rdp_hidden_bits.hpp"
 #include "n64/scheduler.hpp"
 
 namespace ezy::n64 {
@@ -39,6 +40,12 @@ public:
     // The framebuffer VI_ORIGIN points at, at its own resolution (the visible screen area
     // times the VI scale factors), as 0xAARRGGBB. Empty when the VI is off (type 0 or 1).
     [[nodiscard]] Image image(std::span<const std::uint8_t> rdram) const;
+    // What the VI sends to the TV: the visible window (H_VIDEO/V_VIDEO) of the framebuffer,
+    // resampled (X_SCALE/Y_SCALE) and filtered (antialias, dither filter, divot, gamma) as
+    // VI_CTRL says, on a 640x480 (NTSC, MPAL) or 640x576 (PAL) screen; black outside the
+    // window and when the VI is off. Interlaced fields go to alternate rows, keeping the
+    // other field's rows from the previous call. hidden: the RDRAM hidden bits (nullptr: 0).
+    [[nodiscard]] Image output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden) const;
 
     template <class Ar>
     void serialize(Ar& ar) {
@@ -56,6 +63,10 @@ private:
     double fraction_ = 0;  // fractional cycles carried to the next line
     Region region_ = Region::Ntsc;
     std::uint8_t pad2_[7] = {};
+    // The previous interlaced output (not saved in states): the other field's rows. Empty
+    // when the last output was progressive or of another size or pixel type.
+    mutable std::vector<std::uint32_t> weave_;
+    mutable std::uint32_t weave_key_ = 0;
 };
 
 }  // namespace ezy::n64

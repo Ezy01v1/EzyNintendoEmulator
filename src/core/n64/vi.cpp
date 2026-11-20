@@ -1,6 +1,10 @@
 #include "n64/vi.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <utility>
+
+#include "n64/vi_filter.hpp"
 
 namespace ezy::n64 {
 
@@ -108,6 +112,175 @@ Vi::Image Vi::image(std::span<const std::uint8_t> rdram) const {
             }
             img.argb[static_cast<std::size_t>(y) * static_cast<std::size_t>(img.width) + static_cast<std::size_t>(x)] = argb;
         }
+    }
+    return img;
+}
+
+namespace {
+
+constexpr std::uint32_t kBlack = 0xFF000000;
+constexpr int kScreenWidth = 640;
+constexpr std::uint32_t kNoiseSeed = 0x2545F491;  // any non-zero value: the noise restarts each output
+
+std::uint32_t to_argb(vi::Color c) {
+    return kBlack | (std::uint32_t{c.r} << 16) | (std::uint32_t{c.g} << 8) | c.b;
+}
+
+std::uint32_t next_noise(std::uint32_t& state) {  // xorshift32
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+// The framebuffer rows the resampler reads, filtered (antialias / dither filter) and, with
+// divot, divoted, for the columns [first, first + size). Two slots: the current row and the next.
+class RowCache {
+public:
+    RowCache(const vi::Framebuffer& fb, int first, int size, bool dither_filter, bool divot)
+        : fb_(fb), first_(first), size_(size), dither_filter_(dither_filter), divot_(divot) {
+        for (auto& slot : slots_) slot.colors.resize(static_cast<std::size_t>(size));
+        if (divot) filtered_.resize(static_cast<std::size_t>(size) + 2);
+    }
+
+    // Row `row`, keeping the slot that holds row `keep` if there is one.
+    const vi::Color* get(int row, int keep) {
+        for (auto& slot : slots_)
+            if (slot.valid && slot.row == row) return slot.colors.data();
+        Slot& slot = slots_[0].valid && slots_[0].row == keep ? slots_[1] : slots_[0];
+        fill(slot, row);
+        return slot.colors.data();
+    }
+
+private:
+    struct Slot {
+        std::vector<vi::Color> colors;
+        int row = 0;
+        bool valid = false;
+    };
+
+    void fill(Slot& slot, int row) {
+        slot.row = row;
+        slot.valid = true;
+        if (!divot_) {
+            for (int i = 0; i < size_; ++i)
+                slot.colors[static_cast<std::size_t>(i)] = vi::fetch_filtered(fb_, first_ + i, row, dither_filter_);
+            return;
+        }
+        // Divot looks at the filtered neighbours on the left and right: one more column each side.
+        for (int i = 0; i < size_ + 2; ++i)
+            filtered_[static_cast<std::size_t>(i)] = vi::fetch_filtered(fb_, first_ - 1 + i, row, dither_filter_);
+        for (std::size_t i = 0; i < static_cast<std::size_t>(size_); ++i)
+            slot.colors[i] = vi::divot(filtered_[i + 1], filtered_[i], filtered_[i + 2]);
+    }
+
+    const vi::Framebuffer& fb_;
+    int first_, size_;
+    bool dither_filter_, divot_;
+    std::array<Slot, 2> slots_;
+    std::vector<vi::Color> filtered_;
+};
+
+}  // namespace
+
+Vi::Image Vi::output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden) const {
+    const bool pal = region_ == Region::Pal;
+    Image img;
+    img.width = kScreenWidth;
+    img.height = pal ? 576 : 480;
+    const std::size_t size = static_cast<std::size_t>(img.width) * static_cast<std::size_t>(img.height);
+    const int field_lines = img.height / 2;
+
+    const std::uint32_t ctrl = regs_[kCtrl];
+    const std::uint32_t type = ctrl & 3;
+    const bool interlaced = (ctrl & (1U << 6)) != 0;
+    const int h_start = static_cast<int>((regs_[kHVideo] >> 16) & 0x3FF), h_end = static_cast<int>(regs_[kHVideo] & 0x3FF);
+    const int v_start = static_cast<int>((regs_[kVVideo] >> 16) & 0x3FF), v_end = static_cast<int>(regs_[kVVideo] & 0x3FF);
+    int hres = h_end - h_start;
+    int vres = v_end > v_start ? (v_end - v_start) >> 1 : 0;
+    int column = h_start - (pal ? 128 : 108);
+    int line = (v_start - (pal ? 44 : 34)) >> 1;  // floor, also for a window above the first line
+    const std::uint32_t x_add = regs_[kXScale] & 0xFFF, y_add = regs_[kYScale] & 0xFFF;
+    std::uint32_t x_start = (regs_[kXScale] >> 16) & 0xFFF, y_start = (regs_[kYScale] >> 16) & 0xFFF;
+    if (column < 0) {
+        x_start += x_add * static_cast<std::uint32_t>(-column);
+        hres += column;
+        column = 0;
+    }
+    if (line < 0) {
+        y_start += y_add * static_cast<std::uint32_t>(-line);
+        vres += line;
+        line = 0;
+    }
+    hres = std::min(hres, kScreenWidth - column);
+    vres = std::min(vres, field_lines - line);
+
+    if (type < 2 || hres <= 0 || vres <= 0) {
+        weave_.clear();
+        weave_key_ = 0;
+        img.argb.assign(size, kBlack);
+        return img;
+    }
+
+    // Interlaced: start from the previous field's output if it had the same size and pixel type.
+    const int field = static_cast<int>(v_current_ & 1);
+    const std::uint32_t key = 1U | (type << 1) | (static_cast<std::uint32_t>(img.height) << 3);
+    if (interlaced && weave_key_ == key && weave_.size() == size) {
+        img.argb = std::move(weave_);
+        for (int y = 0; y < field_lines; ++y) {
+            auto* row = img.argb.data() + static_cast<std::size_t>(2 * y + field) * kScreenWidth;
+            std::fill(row, row + kScreenWidth, kBlack);
+        }
+    } else {
+        img.argb.assign(size, kBlack);
+    }
+
+    const std::uint32_t aa_mode = (ctrl >> 8) & 3;
+    vi::Framebuffer fb;
+    fb.rdram = rdram;
+    fb.hidden = hidden;
+    fb.origin = regs_[kOrigin] & 0xFFFFFF;
+    fb.width = regs_[kWidth] & 0xFFF;
+    fb.rgba32 = type == 3;
+    fb.use_coverage = aa_mode <= 1;
+    const bool resample = aa_mode != 3;
+    const bool gamma = (ctrl & (1U << 3)) != 0, gamma_dither = (ctrl & (1U << 2)) != 0;
+
+    // Columns read: from x_start's to the last pixel's, plus the one it interpolates with.
+    const auto first_col = static_cast<int>(x_start >> 10);
+    const auto last_col = static_cast<int>((x_start + static_cast<std::uint32_t>(hres - 1) * x_add) >> 10) + 1;
+    RowCache rows(fb, first_col, last_col - first_col + 1, (ctrl & (1U << 16)) != 0, (ctrl & (1U << 4)) != 0);
+    std::uint32_t noise = kNoiseSeed;
+
+    for (int y = 0; y < vres; ++y) {
+        const std::uint32_t curry = y_start + static_cast<std::uint32_t>(y) * y_add;
+        const auto fb_row = static_cast<int>(curry >> 10);
+        const unsigned yfrac = (curry >> 5) & 31;
+        const vi::Color* top = rows.get(fb_row, fb_row + 1);
+        const vi::Color* bottom = resample && yfrac != 0 ? rows.get(fb_row + 1, fb_row) : top;
+        const int screen_line = line + y;
+        auto* out = img.argb.data() + static_cast<std::size_t>(2 * screen_line + (interlaced ? field : 0)) * kScreenWidth + column;
+        for (int x = 0; x < hres; ++x) {
+            const std::uint32_t xoffs = x_start + static_cast<std::uint32_t>(x) * x_add;
+            const auto i = static_cast<std::size_t>(static_cast<int>(xoffs >> 10) - first_col);
+            const unsigned xfrac = (xoffs >> 5) & 31;
+            vi::Color c = top[i];
+            if (resample && (xfrac != 0 || yfrac != 0)) {
+                const vi::Color left = vi::lerp(top[i], bottom[i], yfrac);
+                const vi::Color right = vi::lerp(top[i + 1], bottom[i + 1], yfrac);
+                c = vi::lerp(left, right, xfrac);
+            }
+            out[x] = to_argb(vi::gamma(c, gamma, gamma_dither, next_noise(noise)));
+        }
+        if (!interlaced) std::copy(out, out + hres, out + kScreenWidth);
+    }
+
+    if (interlaced) {
+        weave_ = img.argb;
+        weave_key_ = key;
+    } else {
+        weave_.clear();
+        weave_key_ = 0;
     }
     return img;
 }

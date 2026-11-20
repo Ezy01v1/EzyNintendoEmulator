@@ -67,6 +67,7 @@ public:
     [[nodiscard]] const Cartridge& cartridge() const { return cart_; }
     [[nodiscard]] std::uint64_t cycles() const { return scheduler_.now(); }
     [[nodiscard]] Vi::Image image() const { return bus_.image(); }
+    [[nodiscard]] Vi::Image output() const { return bus_.output(); }
 
     // Save states: the whole machine as bytes. load_state() refuses a state of another
     // game or format version and, if the state turns out to be truncated, leaves the

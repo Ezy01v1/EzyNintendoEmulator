@@ -1,6 +1,7 @@
 #include "n64/vi_filter.hpp"
 
 #include <algorithm>
+#include <array>
 
 namespace ezy::n64::vi {
 namespace {
@@ -9,11 +10,16 @@ constexpr unsigned kChannels = 3;
 std::uint8_t& channel(Color& c, unsigned i) { return i == 0 ? c.r : i == 1 ? c.g : c.b; }
 std::uint8_t channel(const Color& c, unsigned i) { return i == 0 ? c.r : i == 1 ? c.g : c.b; }
 
-unsigned isqrt(unsigned value) {
+// 2 * isqrt(i) for every gamma input (an 8-bit channel << 6 plus 6 dither bits): 0..254.
+constexpr std::array<std::uint8_t, 16384> kGammaTable = [] {
+    std::array<std::uint8_t, 16384> table{};
     unsigned root = 0;
-    while ((root + 1) * (root + 1) <= value) ++root;
-    return root;
-}
+    for (unsigned i = 0; i < table.size(); ++i) {
+        while ((root + 1) * (root + 1) <= i) ++root;
+        table[i] = static_cast<std::uint8_t>(2 * root);
+    }
+    return table;
+}();
 
 std::uint8_t median(std::uint8_t a, std::uint8_t b, std::uint8_t c) {
     return std::max(std::min(a, b), std::min(std::max(a, b), c));
@@ -118,7 +124,7 @@ Color gamma(Color c, bool gamma, bool gamma_dither, std::uint32_t noise) {
         const unsigned v = channel(c, i);
         unsigned result;
         if (!gamma) result = v == 255 ? v : v + ((noise >> i) & 1u);
-        else result = 2 * isqrt((v << 6) | (gamma_dither ? dither[i] : 0u));
+        else result = kGammaTable[(v << 6) | (gamma_dither ? dither[i] : 0u)];
         channel(out, i) = static_cast<std::uint8_t>(result & 0xFF);
     }
     return out;
