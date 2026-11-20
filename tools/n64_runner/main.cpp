@@ -189,6 +189,7 @@ int run(int raw_argc, char* raw_argv[]) {
     int time_from = 0;
     const char* profile_path = nullptr;
     const char* final_state_path = nullptr;
+    const char* load_state_path = nullptr;
     const char* trace_path = nullptr;
     int trace_from = 0;
     bool audio_hle = false, audio_hle_check = false, gfx_hle = false, cpu_jit = false, cpu_jit_check = false;
@@ -212,6 +213,7 @@ int run(int raw_argc, char* raw_argv[]) {
         }
         else if (std::strcmp(raw_argv[i], "--profile") == 0 && i + 1 < raw_argc) profile_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--dump-final-state") == 0 && i + 1 < raw_argc) final_state_path = raw_argv[++i];
+        else if (std::strcmp(raw_argv[i], "--load-state") == 0 && i + 1 < raw_argc) load_state_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--rdp-trace") == 0 && i + 1 < raw_argc) trace_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--trace-from") == 0 && i + 1 < raw_argc) {
             const std::string value = raw_argv[++i];
@@ -233,7 +235,8 @@ int run(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --benchmark <out.bmp> <end> --time-from <first>\n"
                      "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>\n"
                      "Screenshot options: --rdp-trace <out.bin> [--trace-from <field>]\n"
-                     "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter,\n"
+                     "Options: --load-state <file> (start from a --dump-state file of the same ROM),\n"
+                     "         --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter,\n"
                      "         --audio-hle, --audio-hle-check (run audio tasks on the RSP and compare),\n"
                      "         --gfx-hle (F3DEX/F3DLX 0.95 graphics tasks in C++, not bit-exact),\n"
                      "         --cpu-jit (the CPU through the JIT), --cpu-jit-check (--cpu-jit, and compare\n"
@@ -250,6 +253,10 @@ int run(int raw_argc, char* raw_argv[]) {
     n64->bus().set_audio_hle_check(audio_hle_check);
     n64->bus().set_gfx_hle(gfx_hle);
     if (!apply_cpu_mode(*n64, cpu_jit, cpu_jit_check)) return 2;
+    if (load_state_path) {
+        const auto state = read_file(load_state_path);
+        if (!n64->load_state(state)) { std::cerr << "Could not load state " << load_state_path << '\n'; return 2; }
+    }
     std::cout << "Title: " << n64->cartridge().title() << '\n';
     std::cout << "RDP: " << (n64->bus().rdp_threaded() ? "threaded" : "synchronous") << '\n';
     std::cout << "RSP: " << (n64->bus().rsp().jit_active() ? "JIT available" : "interpreter") << '\n';
