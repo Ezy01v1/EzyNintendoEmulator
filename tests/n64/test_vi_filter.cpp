@@ -439,3 +439,71 @@ TEST_CASE("VI output follows a mode change on the next frame") {
     CHECK(pixel(woven, 20, 2) == kBlack);                // dropped
     CHECK(pixel(woven, 20, 3) == argb16(31, 31, 31));    // field 1: fb (0, 0)
 }
+
+TEST_CASE("VI output takes the divot median of a partly covered pixel") {
+    const auto n64 = make_n64();
+    REQUIRE(n64);
+    Bus& bus = n64->bus();
+    // 32-bit, AA mode 0, divot (CTRL bit 4), 640 wide at scale 1.0: screen column x is framebuffer column x.
+    vi_write(bus, kCtrl, 0x0013);
+    vi_write(bus, kOrigin, kFb);
+    vi_write(bus, kWidth, 640);
+    vi_write(bus, kHVideo, 0x006C02EC);
+    vi_write(bus, kVVideo, 0x002501FF);
+    vi_write(bus, kXScale, 0x400);
+    vi_write(bus, kYScale, 0x400);
+    // Row 0: centre (10, 0) R 0x80 with coverage 3 (alpha 0x60) between R 0x20 and R 0x10 at coverage 7.
+    // Every other pixel is zero (coverage 0), so the centre has no full neighbour for antialiasing and
+    // keeps R 0x80 after it; divot then takes median(0x20, 0x80, 0x10) = 0x20.
+    bus.write32(kFb + 9 * 4, 0x200000E0);
+    bus.write32(kFb + 10 * 4, 0x80000060);
+    bus.write32(kFb + 11 * 4, 0x100000E0);
+    // V_VIDEO 0x25: framebuffer row 0 is field line 1, output rows 2 and 3.
+    CHECK(pixel(n64->output(), 10, 2) == 0xFF200000);
+    vi_write(bus, kCtrl, 0x0003);   // divot off: the centre as it is
+    CHECK(pixel(n64->output(), 10, 2) == 0xFF800000);
+}
+
+TEST_CASE("VI output clips a window larger than the screen") {
+    const auto n64 = make_n64();
+    REQUIRE(n64);
+    Bus& bus = n64->bus();
+    // 16-bit, AA mode 0, divot: H_VIDEO 108..1023 is 915 pixels (the screen has 640), V_VIDEO 37..1000
+    // is 481 field lines (a field has 240).
+    vi_write(bus, kCtrl, 0x0012);
+    vi_write(bus, kOrigin, kFb);
+    vi_write(bus, kWidth, 1024);
+    vi_write(bus, kHVideo, 0x006C03FF);
+    vi_write(bus, kVVideo, 0x002503E8);
+    vi_write(bus, kXScale, 0x400);
+    vi_write(bus, kYScale, 0x400);
+    put16(bus, kFb, 1024, 639, 238, 31, 0, 0);
+    Vi::Image img;
+    CHECK_NOTHROW(img = n64->output());
+    REQUIRE(img.width == 640);
+    REQUIRE(img.height == 480);
+    REQUIRE(img.argb.size() == 640u * 480u);
+    // Without the filters (AA mode 2), framebuffer (639, 238) shows: field line 1 + 238 = 239, the last
+    // one, rows 478 and 479. (With divot its zero neighbours make it black.)
+    vi_write(bus, kCtrl, 0x0202);
+    CHECK_NOTHROW(img = n64->output());
+    CHECK(pixel(img, 639, 479) == argb16(31, 0, 0));
+}
+
+TEST_CASE("VI output does not weave a field from before a load_state") {
+    const auto n64 = make_n64();
+    REQUIRE(n64);
+    Bus& bus = n64->bus();
+    program_320x240(bus, 0x0242);   // interlaced 16-bit, AA mode 2
+    put16(bus, kFb, 320, 0, 0, 31, 31, 31);
+    REQUIRE((bus.read32(0x04400010) & 1) == 0);
+    const std::vector<std::uint8_t> state = n64->save_state();
+    // Field 0 fills the weave cache: row 2 is fb (0, 0).
+    CHECK(pixel(n64->output(), 0, 2) == argb16(31, 31, 31));
+    REQUIRE(n64->load_state(state));
+    n64->run_frame();
+    REQUIRE((bus.read32(0x04400010) & 1) == 1);
+    const Vi::Image field1 = n64->output();
+    CHECK(pixel(field1, 0, 3) == argb16(31, 31, 31));   // field 1: fb (0, 0)
+    CHECK(pixel(field1, 0, 2) == kBlack);               // field 0's rows came from before the load: dropped
+}

@@ -45,11 +45,16 @@ public:
     // VI_CTRL says, on a 640x480 (NTSC, MPAL) or 640x576 (PAL) screen; black outside the
     // window and when the VI is off. Interlaced fields go to alternate rows, keeping the
     // other field's rows from the previous call. hidden: the RDRAM hidden bits (nullptr: 0).
+    // Although const, it updates that weave cache: call it from one thread at a time.
     [[nodiscard]] Image output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden) const;
 
     template <class Ar>
     void serialize(Ar& ar) {
         ar(regs_), ar(v_current_), ar(vblank_), ar(field_), ar(fraction_), ar(region_);
+        if constexpr (Ar::kLoading) {  // the previous field belongs to the machine before the load
+            weave_.clear();
+            weave_key_ = 0;
+        }
     }
 
 private:
