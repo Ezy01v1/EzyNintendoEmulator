@@ -3,6 +3,7 @@ target_link_libraries(ezy_n64_tests PRIVATE ezy_n64 doctest::doctest ezy_warning
 target_sources(ezy_n64_tests PRIVATE test_rsp_jit.cpp test_rsp_vector_native.cpp)
 target_sources(ezy_n64_tests PRIVATE test_rsp_vector_multiply.cpp test_rsp_dma_wait.cpp)
 target_sources(ezy_n64_tests PRIVATE test_rdp_hidden_bits.cpp)
+target_sources(ezy_n64_tests PRIVATE test_vi_filter.cpp)
 target_sources(ezy_n64_tests PRIVATE test_rdp_combiner.cpp)
 target_sources(ezy_n64_tests PRIVATE test_rdp_constant_rectangle.cpp)
 target_sources(ezy_n64_tests PRIVATE test_cpu_jit.cpp test_cpu_jit_invalidation.cpp test_cpu_jit_alu.cpp test_cpu_jit_branch.cpp
