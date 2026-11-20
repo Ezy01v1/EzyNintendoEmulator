@@ -71,18 +71,19 @@ TEST_CASE("VI fetch outside RDRAM is black with full coverage") {
 
 TEST_CASE("VI antialias blends a partly covered pixel toward its penultimate neighbours") {
     Image img;
-    // Centre (3,1): R = 0, coverage 3. Six full-coverage neighbours with R 5-bit 2,4,..,12,
-    // i.e. 0x10,0x20,0x30,0x40,0x50,0x60 after << 3.
+    // Centre (3,1): R = 0, coverage 3. Six full-coverage neighbours with R 5-bit 2,4,6,8,10,16,
+    // i.e. 0x10,0x20,0x30,0x40,0x50,0x80 after << 3 (the outlier tells second-from-the-end from plain min/max).
     img.put16(3, 1, 0, 0, 0, 3);
     img.put16(2, 0, 2, 0, 0, 7);
     img.put16(4, 0, 4, 0, 0, 7);
     img.put16(1, 1, 6, 0, 0, 7);
     img.put16(5, 1, 8, 0, 0, 7);
     img.put16(2, 2, 10, 0, 0, 7);
-    img.put16(4, 2, 12, 0, 0, 7);
+    img.put16(4, 2, 16, 0, 0, 7);
     const Color c = fetch_filtered(img.view(), 3, 1, false);
-    // Set {0x00,0x10..0x60}: penmin 0x10, penmax 0x50 (second from each end);
+    // Set {0x00,0x10,0x20,0x30,0x40,0x50,0x80}: penmin 0x10, penmax 0x50 (second from each end);
     // ((0x10 + 0x50 - 0) * (7 - 3) + 4) >> 3 = (0x60 * 4 + 4) >> 3 = 388 >> 3 = 48 = 0x30.
+    // (Plain min/max would give (0x80 * 4 + 4) >> 3 = 64.)
     CHECK(c.r == 0x30);
     CHECK(c.g == 0);   // all-zero channel stays zero
     CHECK(c.coverage == 3);
@@ -118,6 +119,21 @@ TEST_CASE("VI dither filter nudges each channel toward its neighbours by up to 8
     mix.put16(2, 1, 9, 0, 0, 7);  mix.put16(4, 1, 0, 0, 0, 7);
     mix.put16(2, 2, 10, 0, 0, 7); mix.put16(3, 2, 10, 0, 0, 7); mix.put16(4, 2, 10, 0, 0, 7);
     CHECK(fetch_filtered(mix.view(), 3, 1, true).r == 81);
+}
+
+TEST_CASE("VI dither filter compares only the top five bits of each channel") {
+    Image img;
+    img.width = 8;
+    auto put32 = [&](int x, int y, unsigned r) {
+        const std::uint32_t a = (static_cast<std::uint32_t>(y) * 8 + static_cast<std::uint32_t>(x)) * 4;
+        img.rdram[a] = static_cast<std::uint8_t>(r); img.rdram[a + 1] = 0; img.rdram[a + 2] = 0; img.rdram[a + 3] = 0xE0;
+    };
+    // Centre R = 0x87 (5 bits: 0x10); every neighbour R = 0x80 (5 bits: 0x10): equal in 5 bits although
+    // 8 bits differ, so no nudge: result 0x87. (An 8-bit comparison would subtract 8 -> 0x7F.)
+    put32(3, 1, 0x87);
+    const int offsets[8][2] = {{-1, -1}, {0, -1}, {1, -1}, {-1, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}};
+    for (const auto& o : offsets) put32(3 + o[0], 1 + o[1], 0x80);
+    CHECK(fetch_filtered(img.view(true), 3, 1, true).r == 0x87);
 }
 
 TEST_CASE("VI dither filter is skipped on partly covered pixels, which use antialiasing instead") {
