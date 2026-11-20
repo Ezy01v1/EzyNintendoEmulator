@@ -92,6 +92,7 @@ public:
     [[nodiscard]] bool rdp_threaded() const { return rdp_.threaded(); }
     [[nodiscard]] RdpWorker::Stats rdp_stats() const { return rdp_.stats(); }
     [[nodiscard]] Vi::Image image() const { drain_rdp(); return vi_.image(rdram_); }
+    [[nodiscard]] const RdpHiddenBits& hidden_bits() const { return rdp_.hidden_bits(); }
 
     // Audio tasks of a known microcode run at a high level instead of on the RSP.
     void set_audio_hle(bool enabled) { audio_hle_ = enabled; }

@@ -367,6 +367,8 @@ void RdpRasterizer::copy_rectangle(std::span<std::uint8_t> rdram) const {
                 if (address + 1 < rdram.size() && (!alpha_test || (texel & 1))) {
                     rdram[address] = static_cast<std::uint8_t>(texel >> 8);
                     rdram[address + 1] = static_cast<std::uint8_t>(texel);
+                    // Like fills, COPY copies the low bit into the hidden bits: 3 or 0.
+                    set_hidden_bits(address, (texel & 1) ? 3 : 0);
                 }
             }
         }

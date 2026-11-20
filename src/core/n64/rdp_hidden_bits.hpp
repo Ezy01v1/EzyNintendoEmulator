@@ -8,8 +8,8 @@
 
 namespace ezy::n64 {
 
-// Two hidden DZ bits per RDRAM halfword. Direct lookup avoids a tree search and
-// allocation in the pixel loop. Save states retain the ordered sparse v11 format.
+// Two hidden bits per RDRAM halfword (depth DZ low bits, 16-bit color coverage low bits).
+// Direct lookup avoids a tree search and allocation in the pixel loop. Save states retain the ordered sparse v11 format.
 // The threaded RDP's band workers write disjoint halfwords of one shared table, so there
 // is no exact counter, only a flag saying whether any bit may be set (which keeps clears
 // and saves of an unused table free).

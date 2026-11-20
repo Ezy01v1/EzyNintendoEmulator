@@ -43,6 +43,9 @@ public:
     [[nodiscard]] bool threaded() const { return worker_ != nullptr; }
     [[nodiscard]] RdpWorker::Stats stats() const { return worker_ ? worker_->stats() : RdpWorker::Stats{}; }
     void drain() const { if (worker_) worker_->drain(); }
+    // RDRAM's hidden bits (two per halfword): depth DZ low bits and 16-bit color coverage.
+    // Drains the worker first, so they match the pixels drawn so far.
+    [[nodiscard]] const RdpHiddenBits& hidden_bits() const { drain(); return *hidden_; }
     // The worker's barrier view (RdpWorker::barrier_view); none without a worker.
     [[nodiscard]] std::optional<jit::PageBarrierView> barrier_view() const {
         if (!worker_) return std::nullopt;

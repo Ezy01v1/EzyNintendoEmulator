@@ -1323,6 +1323,134 @@ TEST_CASE("RDP keeps the low DZ bits in RDRAM hidden bits") {
     CHECK(restored->save_state() == state);
 }
 
+namespace {
+
+// RGBA5551 color image at 0x4000, four pixels per row, with a 4x4 scissor.
+constexpr std::uint64_t kColor16 = 0x3F10000300004000ULL;
+// One cycle, RGB dither off: image read, antialias; coverage destination in bits 9:8.
+constexpr std::uint64_t kCoverageModes = kOneCycle | (1U << 6) | (1U << 3);
+constexpr auto kPrimRgba = set_combine({15, 15, 31, 3, 7, 7, 7, 3}, {15, 15, 31, 3, 7, 7, 7, 3});
+
+// Fill Rectangle with coordinates in quarter pixels (in one-cycle mode it is a flat
+// rectangle whose per-pixel coverage counts the covered subpixel samples).
+constexpr std::uint64_t rdp_fill_quarters(unsigned xh, unsigned yh, unsigned xl, unsigned yl) {
+    return (0x36ULL << 56) | (std::uint64_t{xl} << 44) | (std::uint64_t{yl} << 32) | (std::uint64_t{xh} << 12) | yh;
+}
+
+void run_rdp_list(N64& n64, const std::vector<std::uint64_t>& commands) {
+    auto& bus = n64.bus();
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write64(end, kSyncFull), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 30; ++i) n64.step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+}
+
+unsigned hidden_at(const N64& n64, std::uint32_t address) { return n64.bus().hidden_bits().read(address >> 1); }
+
+}  // namespace
+
+TEST_CASE("RDP 16-bit color writes keep all three coverage bits") {
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 WRITE"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    // Rectangle x 0..1.75, y 0..0.75: three subrows. Pixel 0 covers samples 0,2 / 1,3 in
+    // every subrow: 2 + 2 + 2 = 6. Pixel 1 covers 4,6 / 5 (7 is the excluded edge): 2 + 1 + 2 = 5.
+    // Memory is empty (bit 0 = 0, hidden 0: coverage 0), so clamp stores the sum: 6 and 5.
+    // RGBA5551 keeps c >> 2 in bit 0 and c & 3 in the hidden bits: 6 -> 1 / 2, 5 -> 1 / 1.
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), kCoverageModes, kPrimRgba,
+                        0x3A000000F8F8F8FFULL, rdp_fill_quarters(0, 0, 7, 3)});
+    // Not overflowing, the blender mixes P with P (M is the pixel too): the color stays 0xF8.
+    CHECK(bus.read16(0x4000) == 0xFFFF);
+    CHECK(bus.read16(0x4002) == 0xFFFF);
+    CHECK((bus.read16(0x4002) & 1) == 1);
+    CHECK(hidden_at(*n64, 0x4000) == 2);
+    CHECK(hidden_at(*n64, 0x4002) == 1);
+    CHECK(bus.read16(0x4004) == 0);  // pixel 2 has no coverage
+    CHECK(hidden_at(*n64, 0x4004) == 0);
+}
+
+TEST_CASE("RDP reads 16-bit memory coverage from the hidden bits") {
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 READ"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr std::uint64_t wrap = kCoverageModes | (1U << 8);
+    // x 1..1.25 over four subrows: pixel 1 covers sample 4 of the even subrows only: 2.
+    // Wrap over empty memory stores (2 + 0) & 7 = 2: bit 0 = 0, hidden 2.
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), wrap, kPrimRgba, 0x3A000000F8F8F8FFULL,
+                        rdp_fill_quarters(4, 0, 5, 4)});
+    CHECK((bus.read16(0x4002) & 1) == 0);
+    CHECK(hidden_at(*n64, 0x4002) == 2);
+    // x 1..1.75 over three subrows: 2 + 1 + 2 = 5. Memory coverage is (0 << 2) | 2 = 2, so wrap
+    // stores (5 + 2) & 7 = 7: bit 0 = 1, hidden 3. Taking the hidden bits as set would read 3
+    // and store (5 + 3) & 7 = 0.
+    run_rdp_list(*n64, {rdp_fill_quarters(4, 0, 7, 3)});
+    CHECK((bus.read16(0x4002) & 1) == 1);
+    CHECK(hidden_at(*n64, 0x4002) == 3);
+}
+
+TEST_CASE("RDP 16-bit fills copy each halfword's low bit into its hidden bits") {
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 FILL"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), kFillMode,
+                        0x37000000FFFFFFFFULL, rdp_rectangle(0x36, 3, 0, 0, 0),    // row 0, x 0..3
+                        0x37000000FFFEFFFEULL, rdp_rectangle(0x36, 1, 0, 0, 0),    // row 0, x 0..1
+                        0x37000000FFFFFFFEULL, rdp_rectangle(0x36, 3, 1, 0, 1)});  // row 1, x 0..3
+    // 0xFFFE has bit 0 clear: hidden 0 over the earlier 3. 0xFFFF keeps 3.
+    for (const std::uint32_t a : {0x4000U, 0x4002U}) {
+        CHECK(bus.read16(a) == 0xFFFE);
+        CHECK(hidden_at(*n64, a) == 0);
+    }
+    for (const std::uint32_t a : {0x4004U, 0x4006U}) {
+        CHECK(bus.read16(a) == 0xFFFF);
+        CHECK(hidden_at(*n64, a) == 3);
+    }
+    // The fill word alternates halfwords: 0xFFFF (hidden 3) then 0xFFFE (hidden 0).
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        const std::uint32_t a = 0x4008 + 2 * x;
+        CHECK(hidden_at(*n64, a) == (x % 2 == 0 ? 3U : 0U));
+    }
+}
+
+TEST_CASE("RDP constant 16-bit rectangles store the coverage of every pixel") {
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 CONSTANT"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    // Aligned x 0..4, y 0..1 without image read: coverage 8 over memory coverage 7 overflows,
+    // so clamp stores 8 - 1 = 7 (bit 0 = 1, hidden 3) in each pixel the fast path replicates.
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), kOneCycle, kPrimRgba, 0x3A000000F8F8F8FFULL,
+                        rdp_rectangle(0x36, 4, 1, 0, 0)});
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read16(0x4000 + 2 * x) == 0xFFFF);
+        CHECK(hidden_at(*n64, 0x4000 + 2 * x) == 3);
+    }
+}
+
+TEST_CASE("RDP draws normally after loading a state without color hidden bits") {
+    const auto fresh = N64::create(counting_rom("RDP CVG 16 STATE"));
+    REQUIRE(fresh);
+    const auto state = fresh->save_state();
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 STATE"));
+    REQUIRE(n64);
+    REQUIRE(n64->load_state(state));
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    // A one-row triangle over x 0..3 fully covers each pixel: like the rectangle above, clamp
+    // stores 7 (no image read), bit 0 = 1 and hidden 3.
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), kOneCycle, kPrimRgba, 0x3A000000F8F8F8FFULL,
+                        rdp_triangle_header(true, 0, 0, 4), rdp_edge(4 * pixel, 0), rdp_edge(0, 0), rdp_edge(0, 0)});
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read16(0x4000 + 2 * x) == 0xFFFF);
+        CHECK(hidden_at(*n64, 0x4000 + 2 * x) == 3);
+    }
+}
+
 TEST_CASE("RDP interpenetrating Z scales coverage where surfaces intersect") {
     const auto n64 = N64::create(counting_rom("RDP INTERPENETRATE"));
     REQUIRE(n64);
@@ -1497,7 +1625,11 @@ TEST_CASE("RDP copies a Load Tile subregion from saved TMEM with RGBA5551 alpha 
                     const auto texel = texels[(y - 1) * 8 + x - 2];
                     if (texel & 1) expected = texel;
                 }
-                CHECK(bus.read16(framebuffer + 2 * (y * 12 + x)) == expected);
+                const std::uint32_t address = framebuffer + 2 * (y * 12 + x);
+                CHECK(bus.read16(address) == expected);
+                // COPY copies each written texel's low bit into its hidden bits (full coverage);
+                // the CPU-written background keeps hidden 0.
+                CHECK(bus.hidden_bits().read(address >> 1) == (expected != background ? 3U : 0U));
             }
         }
     };
