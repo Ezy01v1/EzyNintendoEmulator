@@ -48,6 +48,16 @@ public:
         return (b != nullptr && b->key == key && b->paddr == paddr) ? b : nullptr;
     }
 
+    // True when some block inserted since the page's last invalidation (or the last flush)
+    // has block.paddr < paddr < block.paddr + 4 * block.words: paddr is inside a block but
+    // not its first word. The marks ignore the mode key. O(1).
+    [[nodiscard]] bool covered(std::uint32_t paddr) const {
+        const std::uint32_t page = paddr >> CodePages::kPageShift;
+        if (page >= covered_.size()) return false;
+        const std::uint8_t* marks = covered_[page].get();
+        return marks != nullptr && marks[(paddr >> 2) & (kSlots - 1)] != 0;
+    }
+
     // Copies exits and code into an arena (freed only by flush), marks the page and
     // replaces any block at the same address. Throws std::logic_error if the block is empty,
     // unaligned, outside RAM, crosses a 4 KiB page or `code` does not hold `words` words.
@@ -76,6 +86,7 @@ private:
     CodeBuffer code_;
     CodePages pages_;
     std::vector<std::unique_ptr<const Block*[]>> top_;  // per page, allocated on demand
+    std::vector<std::unique_ptr<std::uint8_t[]>> covered_;  // per page, 1 byte per word, with the slots
     std::vector<std::unique_ptr<std::byte[]>> chunks_;
     std::size_t chunk_used_ = 0, chunk_size_ = 0, arena_bytes_ = 0;
     Stats stats_;

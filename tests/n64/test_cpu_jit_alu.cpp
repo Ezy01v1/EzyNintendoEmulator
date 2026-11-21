@@ -122,7 +122,7 @@ TEST_CASE("CPU JIT leaves an overflowing instruction to the interpreter, before 
         CHECK(t.jit_cpu.gpr(11) == 0);
         if (!t.jit.available()) continue;
         CHECK(t.jit.stats().native == 7);  // not the overflowing one
-        CHECK(t.jit.stats().exits_before == 2);  // then the block that starts at it leaves before it too
+        CHECK(t.jit.stats().exits_before == 1);  // the interpreter then resumes mid-block: no new block
     }
     SUBCASE("no overflow: the result is written") {
         Twin t;
@@ -164,7 +164,7 @@ TEST_CASE("CPU JIT writes the pc state before helpers and on exits") {
         CHECK(t.jit_cpu.gpr(12) == 14);
         REQUIRE_NATIVE(t.jit);
         CHECK(t.jit.stats().exits_before > 0);
-        CHECK(t.jit.stats().native == 6);
+        CHECK(t.jit.stats().native == 5);  // the code after the LW resumes mid-block: the interpreter runs it
         CHECK(t.jit.stats().in_place == 1);  // the DIV; the LW exits before and step() runs it
     }
 }

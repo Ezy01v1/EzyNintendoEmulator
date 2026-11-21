@@ -457,6 +457,13 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
             const auto paddr = static_cast<std::uint32_t>(pc & 0x1FFFFFFF);
             if (std::uint64_t{paddr} + 4 > bus_.direct_ram_size()) break;
             const jit::Block* block = cache_.find(paddr, key);
+            // An arbitrary resume (after a stop for the budget or an event) inside a compiled
+            // block: compiling here would build a near-duplicate; the interpreter steps on until
+            // a jump lands somewhere. A jump (in_delay_slot_ still set) may be a loop head.
+            if (block == nullptr && !cpu_.in_delay_slot_ && cache_.covered(paddr)) {
+                ++stats_.resume_skips;
+                break;
+            }
             if (block == nullptr) block = compile(paddr, key);
             if (check_) verify(*block);
             if (block->fn == nullptr) {

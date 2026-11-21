@@ -212,12 +212,13 @@ TEST_CASE("CPU JIT native accesses call the RDP barrier exactly when the interpr
         CHECK(t.ref_bus.guards == kAccesses);  // the interpreter asks on every access
         REQUIRE_NATIVE(t.jit);
         // Native code never calls it: its slow path leaves the block before the access, and
-        // the interpreter's step() asks (and waits) for those accesses only.
-        CHECK(t.jit_bus.guards == kWaits);
+        // the interpreter's step() asks. The first access ran natively; after the exit before
+        // the second, the rest of the block is a mid-block resume the JIT leaves to the
+        // interpreter, which asks on each of the other 6.
+        CHECK(t.jit_bus.guards == kAccesses - 1);
         CHECK(t.jit.stats().native == t.jit_instructions);
-        // Each wait: the block leaves before the access, then the block entered at it leaves
-        // again with no instruction run, and the harness steps the interpreter.
-        CHECK(t.jit.stats().exits_before == 2 * kWaits);
+        // One exit before the first waiting access; no block is compiled at the resume.
+        CHECK(t.jit.stats().exits_before == 1);
     }
     SUBCASE("a failed renderer sends every access to the bus") {
         Twin t;
@@ -229,9 +230,9 @@ TEST_CASE("CPU JIT native accesses call the RDP barrier exactly when the interpr
         CHECK(t.ref_bus.guards == kAccesses);
         REQUIRE_NATIVE(t.jit);
         CHECK(t.jit_bus.guards == kAccesses);  // the code reads wait too: only the data zone is counted
-        // Each access is left to the interpreter: the first block leaves before the first one,
-        // then every block entered at an access leaves with no instruction run.
-        CHECK(t.jit.stats().exits_before == kAccesses + 1);
+        // The block leaves before the first access and the interpreter runs the rest (a
+        // mid-block resume compiles nothing).
+        CHECK(t.jit.stats().exits_before == 1);
     }
     SUBCASE("without a view (synchronous RDP) native code never calls it") {
         Twin t;

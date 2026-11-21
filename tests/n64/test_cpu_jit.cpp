@@ -330,9 +330,12 @@ TEST_CASE("CPU JIT stops before a block that does not fit the budget") {
     const auto part = jit.execute(20);
     CHECK(part.instructions == 2);
     CHECK(part.cycles == 39);
+    // The exit left the pc inside the block (not at a jump target): the interpreter finishes it.
     const auto rest = jit.execute(1000);
-    CHECK(rest.instructions == 8);
-    CHECK(rest.cycles == 8);
+    CHECK(rest.instructions == 0);
+    CHECK(rest.cycles == 0);
+    CHECK(jit.stats().resume_skips == 1);
+    for (int k = 0; k < 8; ++k) t.jit_cpu.step();
     for (int k = 0; k < 10; ++k) t.ref_cpu.step();
     t.ref_cycles = t.jit_cycles = 0;
     CHECK(t.same());
@@ -437,7 +440,7 @@ TEST_CASE("CPU JIT does not compile past a page end or past RAM") {
 }
 
 TEST_CASE("CPU JIT matches with a tiny code buffer that flushes mid-run") {
-    Twin t(7, /*code_budget=*/64 * 1024);
+    Twin t(7, /*code_budget=*/4 * 1024);
     t.run_until_pc(t.end);
     CHECK(t.same());
     REQUIRE_NATIVE(t.jit);
@@ -572,4 +575,50 @@ TEST_CASE("N64::set_cpu_mode refuses the JIT when it was not built") {
     CHECK((n64->cpu_jit() != nullptr) == (EZY_JIT_AVAILABLE == 1));
     CHECK(n64->set_cpu_mode(CpuMode::Interpreter));
     CHECK(n64->cpu_jit() == nullptr);
+}
+
+TEST_CASE("an arbitrary resume inside a compiled block does not compile") {
+    Twin t;
+    REQUIRE_NATIVE(t.jit);
+    t.program(kCode, {addiu(8, 8, 1), addiu(8, 8, 1), addiu(8, 8, 1), addiu(8, 8, 1), addiu(8, 8, 1), kStop});
+    t.start(kKseg0 + kCode);
+    CHECK(t.jit.execute(1000).instructions == 5);
+    const auto before = t.jit.stats();
+    CHECK(before.compiled == 1);
+    t.jit_cpu.set_pc(kKseg0 + kCode + 8);  // the third instruction, not reached by a jump
+    const auto r = t.jit.execute(1000);
+    CHECK(r.cycles == 0);
+    CHECK(r.instructions == 0);
+    CHECK(t.jit.stats().compiled == before.compiled);
+    CHECK(t.jit.stats().resume_skips == before.resume_skips + 1);
+}
+
+TEST_CASE("a branch target inside a block compiles") {
+    Twin t;
+    REQUIRE_NATIVE(t.jit);
+    // The first block falls into the loop whose head is its third word.
+    t.program(kCode, {addiu(8, 0, 0), addiu(9, 0, 0), addiu(8, 8, 1), addiu(9, 9, 2), addiu(10, 8, -5),
+                      bne(10, 0, -4), nop(), kStop});
+    t.start(kKseg0 + kCode);
+    t.jit.execute(100000);
+    CHECK(t.jit_cpu.pc() == kKseg0 + kCode + 28);
+    CHECK(t.jit_cpu.gpr(8) == 5);
+    CHECK(t.jit_cpu.gpr(9) == 10);
+    const auto s = t.jit.stats();
+    CHECK(s.compiled == 2);  // the entry block and the loop head
+    CHECK(s.resume_skips == 0);
+    CHECK(s.native > 20);
+}
+
+TEST_CASE("the resume rule keeps the interpreter's result") {
+    std::uint64_t skips = 0;
+    for (unsigned seed = 0; seed < 60; ++seed) {
+        CAPTURE(seed);
+        Twin t(seed);
+        t.budget = 1 + seed % 17;  // small budgets stop blocks and force mid-block resumes
+        t.run_until_pc(t.end);
+        CHECK(t.same());
+        skips += t.jit.stats().resume_skips;
+    }
+    if (Twin{}.jit.available()) CHECK(skips > 0);
 }
