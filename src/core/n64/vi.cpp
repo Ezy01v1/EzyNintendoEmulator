@@ -1,6 +1,7 @@
 #include "n64/vi.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <utility>
 
@@ -200,7 +201,11 @@ private:
         const auto limit = static_cast<std::int64_t>(fb_.rdram.size());
         vi::Color* out = d.colors.data();
         const bool inside = start >= 0 && start + count * bytes <= limit;
-        for (std::int64_t i = 0; i < count; ++i) {
+        std::int64_t i = 0;
+#if EZY_VI_SSE2
+        if (inside && !fb_.rgba32) i = decode16(out, fb_.rdram.data() + start, start >> 1, count);
+#endif
+        for (; i < count; ++i) {
             const std::int64_t address = start + i * bytes;
             if (!inside && (address < 0 || address + bytes > limit)) {
                 out[i] = vi::Color{};
@@ -268,6 +273,41 @@ private:
             if (mid[i].coverage < 7) dst[i] = vi::detail::antialias_pixel(above + i, mid + i, below + i);
     }
 
+#if EZY_VI_SSE2
+    // decode's 16-bit case eight pixels at a time, for a row inside RDRAM: `pixels` is its
+    // first pixel, `halfword` that pixel's hidden-bits index. Returns the pixels decoded.
+    std::int64_t decode16(vi::Color* out, const std::uint8_t* pixels, std::int64_t halfword, std::int64_t count) const {
+        const std::uint8_t* hidden = nullptr;
+        if (fb_.use_coverage && fb_.hidden) {
+            if (halfword < 0 || halfword + count > static_cast<std::int64_t>(fb_.hidden->size())) return 0;
+            hidden = fb_.hidden->data() + halfword;
+        }
+        const __m128i top5 = _mm_set1_epi16(0xF8);
+        const __m128i one = _mm_set1_epi16(1), three = _mm_set1_epi16(3), zero = _mm_setzero_si128();
+        std::int64_t i = 0;
+        for (; i + 8 <= count; i += 8) {
+            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pixels + 2 * i));
+            v = _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));  // big-endian halfwords
+            const __m128i r = _mm_and_si128(_mm_srli_epi16(v, 8), top5);   // bits 11-15
+            const __m128i g = _mm_and_si128(_mm_srli_epi16(v, 3), top5);   // bits 6-10
+            const __m128i b = _mm_and_si128(_mm_slli_epi16(v, 2), top5);   // bits 1-5
+            __m128i coverage = _mm_set1_epi16(7);
+            if (fb_.use_coverage) {
+                coverage = _mm_slli_epi16(_mm_and_si128(v, one), 2);
+                if (hidden) {
+                    const __m128i low = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(hidden + i));
+                    coverage = _mm_or_si128(coverage, _mm_and_si128(_mm_unpacklo_epi8(low, zero), three));
+                }
+            }
+            const __m128i rg = _mm_or_si128(r, _mm_slli_epi16(g, 8));
+            const __m128i bc = _mm_or_si128(b, _mm_slli_epi16(coverage, 8));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), _mm_unpacklo_epi16(rg, bc));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i + 4), _mm_unpackhi_epi16(rg, bc));
+        }
+        return i;
+    }
+#endif
+
     void fill(Slot& slot, int row) {
         slot.row = row;
         slot.valid = true;
@@ -300,13 +340,92 @@ private:
     std::vector<vi::Color> filtered_;
 };
 
+#if EZY_VI_SSE2
+// emit_row four screen pixels at a time; returns how many pixels it wrote (a multiple of 4).
+// The same arithmetic in 16-bit lanes: lerp as vi::lerp, gamma as 2 * isqrt with sqrtps (exact
+// below 2^24, so equal to kGammaTable), the noise drawn in the same order as the scalar loop.
+template <bool kGamma, bool kGammaDither>
+int emit_simd(std::uint32_t* out, const vi::Color* source, const std::uint32_t* columns, int count,
+              std::uint32_t& noise) {
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i round = _mm_set1_epi16(16);
+    const __m128i low8 = _mm_set1_epi16(0xFF);
+    const __m128i alpha = _mm_set1_epi32(static_cast<int>(kBlack));
+    // Per pixel, 16-bit lanes [r, g, b, coverage] -> [b, g, r, coverage], the ARGB byte order.
+    const auto to_bgr = [](__m128i v) {
+        return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, _MM_SHUFFLE(3, 0, 1, 2)), _MM_SHUFFLE(3, 0, 1, 2));
+    };
+    const auto mix = [&](__m128i a, __m128i b, __m128i fraction) {
+        const __m128i step = _mm_mullo_epi16(_mm_sub_epi16(b, a), fraction);
+        return _mm_and_si128(_mm_add_epi16(_mm_srai_epi16(_mm_add_epi16(step, round), 5), a), low8);
+    };
+    int x = 0;
+    for (; x + 4 <= count; x += 4) {
+        alignas(16) std::uint32_t a[4], b[4];
+        std::int16_t f[4];
+        for (int k = 0; k < 4; ++k) {
+            const std::uint32_t column = columns[x + k];
+            a[k] = std::bit_cast<std::uint32_t>(source[column >> 5]);
+            b[k] = std::bit_cast<std::uint32_t>(source[(column >> 5) + 1]);
+            f[k] = static_cast<std::int16_t>(column & 31);
+        }
+        const __m128i va = _mm_load_si128(reinterpret_cast<const __m128i*>(a));
+        const __m128i vb = _mm_load_si128(reinterpret_cast<const __m128i*>(b));
+        __m128i lo = to_bgr(mix(_mm_unpacklo_epi8(va, zero), _mm_unpacklo_epi8(vb, zero),
+                                _mm_setr_epi16(f[0], f[0], f[0], f[0], f[1], f[1], f[1], f[1])));
+        __m128i hi = to_bgr(mix(_mm_unpackhi_epi8(va, zero), _mm_unpackhi_epi8(vb, zero),
+                                _mm_setr_epi16(f[2], f[2], f[2], f[2], f[3], f[3], f[3], f[3])));
+        if constexpr (kGamma || kGammaDither) {
+            alignas(16) std::int16_t d[16];  // per pixel [b, g, r, 0]
+            for (int k = 0; k < 4; ++k) {
+                const std::uint32_t n = next_noise(noise);
+                std::int16_t* lane = d + 4 * k;
+                if constexpr (kGamma) {
+                    lane[0] = static_cast<std::int16_t>(kGammaDither ? ((n >> 9) & 0x38u) | (n & 7u) : 0u);
+                    lane[1] = static_cast<std::int16_t>(kGammaDither ? (n >> 6) & 0x3Fu : 0u);
+                    lane[2] = static_cast<std::int16_t>(kGammaDither ? n & 0x3Fu : 0u);
+                } else {
+                    lane[0] = static_cast<std::int16_t>((n >> 2) & 1u);
+                    lane[1] = static_cast<std::int16_t>((n >> 1) & 1u);
+                    lane[2] = static_cast<std::int16_t>(n & 1u);
+                }
+                lane[3] = 0;
+            }
+            const __m128i dlo = _mm_load_si128(reinterpret_cast<const __m128i*>(d));
+            const __m128i dhi = _mm_load_si128(reinterpret_cast<const __m128i*>(d + 8));
+            if constexpr (kGamma) {
+                const auto root2 = [&](__m128i v, __m128i dither) {  // 2 * isqrt((v << 6) | dither)
+                    const __m128i index = _mm_or_si128(_mm_slli_epi16(v, 6), dither);
+                    const __m128i r0 = _mm_cvttps_epi32(_mm_sqrt_ps(_mm_cvtepi32_ps(_mm_unpacklo_epi16(index, zero))));
+                    const __m128i r1 = _mm_cvttps_epi32(_mm_sqrt_ps(_mm_cvtepi32_ps(_mm_unpackhi_epi16(index, zero))));
+                    const __m128i r = _mm_packs_epi32(r0, r1);
+                    return _mm_add_epi16(r, r);
+                };
+                lo = root2(lo, dlo);
+                hi = root2(hi, dhi);
+            } else {  // one noise bit per channel, except to 255
+                const __m128i full = _mm_set1_epi16(255);
+                lo = _mm_add_epi16(lo, _mm_andnot_si128(_mm_cmpeq_epi16(lo, full), dlo));
+                hi = _mm_add_epi16(hi, _mm_andnot_si128(_mm_cmpeq_epi16(hi, full), dhi));
+            }
+        }
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + x), _mm_or_si128(_mm_packus_epi16(lo, hi), alpha));
+    }
+    return x;
+}
+#endif
+
 // One screen line: each column's colour (interpolated with the next column by its fraction),
 // then gamma. Local copies keep the uint8_t source reads from aliasing the stores.
 template <bool kGamma, bool kGammaDither>
 void emit_row(std::uint32_t* out, const vi::Color* source, const std::uint32_t* columns, int count,
               std::uint32_t& noise_state) {
     std::uint32_t noise = noise_state;
-    for (int x = 0; x < count; ++x) {
+    int x = 0;
+#if EZY_VI_SSE2
+    x = emit_simd<kGamma, kGammaDither>(out, source, columns, count, noise);
+#endif
+    for (; x < count; ++x) {
         const std::uint32_t column = columns[x];
         const std::uint32_t i = column >> 5, xfrac = column & 31;
         vi::Color c = source[i];
@@ -330,9 +449,8 @@ using EmitRow = void (*)(std::uint32_t*, const vi::Color*, const std::uint32_t*,
 
 }  // namespace
 
-Vi::Image Vi::output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden) const {
+void Vi::output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden, Image& img) const {
     const bool pal = region_ == Region::Pal;
-    Image img;
     img.width = kScreenWidth;
     img.height = pal ? 576 : 480;
     const std::size_t size = static_cast<std::size_t>(img.width) * static_cast<std::size_t>(img.height);
@@ -366,14 +484,14 @@ Vi::Image Vi::output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* h
         weave_.clear();
         weave_key_ = 0;
         img.argb.assign(size, kBlack);
-        return img;
+        return;
     }
 
     // Interlaced: start from the previous field's output if it had the same size and pixel type.
     const int field = static_cast<int>(v_current_ & 1);
     const std::uint32_t key = 1U | (type << 1) | (static_cast<std::uint32_t>(img.height) << 3);
     if (interlaced && weave_key_ == key && weave_.size() == size) {
-        img.argb = std::move(weave_);
+        img.argb.assign(weave_.begin(), weave_.end());  // weave_ keeps its buffer for the next field
         for (int y = 0; y < field_lines; ++y) {
             auto* row = img.argb.data() + static_cast<std::size_t>(2 * y + field) * kScreenWidth;
             std::fill(row, row + kScreenWidth, kBlack);
@@ -433,7 +551,6 @@ Vi::Image Vi::output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* h
         weave_.clear();
         weave_key_ = 0;
     }
-    return img;
 }
 
 }  // namespace ezy::n64

@@ -21,6 +21,9 @@ public:
     [[nodiscard]] unsigned read(std::size_t index) const {
         return index < values_.size() ? values_[index] : 0;
     }
+    // The table itself, one byte (bits 0-1) per halfword, for sequential readers (the VI).
+    [[nodiscard]] const std::uint8_t* data() const { return values_.data(); }
+    [[nodiscard]] std::size_t size() const { return values_.size(); }
     void write(std::size_t index, unsigned bits) {
         if (index >= values_.size()) return;
         values_[index] = static_cast<std::uint8_t>(bits & 3);

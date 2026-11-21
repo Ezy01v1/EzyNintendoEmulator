@@ -70,6 +70,7 @@ private:
     bool gfx_hle_ = false;  // kept across resets
     bool cpu_jit_ = false;  // kept across resets
     bool vi_raw_ = false;   // kept across resets
+    mutable n64::Vi::Image frame_;  // render()'s VI output, reused frame to frame
     std::uint16_t buttons_ = 0;
     std::int8_t stick_x_ = 0, stick_y_ = 0;
     std::uint8_t stick_keys_ = 0;  // up, down, left, right held

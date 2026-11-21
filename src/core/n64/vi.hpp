@@ -46,7 +46,14 @@ public:
     // window and when the VI is off. Interlaced fields go to alternate rows, keeping the
     // other field's rows from the previous call. hidden: the RDRAM hidden bits (nullptr: 0).
     // Although const, it updates that weave cache: call it from one thread at a time.
-    [[nodiscard]] Image output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden) const;
+    [[nodiscard]] Image output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden) const {
+        Image img;
+        output(rdram, hidden, img);
+        return img;
+    }
+    // The same into `img`, reusing its pixel buffer (a frame loop avoids a new 1.2 MB
+    // allocation, and its page faults, per frame).
+    void output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden, Image& img) const;
 
     template <class Ar>
     void serialize(Ar& ar) {

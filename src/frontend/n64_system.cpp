@@ -295,7 +295,8 @@ void N64System::render(std::span<std::uint32_t> argb_pixels) const {
         render_raw(argb_pixels);
         return;
     }
-    const n64::Vi::Image img = n64_->output();
+    n64_->output(frame_);
+    const n64::Vi::Image& img = frame_;
     if (img.width == kCanvasWidth && img.height == kCanvasHeight) {
         std::copy(img.argb.begin(), img.argb.end(), argb_pixels.begin());
         return;

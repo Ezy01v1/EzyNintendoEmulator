@@ -525,7 +525,9 @@ std::uint64_t fnv1a(const Vi::Image& img) {
 
 // Pins Vi::output's pixels over many modes, geometries and random framebuffers (with random
 // coverage, hidden bits included), so its optimizations stay bit-identical. The hashes come
-// from the straightforward implementation (vi::fetch_filtered per pixel) of 15f9d44.
+// from the straightforward implementation (vi::fetch_filtered per pixel) of 15f9d44. Every
+// case writes into the same Image, so the buffer-reusing output() must overwrite the last
+// case's pixels (other sizes, other windows) completely.
 TEST_CASE("VI output pixels stay identical across modes and geometries") {
     std::vector<std::uint8_t> rdram(8 * 1024 * 1024);
     RdpHiddenBits hidden;
@@ -546,6 +548,7 @@ TEST_CASE("VI output pixels stay identical across modes and geometries") {
     };
     const std::uint32_t gammas[] = {0, 0x8, 0xC, 0x4};
     std::vector<std::uint64_t> hashes;
+    Vi::Image picture;
     int index = 0;
     for (std::uint32_t type = 2; type <= 3; ++type)
         for (std::uint32_t aa = 0; aa < 4; ++aa)
@@ -564,11 +567,12 @@ TEST_CASE("VI output pixels stay identical across modes and geometries") {
                     vi.write(4 * kVVideo, g.v_video);
                     vi.write(4 * kXScale, g.x_scale);
                     vi.write(4 * kYScale, g.y_scale);
-                    const Vi::Image first = vi.output(rdram, &hidden);
-                    hashes.push_back(fnv1a(first));
+                    vi.output(rdram, &hidden, picture);
+                    hashes.push_back(fnv1a(picture));
                     if (interlaced) {  // the same field again, starting from the woven rows
                         vi.write(4 * kOrigin, g.origin + 0x1000);
-                        hashes.push_back(fnv1a(vi.output(rdram, &hidden)));
+                        vi.output(rdram, &hidden, picture);
+                        hashes.push_back(fnv1a(picture));
                     }
                 }
     const std::vector<std::uint64_t> expected = {

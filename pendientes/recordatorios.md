@@ -316,12 +316,14 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
 eferenciares-v148` (fuera del repo).
     - Hecho en la rama `n64/vi-output` (2026-11-21): ezyemu muestra `Vi::output()` por defecto
       (`--vi-raw` = framebuffer crudo), runner con `--vi-output`. Más parecido a ares en 6/6 pares.
-      Coste de `output()`: 11,3 → **3,0 ms** por cuadro (meta del plan: 2 ms, NO alcanzada en un hilo).
-      Ver `docs/performance/2026-11-19-n64-vi-output.md`.
-    - [ ] Decidir con el usuario: aceptar ~3 ms, seguir (reusar el buffer ~0,3 ms, gamma con SIMD)
-      o `output()` en un hilo aparte (diseño nuevo). Que el usuario pruebe MK64 en ezyemu y opine
-      de la imagen. Falta la revisión final del branch y abrir el PR.
-    - [ ] Fila de basura en la última línea de la imagen: revisar si sigue con la salida del VI.
+      Coste de `output()`: 11,3 → **1,7 ms** por cuadro (meta del plan: < 2 ms, cumplida en un hilo).
+      Ver `docs/performance/2026-11-19-n64-vi-output.md`. Revisión final del branch hecha.
+    - [ ] Que el usuario pruebe MK64 en ezyemu (ahora con filtro por defecto) y opine de la imagen;
+      luego abrir los PR de `n64/gfx-hle-port`, `n64/cpu-jit` y `n64/vi-output`.
+    - [x] Fila de basura en la última línea: solo está en el framebuffer crudo (`--vi-raw`); la salida
+      del VI sigue V_VIDEO y la deja negra, como ares.
+    - Menor (para después): en juegos entrelazados, si ezyemu dibuja un campo de cada dos, el campo
+      tejido es viejo (mismo campo dos veces). MK64 no es entrelazado.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -880,3 +882,7 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   columna y gamma por plantilla: `output()` 4,96 → 3,0 ms (de 11,3 al inicio), imágenes idénticas byte a byte
   (24 MK64 + 13 Spider-Man), estado de MK64 en 1900 idéntico, Debug 11/11, Release 183/183, contra ares
   6/6 pares mejor que el crudo. Meta de 2 ms no alcanzada: decisión pendiente con el usuario.
+- 2026-11-21 (2) — Filtro VI por debajo de 2 ms: píxeles de pantalla de 4 en 4 con SSE2 (gamma con sqrtps,
+  exacto), `output(..., Image&)` que reutiliza el buffer en ezyemu y runner, decodificación de 16 bits de 8 en 8.
+  `output()` 3,0 → 1,7 ms. Imágenes idénticas, prueba de hashes intacta (ahora reutiliza la imagen),
+  Debug 11/11, Release 183/183, estado de MK64 en 1900 idéntico (4a4c07...). Fila de basura: solo en `--vi-raw`.

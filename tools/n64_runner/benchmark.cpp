@@ -158,13 +158,15 @@ bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profil
 #endif
     double output_total = 0, output_max = 0;
     std::uint64_t output_pixels = 0;  // keeps the calls from being optimized away
+    ezy::n64::Vi::Image picture;      // reused, as ezyemu does
     const auto started = std::chrono::steady_clock::now();
     for (int frame = first; frame < end; ++frame) {
         n64.run_frame();
         if (!vi_output) continue;
         n64.bus().drain_rdp();
         const auto before = std::chrono::steady_clock::now();
-        output_pixels += n64.output().argb.size();
+        n64.output(picture);
+        output_pixels += picture.argb.size();
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - before).count();
         output_total += seconds;
         output_max = std::max(output_max, seconds);
