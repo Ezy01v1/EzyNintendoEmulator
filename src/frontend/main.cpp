@@ -46,10 +46,11 @@ struct Options {
     ezy::frontend::GameBoySettings gb;
     bool n64_gfx_hle = false;
     bool n64_cpu_jit = false;
+    bool n64_vi_raw = false;
 };
 
 // Options after the ROM path. Game Boy: --model auto|dmg|cgb, --boot-rom <file>,
-// --no-color-correction. N64: --gfx-hle, --cpu-jit. Returns nullopt (after printing why) on a bad option.
+// --no-color-correction. N64: --gfx-hle, --cpu-jit, --vi-raw. Returns nullopt (after printing why) on a bad option.
 std::optional<Options> parse_options(int argc, char* argv[]) {
     Options options;
     auto& settings = options.gb;
@@ -59,6 +60,8 @@ std::optional<Options> parse_options(int argc, char* argv[]) {
             options.n64_gfx_hle = true;
         } else if (arg == "--cpu-jit") {
             options.n64_cpu_jit = true;
+        } else if (arg == "--vi-raw") {
+            options.n64_vi_raw = true;
         } else if (arg == "--model" && i + 1 < argc) {
             const std::string model = argv[++i];
             if (model == "auto") {
@@ -96,7 +99,7 @@ std::unique_ptr<System> create_system(const char* path, std::span<const std::uin
     }
     if (ext == ".z64" || ext == ".v64" || ext == ".n64") {
         return ezy::frontend::N64System::create(rom, std::filesystem::path(path), options.n64_gfx_hle,
-                                                 options.n64_cpu_jit);
+                                                 options.n64_cpu_jit, options.n64_vi_raw);
     }
     if (ext == ".gb" || ext == ".gbc") {
         return ezy::frontend::GameBoySystem::create(rom, std::filesystem::path(path).replace_extension(".sav"),
@@ -126,7 +129,9 @@ int main(int argc, char* argv[]) {
                      "  --boot-rom <file>       run a real CGB boot ROM dump (2304 bytes)\n"
                      "  --no-color-correction   show raw CGB colours\n"
                      "  --gfx-hle               N64: run F3DEX 0.95 graphics in C++ (experimental)\n"
-                     "  --cpu-jit               N64: run the CPU through the JIT (experimental)\n";
+                     "  --cpu-jit               N64: run the CPU through the JIT (experimental)\n"
+                     "  --vi-raw                N64: show the raw framebuffer instead of the VI's filtered\n"
+                     "                          output (antialias, divot, gamma at 640x480)\n";
         return 1;
     }
 

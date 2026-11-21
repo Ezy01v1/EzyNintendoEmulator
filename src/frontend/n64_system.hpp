@@ -21,9 +21,10 @@ public:
     // so does the cartridge's EEPROM (<rom>.eep), loaded at start and written when it changes.
     // gfx_hle runs F3DEX/F3DLX 0.95 graphics tasks at a high level (Bus::set_gfx_hle);
     // cpu_jit runs the CPU through the JIT (N64::set_cpu_mode), or warns and interprets.
+    // vi_raw shows the framebuffer as it is (N64::image) instead of the VI's filtered output.
     [[nodiscard]] static std::unique_ptr<N64System> create(std::span<const std::uint8_t> rom,
                                                            std::filesystem::path rom_path = {}, bool gfx_hle = false,
-                                                           bool cpu_jit = false);
+                                                           bool cpu_jit = false, bool vi_raw = false);
     ~N64System() override { flush_eeprom(); }
 
     [[nodiscard]] std::string_view name() const override { return "Nintendo 64"; }
@@ -48,9 +49,11 @@ public:
 
 private:
     N64System(std::vector<std::uint8_t> rom, std::unique_ptr<n64::N64> n64, std::filesystem::path rom_path, bool gfx_hle,
-              bool cpu_jit)
+              bool cpu_jit, bool vi_raw)
         : rom_(std::move(rom)), n64_(std::move(n64)), rom_path_(std::move(rom_path)), gfx_hle_(gfx_hle),
-          cpu_jit_(cpu_jit) {}
+          cpu_jit_(cpu_jit), vi_raw_(vi_raw) {}
+
+    void render_raw(std::span<std::uint32_t> argb_pixels) const;
 
     void update_controller();
     // Moves the AI's samples to audio_, resampled from the AI rate to kAudioRate.
@@ -66,6 +69,7 @@ private:
     std::filesystem::path rom_path_;
     bool gfx_hle_ = false;  // kept across resets
     bool cpu_jit_ = false;  // kept across resets
+    bool vi_raw_ = false;   // kept across resets
     std::uint16_t buttons_ = 0;
     std::int8_t stick_x_ = 0, stick_y_ = 0;
     std::uint8_t stick_keys_ = 0;  // up, down, left, right held

@@ -20,6 +20,9 @@
 // with RAM before running it and stops with an error on a stale one.
 // --rdp-trace <file> [--trace-from <frame>] (with --screenshot): writes every RDP command word
 // consumed from that frame on, as little-endian uint64, for tools/rdp_trace_diff.
+// --vi-output: --screenshot, --series and --benchmark save the VI's filtered 640x480 (PAL
+// 640x576) output (N64::output) instead of the framebuffer (N64::image); --benchmark also
+// times output(), called once per field.
 #include <cstdint>
 #include <charconv>
 #include <cstdio>
@@ -40,6 +43,9 @@ namespace {
 
 using ezy::n64::N64;
 using ezy::n64::Vi;
+
+// What --screenshot, --series and --benchmark save.
+Vi::Image picture(const N64& n64, bool vi_output) { return vi_output ? n64.output() : n64.image(); }
 
 std::vector<std::uint8_t> read_file(const char* path) {
     std::ifstream file(path, std::ios::binary);
@@ -193,6 +199,7 @@ int run(int raw_argc, char* raw_argv[]) {
     const char* trace_path = nullptr;
     int trace_from = 0;
     bool audio_hle = false, audio_hle_check = false, gfx_hle = false, cpu_jit = false, cpu_jit_check = false;
+    bool vi_output = false;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--rdp-threaded") == 0) rdp_mode = ezy::n64::RdpMode::Threaded;
@@ -203,6 +210,7 @@ int run(int raw_argc, char* raw_argv[]) {
         else if (std::strcmp(raw_argv[i], "--cpu-jit-check") == 0) cpu_jit = cpu_jit_check = true;
         else if (std::strcmp(raw_argv[i], "--audio-hle") == 0) audio_hle = true;
         else if (std::strcmp(raw_argv[i], "--gfx-hle") == 0) gfx_hle = true;
+        else if (std::strcmp(raw_argv[i], "--vi-output") == 0) vi_output = true;
         else if (std::strcmp(raw_argv[i], "--audio-hle-check") == 0) audio_hle_check = true;
         else if (std::strcmp(raw_argv[i], "--time-from") == 0 && i + 1 < raw_argc) {
             const std::string value = raw_argv[++i];
@@ -235,6 +243,8 @@ int run(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --benchmark <out.bmp> <end> --time-from <first>\n"
                      "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>\n"
                      "Screenshot options: --rdp-trace <out.bin> [--trace-from <field>]\n"
+                     "Screenshot, series and benchmark: --vi-output (save the VI's filtered 640x480\n"
+                     "         output instead of the framebuffer; --benchmark also times it)\n"
                      "Options: --load-state <file> (start from a --dump-state file of the same ROM),\n"
                      "         --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter,\n"
                      "         --audio-hle, --audio-hle-check (run audio tasks on the RSP and compare),\n"
@@ -265,6 +275,9 @@ int run(int raw_argc, char* raw_argv[]) {
     if (mode != "--benchmark" && (time_from != 0 || profile_path || final_state_path)) {
         std::cerr << "--time-from, --profile and --dump-final-state require --benchmark\n"; return 2;
     }
+    if (vi_output && mode != "--screenshot" && mode != "--series" && mode != "--benchmark") {
+        std::cerr << "--vi-output requires --screenshot, --series or --benchmark\n"; return 2;
+    }
     if (mode != "--screenshot" && (trace_path || trace_from != 0)) {
         std::cerr << "--rdp-trace and --trace-from require --screenshot\n"; return 2;
     }
@@ -275,8 +288,8 @@ int run(int raw_argc, char* raw_argv[]) {
         if (error != std::errc{} || end != value.data() + value.size() || end_frame <= time_from) {
             std::cerr << "Benchmark end must be greater than --time-from\n"; return 2;
         }
-        if (!benchmark_frames(*n64, time_from, end_frame, profile_path)) return 2;
-        const auto bmp = encode_bmp(n64->image());
+        if (!benchmark_frames(*n64, time_from, end_frame, profile_path, vi_output)) return 2;
+        const auto bmp = encode_bmp(picture(*n64, vi_output));
         std::ofstream image(args[3], std::ios::binary);
         image.write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         image.close();
@@ -306,9 +319,10 @@ int run(int raw_argc, char* raw_argv[]) {
             if (!file) return 2;
             std::cout << "Traced " << trace.size() << " RDP words to " << trace_path << '\n';
         }
-        const std::vector<char> bmp = encode_bmp(n64->image());
+        const Vi::Image shot = picture(*n64, vi_output);
+        const std::vector<char> bmp = encode_bmp(shot);
         std::ofstream(args[3], std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
-        std::cout << "Saved " << args[3] << " (" << n64->image().width << "x" << n64->image().height << ")\n";
+        std::cout << "Saved " << args[3] << " (" << shot.width << "x" << shot.height << ")\n";
         print_rdp_stats(*n64);
         return 0;
     }
@@ -319,7 +333,7 @@ int run(int raw_argc, char* raw_argv[]) {
         for (int i = 1; i <= last; ++i) {
             n64->run_frame();
             if (i < first || (i - first) % step != 0) continue;
-            const std::vector<char> bmp = encode_bmp(n64->image());
+            const std::vector<char> bmp = encode_bmp(picture(*n64, vi_output));
             const std::string path = std::string(args[3]) + std::to_string(i) + ".bmp";
             std::ofstream(path, std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         }

@@ -2,6 +2,7 @@
 #include "n64/n64.hpp"
 #include "n64/rdp_counters.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -136,7 +137,7 @@ private:
 };
 }
 
-bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profile_path) {
+bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profile_path, bool vi_output) {
     if (first < 0 || first >= end) return false;
 #if EZY_N64_RDP_COUNTERS
     if (n64.bus().rdp_threaded()) {
@@ -155,8 +156,19 @@ bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profil
 #if EZY_N64_RDP_COUNTERS
     ezy::n64::rdp_counters::reset();
 #endif
+    double output_total = 0, output_max = 0;
+    std::uint64_t output_pixels = 0;  // keeps the calls from being optimized away
     const auto started = std::chrono::steady_clock::now();
-    for (int frame = first; frame < end; ++frame) n64.run_frame();
+    for (int frame = first; frame < end; ++frame) {
+        n64.run_frame();
+        if (!vi_output) continue;
+        n64.bus().drain_rdp();
+        const auto before = std::chrono::steady_clock::now();
+        output_pixels += n64.output().argb.size();
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - before).count();
+        output_total += seconds;
+        output_max = std::max(output_max, seconds);
+    }
     n64.bus().drain_rdp();
     const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     const double cpu_end = process_cpu_seconds();
@@ -171,5 +183,10 @@ bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profil
               << ",\"cpu_seconds\":" << cpu << ",\"fields_per_second\":" << (end - first) / wall
               << ",\"rdp_counters\":" << (EZY_N64_RDP_COUNTERS ? "true" : "false")
               << ",\"profiled\":" << (profile_path ? "true" : "false") << "}\n";
+    if (vi_output) {
+        std::cout << "VI output: {\"calls\":" << end - first << ",\"pixels\":" << output_pixels
+                  << ",\"total_ms\":" << output_total * 1000 << ",\"mean_ms\":" << output_total * 1000 / (end - first)
+                  << ",\"max_ms\":" << output_max * 1000 << "}\n";
+    }
     return !profile_path || sampler.write(profile_path);
 }

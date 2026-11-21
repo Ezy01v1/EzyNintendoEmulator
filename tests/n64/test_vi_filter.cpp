@@ -507,3 +507,87 @@ TEST_CASE("VI output does not weave a field from before a load_state") {
     CHECK(pixel(field1, 0, 3) == argb16(31, 31, 31));   // field 1: fb (0, 0)
     CHECK(pixel(field1, 0, 2) == kBlack);               // field 0's rows came from before the load: dropped
 }
+
+namespace {
+
+std::uint64_t fnv1a(const Vi::Image& img) {
+    std::uint64_t h = 0xCBF29CE484222325ULL;
+    for (const std::uint32_t p : img.argb) {
+        for (int i = 0; i < 4; ++i) {
+            h ^= (p >> (8 * i)) & 0xFF;
+            h *= 0x100000001B3ULL;
+        }
+    }
+    return h;
+}
+
+}  // namespace
+
+// Pins Vi::output's pixels over many modes, geometries and random framebuffers (with random
+// coverage, hidden bits included), so its optimizations stay bit-identical. The hashes come
+// from the straightforward implementation (vi::fetch_filtered per pixel) of 15f9d44.
+TEST_CASE("VI output pixels stay identical across modes and geometries") {
+    std::vector<std::uint8_t> rdram(8 * 1024 * 1024);
+    RdpHiddenBits hidden;
+    std::uint32_t seed = 12345;
+    const auto next = [&] { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    for (std::size_t i = 0; i < rdram.size(); ++i) {
+        // Blocks of equal pixels with noise, so divot and AA see edges and flat areas.
+        rdram[i] = static_cast<std::uint8_t>((i >> 9) * 37 + ((next() & 7) == 0 ? next() : 0));
+    }
+    for (std::size_t i = 0; i < RdpHiddenBits::kHalfwords; i += 1 + (next() & 3)) hidden.write(i, next() & 3);
+
+    struct Geometry { std::uint32_t width, origin, h_video, v_video, x_scale, y_scale; bool pal; };
+    const Geometry geometries[] = {
+        {320, 0x100000, 0x006C02EC, 0x002501FF, 0x200, 0x400, false},
+        {640, 0x200000, 0x006C02EC, 0x002501FF, 0x400, 0x800, false},
+        {300, 0x7F0000, 0x006003F0, 0x001003E8, 0x012301D5, 0x005503A1, false},
+        {320, 0x300000, 0x00800300, 0x005F0239, 0x200, 0x400, true},
+    };
+    const std::uint32_t gammas[] = {0, 0x8, 0xC, 0x4};
+    std::vector<std::uint64_t> hashes;
+    int index = 0;
+    for (std::uint32_t type = 2; type <= 3; ++type)
+        for (std::uint32_t aa = 0; aa < 4; ++aa)
+            for (std::uint32_t divot_on = 0; divot_on < 2; ++divot_on)
+                for (std::uint32_t filter = 0; filter < 2; ++filter, ++index) {
+                    const Geometry& g = geometries[index % 4];
+                    const bool interlaced = (index / 4) % 2 == 1;
+                    const std::uint32_t ctrl = type | gammas[(index / 2) % 4] | (divot_on << 4) |
+                                               (interlaced ? 0x40u : 0u) | (aa << 8) | (filter << 16);
+                    Vi vi;
+                    vi.set_region(g.pal ? Region::Pal : Region::Ntsc);
+                    vi.write(4 * kCtrl, ctrl);
+                    vi.write(4 * kOrigin, g.origin);
+                    vi.write(4 * kWidth, g.width);
+                    vi.write(4 * kHVideo, g.h_video);
+                    vi.write(4 * kVVideo, g.v_video);
+                    vi.write(4 * kXScale, g.x_scale);
+                    vi.write(4 * kYScale, g.y_scale);
+                    const Vi::Image first = vi.output(rdram, &hidden);
+                    hashes.push_back(fnv1a(first));
+                    if (interlaced) {  // the same field again, starting from the woven rows
+                        vi.write(4 * kOrigin, g.origin + 0x1000);
+                        hashes.push_back(fnv1a(vi.output(rdram, &hidden)));
+                    }
+                }
+    const std::vector<std::uint64_t> expected = {
+        17553323221106896361ULL, 11669288372512022957ULL, 17550512805807679845ULL,
+        2897776835038246661ULL, 11629831721871682345ULL, 16983412679623657851ULL,
+        6024847123326275411ULL, 10186586777697991339ULL, 2707133164878912938ULL,
+        11656338985942362987ULL, 8620338588348541846ULL, 5535305326677580360ULL,
+        6555840167066825669ULL, 474954212060856541ULL, 17274856174372994781ULL,
+        2670701352275071021ULL, 2841442856813745303ULL, 3505764302227094119ULL,
+        6158881912910697795ULL, 14645971949011481709ULL, 18419970014330885914ULL,
+        11992078974836833170ULL, 2047666190298847875ULL, 15702407665923199527ULL,
+        8660823312610508789ULL, 17517699174379774817ULL, 9950574364927809565ULL,
+        1377593670553904461ULL, 17135204741236327379ULL, 2271791998506446317ULL,
+        785103568014782211ULL, 1108759975767289739ULL, 8687197767477151095ULL,
+        1456743993712934955ULL, 15353911356103300996ULL, 13819783114828930580ULL,
+        10401714732780565245ULL, 12083942271623207461ULL, 15166594224619470485ULL,
+        13130923209543022677ULL, 5116080261666543925ULL, 7150536070026572193ULL,
+        4053552069046008317ULL, 639307317742329479ULL, 6425249660585260808ULL,
+        1586697627308736874ULL, 3713035970831837709ULL, 8968850268272197779ULL,
+    };
+    CHECK(hashes == expected);
+}
