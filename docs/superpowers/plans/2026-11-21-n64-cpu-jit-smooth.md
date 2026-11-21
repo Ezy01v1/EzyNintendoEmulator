@@ -102,8 +102,8 @@
     - `class RegAlloc` over abstract register indices `0..N-1`, built with `RegAlloc(unsigned registers, std::uint32_t volatile_mask)`. It has `Location get(std::uint32_t value, std::uint32_t position)` (a register, loading from a spill slot if needed), `Location define(std::uint32_t value, std::uint32_t position)`, `void release_dead(std::uint32_t position)`, `std::vector<Move> before_call(std::uint32_t position)` (it spills or moves the live values in volatile registers), `Snapshot snapshot() const` and `void restore(const Snapshot&)`. `Move` and `Location` say register↔slot transfers. On eviction the value with the farthest next use leaves first.
 - Host registers, fixed by this plan:
   - Pinned: `r15` = ctx, `r14` = guest base, `r13` = RAM base (loaded in the prologue only if used).
-  - Allocatable, in order: `rbx, rsi, rdi, rbp, r12, r8, r9, r10, r11`. The last four are volatile.
-  - Scratch, never allocated: `rax, rcx, rdx` (shifts by `cl`, `mul`/`imul` into `rdx:rax`, call arguments and the return value).
+  - Allocatable, in order: `rbx, rsi, rdi, rbp, r12, r10, r11`. The last two are volatile. `r8`/`r9` are left out because they carry call arguments, so loading arguments never has to untangle allocated values.
+  - Scratch, never allocated: `rax, rcx, rdx, r8, r9` (shifts by `cl`, `mul`/`imul` into `rdx:rax`, call arguments and the return value).
 - Calls follow Windows x64: arguments in `rcx, rdx, r8, r9`, return in `rax`, 32-byte shadow space, `rsp` 16-byte aligned at the call. The prologue pushes only the callee-saved registers the block uses, then reserves `8 * spill slots + 32`, rounded up for alignment.
 - Exits: each jump site (`ExitIf`, `Barrier` slow path) gets its own copy of the exit's ops, emitted after the body with the allocator snapshot taken at the site. `Exit` (the body's end) emits its exit inline.
 
@@ -119,7 +119,7 @@
   - `TEST_CASE("random IR blocks match across backends")`: 500 blocks generated from a fixed seed (ALU ops on I32/I64, compares, selects, guest loads and stores, a helper call, exit_if). Both backends give identical guest memory and exit ids.
 - [ ] **Step 3: Run them to see them fail.** Run `cmake --build --preset debug --target ezy_jit_tests` and expect compile errors.
 - [ ] **Step 4: Implement** `reg_alloc`, `x64_assembler.cpp` and the `Backend` parameter. The MIPS front-end keeps calling `jit::compile(ir, cache_.code())`, which now means `Assembler`.
-- [ ] **Step 5: Run the tests and the full checks.** `ctest --preset debug -R ezy_jit_tests` passes, then the full Debug suite 11/11, Release 183/183 (`--cpu-jit-check` included in the CTest Release entries), the MK64 dump-state SHA-1 `4a4c0711...`, and Spider-Man `--dump-state 1200 --audio-hle --rdp-threaded --cpu-jit` equal with both backends. For that last check, set a temporary environment override of the backend in the runner only, not committed, or a one-off local build.
+- [ ] **Step 5: Run the tests and the full checks.** `ctest --preset debug -R ezy_jit_tests` passes, then the full Debug suite 11/11, Release 183/183 (`--cpu-jit-check` included in the CTest Release entries), the MK64 dump-state SHA-1 `4a4c0711...`, the MK64 `--dump-state ... 1900 --cpu-jit` hashes equal to `build/baseline/ezy_n64_runner.exe`'s with `--rdp-sync` and with `--rdp-threaded --gfx-hle`, and Spider-Man `--dump-state 1200 --audio-hle --rdp-threaded --cpu-jit` equal with both backends. For that last check, set a temporary environment override of the backend in the runner only, not committed, or a one-off local build.
 - [ ] **Step 6: Commit.** Message: `JIT: linear register allocator and an x86::Assembler backend (Compiler kept for comparison)`
 
 ### Task 4: Measure, remove the Compiler backend, close the phase
