@@ -304,6 +304,19 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
       más barato (Assembler con registros fijos, salidas compartidas), FPU nativa, enlace de bloques,
       caché de registros entre instrucciones. Al hacer FPU nativa: volver a meter CU1/FR en la clave
       con varias claves por dirección (Ruling R5).
+      **Hecho en `n64/jit-smooth` (2026-11-21), sin sumar aún**: regla de entrada (sin compilar en PCs de
+      reanudación dentro de bloques) + `x86::Assembler` con asignador lineal propio; Compiler borrado.
+      MK64 carrera 1500-1900, mediana de 5 pares: **63,9 → 117,9 campos/s**, compilación de la carrera
+      3495 → 303 ms (-91 %), compile por bloque 0,165 → 0,036 ms, AsmJit 2,95 % del perfil. Objetivos 2 y 3
+      cumplidos; el 1 NO (quedan ~5 campos de compilación > 16,7 ms por ejecución, casi todos en los campos
+      1510-1512, la carga inicial; max 85-94 ms). Ver `docs/performance/2026-11-21-n64-cpu-jit-smooth.md`.
+      Siguiente:
+      - [ ] El usuario prueba DK's Jungle Parkway (el puente) y responde si el tirón se repite en la
+        segunda vuelta. Si guarda un estado con F2 ahí, el runner lo mide con
+        `--load-state "E:/Rom nintendo/Mario Kart 64 (USA).ss1" --hold A` (antes/después, 600 campos).
+      - [ ] PR de `n64/jit-smooth` (apilado sobre el PR #18 `n64/vi-output`).
+      - [ ] Si hace falta, ronda siguiente: compilar en segundo plano o con presupuesto por campo (ver doc),
+        luego FPU nativa.
     - Menores pendientes de la revisión: ver la lista en el mensaje final de la sesión 2026-11-19
       (SC sin LLbit, prueba RDP solo de fill, IR muerta tras likely nunca tomado, doble salida lenta).
     - Archivo suelto `E:\scratch_t10.txt` (fuera del repo) creado por un subagente: borrarlo a mano.
@@ -888,3 +901,8 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   `output()` 3,0 → 1,7 ms. Imágenes idénticas, prueba de hashes intacta (ahora reutiliza la imagen),
   Debug 11/11, Release 183/183, estado de MK64 en 1900 idéntico (4a4c07...). Fila de basura: solo en `--vi-raw`.
 - 2026-11-21 (3) — PRs #16, #17 y #18 abiertos (apilados, sin CI en el repo). Siguiente: detalles gráficos de MK64.
+- 2026-11-21 (4) — Fase 4 del JIT de CPU (rama `n64/jit-smooth`, sin push): medido y cerrado. Regla de entrada +
+  Assembler con asignador lineal; Compiler y `Backend` borrados; prueba aleatoria ahora contra un intérprete de IR.
+  MK64 1500-1900: 63,9 → 117,9 campos/s (5/5 pares), compilación de la carrera 3495 → 303 ms; quedan campos
+  lentos de compilación en 1510-1512 (objetivo 1 no cumplido). Debug 11/11, Release 183/183, SHA-1 de MK64 igual.
+  Pendiente del usuario: probar el puente de DK's Jungle Parkway; luego el PR.
