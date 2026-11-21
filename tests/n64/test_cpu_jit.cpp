@@ -591,6 +591,16 @@ TEST_CASE("an arbitrary resume inside a compiled block does not compile") {
     CHECK(r.instructions == 0);
     CHECK(t.jit.stats().compiled == before.compiled);
     CHECK(t.jit.stats().resume_skips == before.resume_skips + 1);
+    CHECK(t.jit_cpu.pc() == kKseg0 + kCode + 8);  // left where it was, for the interpreter
+    // The interpreter takes over from there and ends in the same state as the reference.
+    for (int k = 0; k < 5; ++k) t.ref_cpu.step();
+    t.ref_cpu.set_pc(kKseg0 + kCode + 8);
+    for (int k = 0; k < 3; ++k) {
+        t.jit_cpu.step();
+        t.ref_cpu.step();
+    }
+    CHECK(state_of(t.ref_cpu) == state_of(t.jit_cpu));
+    CHECK(t.jit_cpu.gpr(8) == 8);
 }
 
 TEST_CASE("a branch target inside a block compiles") {

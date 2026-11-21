@@ -183,15 +183,22 @@ TEST_CASE("CPU JIT native accesses call the RDP barrier exactly when the interpr
     // page 0x42 nothing: a read waits on 0x40 only, a write on both. A wait completes the
     // packet, so later accesses to its page no longer wait.
     constexpr std::uint32_t kGuardEnd = kData + 0x3000;
-    const std::vector<std::uint32_t> w = with_data_base({
-        lw(8, 28, 0x1000),   // 0x41 read: no wait
-        lw(9, 28, 0),        // 0x40 read: waits for 1
-        sw(9, 28, 4),        // 0x40 write: 1 is done
-        sh(8, 28, 0x1002),   // 0x41 write: waits for 2
-        sb(8, 28, 0x2000),   // 0x42: no wait
-        ld(10, 28, 8),       // 0x40: no wait
-        lbu(11, 28, 0x1003), // 0x41: no wait
-    });
+    // Every access follows a taken branch (beq 0,0 skipping nothing but its slot), so it is a
+    // jump target: after the interpreter ran a waiting access, the next one compiles and runs
+    // natively again (a mid-block resume would be left to the interpreter).
+    std::vector<std::uint32_t> body;
+    for (const std::uint32_t access : {
+             lw(8, 28, 0x1000),    // 0x41 read: no wait
+             lw(9, 28, 0),         // 0x40 read: waits for 1
+             sw(9, 28, 4),         // 0x40 write: 1 is done
+             sh(8, 28, 0x1002),    // 0x41 write: waits for 2
+             sb(8, 28, 0x2000),    // 0x42: no wait
+             ld(10, 28, 8),        // 0x40: no wait
+             lbu(11, 28, 0x1003),  // 0x41: no wait
+         }) {
+        body.insert(body.end(), {beq(0, 0, 1), nop(), access});
+    }
+    const std::vector<std::uint32_t> w = with_data_base(body);
     constexpr unsigned kAccesses = 7, kWaits = 2;
     const auto prepare = [](Twin& t) {
         for (TwinBus* bus : {&t.ref_bus, &t.jit_bus}) {
@@ -212,13 +219,12 @@ TEST_CASE("CPU JIT native accesses call the RDP barrier exactly when the interpr
         CHECK(t.ref_bus.guards == kAccesses);  // the interpreter asks on every access
         REQUIRE_NATIVE(t.jit);
         // Native code never calls it: its slow path leaves the block before the access, and
-        // the interpreter's step() asks. The first access ran natively; after the exit before
-        // the second, the rest of the block is a mid-block resume the JIT leaves to the
-        // interpreter, which asks on each of the other 6.
-        CHECK(t.jit_bus.guards == kAccesses - 1);
+        // the interpreter's step() asks (and waits) for those accesses only.
+        CHECK(t.jit_bus.guards == kWaits);
         CHECK(t.jit.stats().native == t.jit_instructions);
-        // One exit before the first waiting access; no block is compiled at the resume.
-        CHECK(t.jit.stats().exits_before == 1);
+        // Each wait: the block leaves before the access, then the block entered at it leaves
+        // again with no instruction run, and the harness steps the interpreter.
+        CHECK(t.jit.stats().exits_before == 2 * kWaits);
     }
     SUBCASE("a failed renderer sends every access to the bus") {
         Twin t;
@@ -230,9 +236,9 @@ TEST_CASE("CPU JIT native accesses call the RDP barrier exactly when the interpr
         CHECK(t.ref_bus.guards == kAccesses);
         REQUIRE_NATIVE(t.jit);
         CHECK(t.jit_bus.guards == kAccesses);  // the code reads wait too: only the data zone is counted
-        // The block leaves before the first access and the interpreter runs the rest (a
-        // mid-block resume compiles nothing).
-        CHECK(t.jit.stats().exits_before == 1);
+        // Each access is left to the interpreter: the first block leaves before the first one,
+        // then every block entered at an access leaves with no instruction run.
+        CHECK(t.jit.stats().exits_before == kAccesses + 1);
     }
     SUBCASE("without a view (synchronous RDP) native code never calls it") {
         Twin t;
