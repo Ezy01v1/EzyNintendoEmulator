@@ -377,9 +377,14 @@ private:
 };
 
 }  // namespace
+
+namespace detail {
+// x64_assembler.cpp: the Assembler backend.
+bool assemble(asmjit::CodeHolder& code, const IrBlock& block);
+}  // namespace detail
 #endif
 
-Compiled compile(const IrBlock& block, CodeBuffer& buffer) {
+Compiled compile(const IrBlock& block, CodeBuffer& buffer, Backend backend) {
 #if EZY_JIT_AVAILABLE
     if (!buffer.available()) return {nullptr, CompileError::Unsupported};
     auto& impl = *buffer.impl_;
@@ -389,9 +394,13 @@ Compiled compile(const IrBlock& block, CodeBuffer& buffer) {
         return {nullptr, CompileError::Unsupported};
     }
     code.set_error_handler(&errors);
-    asmjit::x86::Compiler cc(&code);
-    if (!Emitter(cc, block).emit() || errors.failed) return {nullptr, CompileError::Unsupported};
-    if (cc.finalize() != asmjit::Error::kOk || errors.failed) return {nullptr, CompileError::Unsupported};
+    if (backend == Backend::Assembler) {
+        if (!detail::assemble(code, block) || errors.failed) return {nullptr, CompileError::Unsupported};
+    } else {
+        asmjit::x86::Compiler cc(&code);
+        if (!Emitter(cc, block).emit() || errors.failed) return {nullptr, CompileError::Unsupported};
+        if (cc.finalize() != asmjit::Error::kOk || errors.failed) return {nullptr, CompileError::Unsupported};
+    }
     const auto size = code.code_size();
     if (size > impl.budget - impl.used) return {nullptr, CompileError::OutOfSpace};
     BlockFn fn = nullptr;
@@ -403,6 +412,7 @@ Compiled compile(const IrBlock& block, CodeBuffer& buffer) {
 #else
     (void)block;
     (void)buffer;
+    (void)backend;
     return {nullptr, CompileError::Unsupported};
 #endif
 }

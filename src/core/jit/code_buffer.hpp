@@ -11,6 +11,7 @@ namespace ezy::jit {
 
 class IrBlock;
 struct Compiled;
+enum class Backend : std::uint8_t;
 
 using BlockFn = std::uint32_t (*)(Context*) noexcept;      // returns the id of the exit taken
 
@@ -31,7 +32,7 @@ public:
     void reset();
 
 private:
-    friend Compiled compile(const IrBlock& block, CodeBuffer& buffer);
+    friend Compiled compile(const IrBlock& block, CodeBuffer& buffer, Backend backend);
     struct Impl;  // jit/code_buffer_impl.hpp, private to ezy_jit
     std::unique_ptr<Impl> impl_;
 };
