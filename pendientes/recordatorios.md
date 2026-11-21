@@ -911,3 +911,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   MK64 1500-1900: 63,9 → 117,9 campos/s (5/5 pares), compilación de la carrera 3495 → 303 ms; quedan campos
   lentos de compilación en 1510-1512 (objetivo 1 no cumplido). Debug 11/11, Release 183/183, SHA-1 de MK64 igual.
   Pendiente del usuario: probar el puente de DK's Jungle Parkway; luego el PR.
+- 2026-11-21 (4) — PR #19 abierto: `n64/jit-smooth` → `n64/vi-output` (apilado sobre #16-#18). Fusionar en orden #16, #17, #18, #19.
