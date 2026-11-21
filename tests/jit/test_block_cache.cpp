@@ -146,3 +146,28 @@ TEST_CASE("BlockCache rejects code that does not match the block and reports its
     cache.flush();
     CHECK(cache.arena_bytes() == 0);
 }
+
+TEST_CASE("covered marks a block's words after its first") {
+    BlockCache cache(kRam, 1 << 16);
+    CHECK_FALSE(cache.covered(0x1004));
+    put(cache, 0x1000, 1, 4);
+    CHECK_FALSE(cache.covered(0x1000));
+    CHECK(cache.covered(0x1004));
+    CHECK(cache.covered(0x1008));
+    CHECK(cache.covered(0x100C));
+    CHECK_FALSE(cache.covered(0x1010));
+    CHECK_FALSE(cache.covered(0x2004));        // a page with no blocks
+    CHECK_FALSE(cache.covered(kRam + 0x1004));  // outside RAM
+}
+
+TEST_CASE("invalidate and flush clear coverage") {
+    BlockCache cache(kRam, 1 << 16);
+    put(cache, 0x1000, 1, 4);
+    REQUIRE(cache.covered(0x1004));
+    cache.invalidate(0x1000, 0x1004);
+    CHECK_FALSE(cache.covered(0x1004));
+    put(cache, 0x1000, 1, 4);
+    REQUIRE(cache.covered(0x1004));
+    cache.flush();
+    CHECK_FALSE(cache.covered(0x1004));
+}

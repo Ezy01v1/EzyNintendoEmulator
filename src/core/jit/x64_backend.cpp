@@ -1,13 +1,18 @@
+// The x86-64 backend: our own linear register allocator (reg_alloc.hpp) feeding an
+// x86::Assembler. (AsmJit's x86::Compiler and its allocator made compiling expensive.)
 #include "jit/x64_backend.hpp"
 
 #if EZY_JIT_AVAILABLE
 #include <asmjit/x86.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 #include "jit/code_buffer_impl.hpp"
+#include "jit/reg_alloc.hpp"
 #endif
 
 namespace ezy::jit {
@@ -23,6 +28,22 @@ struct Errors final : ErrorHandler {
     bool failed = false;
     void handle_error(Error, const char*, BaseEmitter*) override { failed = true; }
 };
+
+// Host registers. Pinned: the context, the guest base and the RAM base. Allocatable in this
+// order (the callee-saved first; r10/r11 are volatile). Scratch, never allocated: rax, rcx,
+// rdx, r8 and r9 (shift counts, mul/imul, call arguments and results).
+constexpr x86::Gp kCtx = x86::r15;
+constexpr x86::Gp kGuest = x86::r14;
+constexpr x86::Gp kRam = x86::r13;
+constexpr unsigned kAllocatable = 7;
+constexpr std::uint32_t kVolatileMask = 0b110'0000U;
+
+constexpr std::array<x86::Gp, kAllocatable> kRegisters{x86::rbx, x86::rsi, x86::rdi, x86::rbp,
+                                                       x86::r12, x86::r10, x86::r11};
+
+x86::Gp host(unsigned index) { return kRegisters[index]; }
+
+x86::Gp sized(const x86::Gp& reg, Type type) { return type == Type::I64 ? reg.r64() : reg.r32(); }
 
 x86::CondCode condition(Cond cond) {
     switch (cond) {
@@ -40,340 +61,455 @@ x86::CondCode condition(Cond cond) {
 
 constexpr std::int32_t field(std::size_t offset) { return static_cast<std::int32_t>(offset); }
 
-// One virtual register per IR value; AsmJit's allocator assigns the host registers.
+constexpr std::int32_t kShadowSpace = 32;
+constexpr std::int32_t kPage = 4096;
+
+// Code layout, by section order: the prologue (.text, emitted last, when the registers and
+// slots are known), the body ending in its own exit, the shared epilogue right after it,
+// then one copy of an exit's ops per jump site.
 class Emitter {
 public:
-    Emitter(x86::Compiler& cc, const IrBlock& block) : cc_(cc), block_(block), values_(block.value_count()) {}
+    Emitter(CodeHolder& code, x86::Assembler& a, const IrBlock& block)
+        : code_(code), a_(a), block_(block), uses_(block), alloc_(kAllocatable, kVolatileMask, uses_) {}
 
     bool emit() {
         for (std::size_t id = 0; id < block_.value_count(); ++id) {
             const auto type = block_.type_of(static_cast<std::uint32_t>(id));
             if (type != Type::I32 && type != Type::I64) return false;
         }
-        auto* function = cc_.add_func(FuncSignature::build<std::uint32_t, Context*>());
-        if (function == nullptr) return false;
-        ctx_ = cc_.new_gp_ptr("ctx");
-        function->set_arg(0, ctx_);
-        bool guest = false, ram = false;
-        const auto scan = [&](const std::vector<Inst>& ops) {
-            for (const auto& inst : ops) {
-                guest = guest || inst.op == Op::LoadGuest || inst.op == Op::StoreGuest;
-                ram = ram || inst.op == Op::LoadRam || inst.op == Op::StoreRam;
-            }
-        };
         scan(block_.body());
         for (ExitId exit = 0; exit < block_.exit_count(); ++exit) scan(block_.exit_ops(exit));
-        if (guest) {
-            guest_ = cc_.new_gp_ptr("guest");
-            cc_.mov(guest_, x86::qword_ptr(ctx_, field(offsetof(Context, guest))));
+
+        Section* body = nullptr;
+        Section* tail = nullptr;
+        Section* sites = nullptr;
+        constexpr auto flags = SectionFlags::kExecutable | SectionFlags::kReadOnly;
+        if (code_.new_section(Out(body), ".body", SIZE_MAX, flags, 1, 1) != Error::kOk ||
+            code_.new_section(Out(tail), ".tail", SIZE_MAX, flags, 1, 2) != Error::kOk ||
+            code_.new_section(Out(sites), ".sites", SIZE_MAX, flags, 1, 3) != Error::kOk) {
+            return false;
         }
-        if (ram) {
-            ram_ = cc_.new_gp_ptr("ram");
-            cc_.mov(ram_, x86::qword_ptr(ctx_, field(offsetof(Context, ram))));
+        epilogue_ = a_.new_label();
+
+        a_.section(body);
+        const auto& ops = block_.body();
+        for (std::uint32_t p = 0; p < ops.size(); ++p) {
+            if (!op(ops[p], p)) return false;
+            if (ops[p].op != Op::Exit) alloc_.release_dead(p + 1);
         }
-        for (ExitId exit = 0; exit < block_.exit_count(); ++exit) exits_.push_back(cc_.new_label());
-        for (const auto& inst : block_.body()) {
-            if (!op(inst)) return false;
+        // Op::Exit emitted its exit inline: it falls through into the epilogue.
+
+        a_.section(sites);
+        for (const auto& site : sites_) {
+            a_.bind(site.label);
+            alloc_.restore(site.state);
+            if (!emit_exit(site.exit)) return false;
+            a_.jmp(epilogue_);
         }
-        // Each exit region sits after the body: it runs its own ops and returns its id.
-        for (ExitId exit = 0; exit < block_.exit_count(); ++exit) {
-            cc_.bind(exits_[exit]);
-            for (const auto& inst : block_.exit_ops(exit)) {
-                if (!op(inst)) return false;
-            }
-            auto id = cc_.new_gp32();
-            cc_.mov(id, Imm(exit));
-            cc_.ret(id);
+
+        // Callee-saved registers the block touched, and the frame.
+        std::vector<x86::Gp> saved;
+        for (unsigned r = 0; r < kAllocatable; ++r) {
+            const auto bit = 1U << r;
+            if ((alloc_.used_registers() & bit) != 0 && (kVolatileMask & bit) == 0) saved.push_back(host(r));
         }
-        cc_.end_func();
+        if (ram_) saved.push_back(kRam);
+        if (guest_) saved.push_back(kGuest);
+        if (ctx_) saved.push_back(kCtx);
+        std::int32_t frame = 0;
+        if (calls_ || alloc_.slot_count() != 0) {
+            frame = kShadowSpace + 8 * static_cast<std::int32_t>(alloc_.slot_count());
+            // rsp is 8 mod 16 at entry (the return address); 16-byte aligned at every call.
+            if ((8 + 8 * static_cast<std::int32_t>(saved.size()) + frame) % 16 != 0) frame += 8;
+        }
+
+        a_.section(tail);
+        a_.bind(epilogue_);
+        if (frame != 0) a_.add(x86::rsp, frame);
+        for (auto it = saved.rbegin(); it != saved.rend(); ++it) a_.pop(*it);
+        a_.ret();
+
+        a_.section(code_.text_section());
+        for (const auto& reg : saved) a_.push(reg);
+        // Windows commits the stack one guard page at a time: touch each page of a large frame.
+        for (std::int32_t probe = kPage; probe < frame; probe += kPage) {
+            a_.mov(x86::eax, x86::dword_ptr(x86::rsp, -probe));
+        }
+        if (frame != 0) a_.sub(x86::rsp, frame);
+        if (ram_) a_.mov(kRam, x86::qword_ptr(x86::rcx, field(offsetof(Context, ram))));
+        if (guest_) a_.mov(kGuest, x86::qword_ptr(x86::rcx, field(offsetof(Context, guest))));
+        if (ctx_) a_.mov(kCtx, x86::rcx);
+        // Falls through into .body.
         return true;
     }
 
 private:
-    x86::Gp temp(Type type) { return type == Type::I64 ? cc_.new_gp64() : cc_.new_gp32(); }
+    struct Site {
+        Label label;
+        ExitId exit;
+        RegAlloc::Snapshot state;
+    };
 
-    x86::Gp& def(const Inst& inst) { return values_[inst.result] = temp(inst.type); }
-
-    const x86::Gp& v(std::uint32_t id) const { return values_[id]; }
-
-    x86::Mem sized(const x86::Gp& base, const x86::Gp& index, Type type) const {
-        return type == Type::I64 ? x86::qword_ptr(base, index) : x86::dword_ptr(base, index);
-    }
-
-    x86::Mem guest(const Inst& inst, Type type) const {
-        const auto offset = static_cast<std::int32_t>(inst.imm);
-        return type == Type::I64 ? x86::qword_ptr(guest_, offset) : x86::dword_ptr(guest_, offset);
-    }
-
-    void store_guest(const Inst& inst) {
-        const auto offset = static_cast<std::int32_t>(inst.imm);
-        const auto& value = v(inst.a);
-        switch (inst.aux) {
-            case 1: cc_.mov(x86::byte_ptr(guest_, offset), value.r8()); break;
-            case 2: cc_.mov(x86::word_ptr(guest_, offset), value.r16()); break;
-            case 4: cc_.mov(x86::dword_ptr(guest_, offset), value.r32()); break;
-            default: cc_.mov(guest(inst, inst.type), value); break;  // 0 or the whole I64
+    void scan(const std::vector<Inst>& ops) {
+        for (const auto& inst : ops) {
+            switch (inst.op) {
+                case Op::LoadGuest: case Op::StoreGuest: guest_ = true; break;
+                case Op::LoadRam: case Op::StoreRam: ram_ = true; break;
+                case Op::LoadContext: case Op::StoreContext: case Op::Barrier: ctx_ = true; break;
+                case Op::NoteRamWrite: case Op::Call: ctx_ = calls_ = true; break;
+                default: break;
+            }
         }
     }
 
-    // Zero-extended physical address, usable as a 64-bit index.
-    x86::Gp index(std::uint32_t paddr) {
-        auto index = cc_.new_gp64();
-        cc_.mov(index.r32(), v(paddr));
-        return index;
+    static x86::Mem slot(std::uint32_t index) {
+        return x86::qword_ptr(x86::rsp, kShadowSpace + 8 * static_cast<std::int32_t>(index));
     }
 
-    x86::Gp page(std::uint32_t paddr) {
-        auto page = index(paddr);
-        cc_.shr(page.r32(), 12);
-        return page;
+    void flush() {
+        for (const auto& move : moves_) {
+            using Kind = Location::Kind;
+            if (move.from.kind == Kind::Register && move.to.kind == Kind::Slot) {
+                a_.mov(slot(move.to.index), host(move.from.index));
+            } else if (move.from.kind == Kind::Slot) {
+                a_.mov(host(move.to.index), slot(move.from.index));
+            } else {
+                a_.mov(host(move.to.index), host(move.from.index));
+            }
+        }
+        moves_.clear();
     }
 
-    bool op(const Inst& inst) {
+    // A register holding the operand (64-bit view).
+    x86::Gp use(std::uint32_t value, std::uint32_t position) {
+        const unsigned r = alloc_.get(value, position, moves_);
+        flush();
+        return host(r);
+    }
+
+    // The result's register, at the result type's width. Distinct from every operand fetched
+    // with use() for the same op: those stay locked until release_dead().
+    x86::Gp def(const Inst& inst, std::uint32_t position) {
+        const unsigned r = alloc_.define(inst.result, position, moves_);
+        flush();
+        return sized(host(r), inst.type);
+    }
+
+    // A call argument or a copy, from wherever the value is.
+    bool load(const x86::Gp& to, std::uint32_t value) {
+        const auto at = alloc_.where(value);
+        if (at.kind == Location::Kind::Register) a_.mov(to, host(at.index));
+        else if (at.kind == Location::Kind::Slot) a_.mov(to, slot(at.index));
+        else return false;
+        return true;
+    }
+
+    void jump_site(const Label& label, ExitId exit) { sites_.push_back({label, exit, alloc_.snapshot()}); }
+
+    // An exit's ops from the allocator's current state, then its id in eax.
+    bool emit_exit(ExitId exit) {
+        const auto begin = uses_.exit_begin(exit);
+        alloc_.set_region_end(uses_.exit_end(exit));
+        alloc_.release_dead(begin);
+        const auto& ops = block_.exit_ops(exit);
+        for (std::uint32_t j = 0; j < ops.size(); ++j) {
+            if (!op(ops[j], begin + j)) return false;
+            alloc_.release_dead(begin + j + 1);
+        }
+        a_.mov(x86::eax, Imm(exit));
+        return true;
+    }
+
+    x86::Mem guest(const Inst& inst, unsigned bytes) const {
+        const auto offset = static_cast<std::int32_t>(inst.imm);
+        switch (bytes) {
+            case 1: return x86::byte_ptr(kGuest, offset);
+            case 2: return x86::word_ptr(kGuest, offset);
+            case 4: return x86::dword_ptr(kGuest, offset);
+            default: return x86::qword_ptr(kGuest, offset);
+        }
+    }
+
+    bool op(const Inst& inst, std::uint32_t p) {
         switch (inst.op) {
             case Op::Const: {
-                auto& d = def(inst);
-                if (inst.imm == 0) cc_.xor_(d.r32(), d.r32());
-                else cc_.mov(d, Imm(inst.imm));
+                const auto d = def(inst, p);
+                if (inst.imm == 0) a_.xor_(d.r32(), d.r32());
+                else if (inst.imm <= 0xFFFF'FFFFULL) a_.mov(d.r32(), Imm(inst.imm));  // zero-extends
+                else a_.mov(d.r64(), Imm(inst.imm));
                 return true;
             }
-            case Op::LoadGuest: cc_.mov(def(inst), guest(inst, inst.type)); return true;
-            case Op::StoreGuest: store_guest(inst); return true;
-            case Op::LoadContext:
-                cc_.mov(def(inst), x86::qword_ptr(ctx_, field(context_offset(static_cast<ContextField>(inst.aux)))));
+            case Op::LoadGuest: {
+                const auto d = def(inst, p);
+                a_.mov(d, guest(inst, inst.type == Type::I64 ? 8 : 4));
                 return true;
-            case Op::StoreContext:
-                cc_.mov(x86::qword_ptr(ctx_, field(context_offset(static_cast<ContextField>(inst.aux)))), v(inst.a));
+            }
+            case Op::StoreGuest: {
+                const auto v = use(inst.a, p);
+                switch (inst.aux) {
+                    case 1: a_.mov(guest(inst, 1), v.r8()); break;
+                    case 2: a_.mov(guest(inst, 2), v.r16()); break;
+                    case 4: a_.mov(guest(inst, 4), v.r32()); break;
+                    default: a_.mov(guest(inst, inst.type == Type::I64 ? 8 : 4), sized(v, inst.type)); break;
+                }
                 return true;
+            }
+            case Op::LoadContext: {
+                const auto d = def(inst, p);
+                a_.mov(d, x86::qword_ptr(kCtx, field(context_offset(static_cast<ContextField>(inst.aux)))));
+                return true;
+            }
+            case Op::StoreContext: {
+                const auto v = use(inst.a, p);
+                a_.mov(x86::qword_ptr(kCtx, field(context_offset(static_cast<ContextField>(inst.aux)))), v);
+                return true;
+            }
             case Op::Add: case Op::Sub: case Op::And: case Op::Or: case Op::Xor: case Op::Nor:
             case Op::Shl: case Op::Shr: case Op::Sar: case Op::Mul:
-                binary(inst);
+                binary(inst, p);
                 return true;
-            case Op::MulHiS: case Op::MulHiU: mul_high(inst); return true;
+            case Op::MulHiS: case Op::MulHiU: mul_high(inst, p); return true;
             case Op::Sext8: case Op::Sext16: case Op::Sext32: case Op::Zext32: case Op::Trunc:
-                convert(inst);
+                convert(inst, p);
                 return true;
             case Op::Compare: {
-                auto& d = def(inst);
-                cc_.xor_(d, d);
-                cc_.cmp(v(inst.a), v(inst.b));
-                cc_.set(condition(static_cast<Cond>(inst.aux)), d.r8());
+                const auto type = block_.type_of(inst.a);
+                const auto x = use(inst.a, p);
+                const auto y = use(inst.b, p);
+                const auto d = def(inst, p);
+                a_.xor_(d, d);
+                a_.cmp(sized(x, type), sized(y, type));
+                a_.set(condition(static_cast<Cond>(inst.aux)), d.r8());
                 return true;
             }
             case Op::Select: {
-                auto& d = def(inst);
-                cc_.mov(d, v(inst.c));
-                cc_.test(v(inst.a), v(inst.a));
-                cc_.cmovnz(d, v(inst.b));
+                const auto cond = use(inst.a, p);
+                const auto if_true = use(inst.b, p);
+                const auto if_false = use(inst.c, p);
+                const auto d = def(inst, p);
+                a_.mov(d, sized(if_false, inst.type));
+                a_.test(cond.r32(), cond.r32());
+                a_.cmovnz(d, sized(if_true, inst.type));
                 return true;
             }
-            case Op::OverflowAdd: case Op::OverflowSub: case Op::CarryAdd: flag(inst); return true;
-            case Op::LoadRam: load_ram(inst); return true;
-            case Op::StoreRam: store_ram(inst); return true;
-            case Op::Barrier: return barrier(inst);
-            case Op::NoteRamWrite: return note_ram_write(inst);
-            case Op::Call: return call(inst);
-            case Op::ExitIf:
-                cc_.test(v(inst.a), v(inst.a));
-                cc_.jnz(exits_[inst.imm]);
+            case Op::OverflowAdd: case Op::OverflowSub: case Op::CarryAdd: flag(inst, p); return true;
+            case Op::LoadRam: load_ram(inst, p); return true;
+            case Op::StoreRam: store_ram(inst, p); return true;
+            case Op::Barrier: barrier(inst, p); return true;
+            case Op::NoteRamWrite: note_ram_write(inst, p); return true;
+            case Op::Call: return call(inst, p);
+            case Op::ExitIf: {
+                const auto cond = use(inst.a, p);
+                const auto taken = a_.new_label();
+                a_.test(cond.r32(), cond.r32());
+                a_.jnz(taken);
+                jump_site(taken, static_cast<ExitId>(inst.imm));
                 return true;
-            case Op::Exit: cc_.jmp(exits_[inst.imm]); return true;
+            }
+            case Op::Exit: return emit_exit(static_cast<ExitId>(inst.imm));
         }
         return false;
     }
 
-    void binary(const Inst& inst) {
-        auto& d = def(inst);
-        const auto& a = v(inst.a);
-        const auto& b = v(inst.b);
+    void binary(const Inst& inst, std::uint32_t p) {
+        const auto x = sized(use(inst.a, p), inst.type);
+        const auto y = sized(use(inst.b, p), inst.type);
+        const auto d = def(inst, p);
         if (inst.op == Op::Shl || inst.op == Op::Shr || inst.op == Op::Sar) {
             // x86 masks a CL count by 31 or 63: the IR's width-1 mask.
-            auto count = cc_.new_gp32();
-            cc_.mov(count, b.r32());
-            cc_.mov(d, a);
-            if (inst.op == Op::Shl) cc_.shl(d, count.r8());
-            else if (inst.op == Op::Shr) cc_.shr(d, count.r8());
-            else cc_.sar(d, count.r8());
+            a_.mov(x86::ecx, y.r32());
+            a_.mov(d, x);
+            if (inst.op == Op::Shl) a_.shl(d, x86::cl);
+            else if (inst.op == Op::Shr) a_.shr(d, x86::cl);
+            else a_.sar(d, x86::cl);
             return;
         }
-        cc_.mov(d, a);
+        a_.mov(d, x);
         switch (inst.op) {
-            case Op::Add: cc_.add(d, b); break;
-            case Op::Sub: cc_.sub(d, b); break;
-            case Op::And: cc_.and_(d, b); break;
-            case Op::Or: cc_.or_(d, b); break;
-            case Op::Xor: cc_.xor_(d, b); break;
-            case Op::Nor: cc_.or_(d, b); cc_.not_(d); break;
-            case Op::Mul: cc_.imul(d, b); break;
+            case Op::Add: a_.add(d, y); break;
+            case Op::Sub: a_.sub(d, y); break;
+            case Op::And: a_.and_(d, y); break;
+            case Op::Or: a_.or_(d, y); break;
+            case Op::Xor: a_.xor_(d, y); break;
+            case Op::Nor: a_.or_(d, y); a_.not_(d); break;
+            case Op::Mul: a_.imul(d, y); break;
             default: break;
         }
     }
 
-    void mul_high(const Inst& inst) {
-        auto& d = def(inst);
+    void mul_high(const Inst& inst, std::uint32_t p) {
         const bool is_signed = inst.op == Op::MulHiS;
+        const auto x = use(inst.a, p);
+        const auto y = use(inst.b, p);
+        const auto d = def(inst, p);
         if (inst.type == Type::I64) {
-            auto low = cc_.new_gp64();
-            cc_.mov(low, v(inst.a));
-            if (is_signed) cc_.imul(d, low, v(inst.b));  // rdx:rax <- rax * b
-            else cc_.mul(d, low, v(inst.b));
+            a_.mov(x86::rax, x);
+            if (is_signed) a_.imul(y);  // rdx:rax <- rax * y
+            else a_.mul(y);
+            a_.mov(d, x86::rdx);
             return;
         }
         // 32 bits: the full product fits a 64-bit register.
-        auto x = cc_.new_gp64(), y = cc_.new_gp64();
         if (is_signed) {
-            cc_.movsxd(x, v(inst.a));
-            cc_.movsxd(y, v(inst.b));
+            a_.movsxd(x86::rax, x.r32());
+            a_.movsxd(x86::rcx, y.r32());
         } else {
-            cc_.mov(x.r32(), v(inst.a));
-            cc_.mov(y.r32(), v(inst.b));
+            a_.mov(x86::eax, x.r32());
+            a_.mov(x86::ecx, y.r32());
         }
-        cc_.imul(x, y);
-        if (is_signed) cc_.sar(x, 32);
-        else cc_.shr(x, 32);
-        cc_.mov(d, x.r32());
+        a_.imul(x86::rax, x86::rcx);
+        if (is_signed) a_.sar(x86::rax, 32);
+        else a_.shr(x86::rax, 32);
+        a_.mov(d, x86::eax);
     }
 
-    void convert(const Inst& inst) {
-        auto& d = def(inst);
-        const auto& s = v(inst.a);
+    void convert(const Inst& inst, std::uint32_t p) {
+        const auto s = use(inst.a, p);
+        const auto d = def(inst, p);
         switch (inst.op) {
-            case Op::Sext8: cc_.movsx(d, s.r8()); break;
-            case Op::Sext16: cc_.movsx(d, s.r16()); break;
-            case Op::Sext32: cc_.movsxd(d, s.r32()); break;
-            case Op::Zext32: cc_.mov(d.r32(), s.r32()); break;  // a 32-bit write clears the upper half
-            case Op::Trunc: cc_.mov(d, s.r32()); break;
+            case Op::Sext8: a_.movsx(d, s.r8()); break;
+            case Op::Sext16: a_.movsx(d, s.r16()); break;
+            case Op::Sext32: a_.movsxd(d.r64(), s.r32()); break;
+            case Op::Zext32: case Op::Trunc: a_.mov(d.r32(), s.r32()); break;  // a 32-bit write clears the upper half
             default: break;
         }
     }
 
-    void flag(const Inst& inst) {
-        auto& d = def(inst);
-        auto scratch = temp(block_.type_of(inst.a));
-        cc_.xor_(d, d);
-        cc_.mov(scratch, v(inst.a));
-        if (inst.op == Op::OverflowSub) cc_.sub(scratch, v(inst.b));
-        else cc_.add(scratch, v(inst.b));
-        if (inst.op == Op::CarryAdd) cc_.setc(d.r8());
-        else cc_.seto(d.r8());
+    void flag(const Inst& inst, std::uint32_t p) {
+        const auto type = block_.type_of(inst.a);
+        const auto x = use(inst.a, p);
+        const auto y = use(inst.b, p);
+        const auto d = def(inst, p);
+        const auto scratch = sized(x86::rax, type);
+        a_.xor_(d, d);
+        a_.mov(scratch, sized(x, type));
+        if (inst.op == Op::OverflowSub) a_.sub(scratch, sized(y, type));
+        else a_.add(scratch, sized(y, type));
+        if (inst.op == Op::CarryAdd) a_.setc(d.r8());
+        else a_.seto(d.r8());
     }
 
-    void load_ram(const Inst& inst) {
-        auto& d = def(inst);
-        const auto at = index(inst.a);
+    void load_ram(const Inst& inst, std::uint32_t p) {
+        const auto at = use(inst.a, p);
+        const auto d = def(inst, p);
+        a_.mov(x86::ecx, at.r32());  // zero-extended physical address
         switch (inst.aux) {
-            case 1: cc_.movzx(d.r32(), x86::byte_ptr(ram_, at)); break;
+            case 1: a_.movzx(d.r32(), x86::byte_ptr(kRam, x86::rcx)); break;
             case 2:
-                cc_.movzx(d.r32(), x86::word_ptr(ram_, at));
-                cc_.ror(d.r16(), 8);
+                a_.movzx(d.r32(), x86::word_ptr(kRam, x86::rcx));
+                a_.ror(d.r16(), 8);
                 break;
             case 4:
-                cc_.mov(d.r32(), x86::dword_ptr(ram_, at));
-                cc_.bswap(d.r32());
+                a_.mov(d.r32(), x86::dword_ptr(kRam, x86::rcx));
+                a_.bswap(d.r32());
                 break;
             default:
-                cc_.mov(d, x86::qword_ptr(ram_, at));
-                cc_.bswap(d);
+                a_.mov(d.r64(), x86::qword_ptr(kRam, x86::rcx));
+                a_.bswap(d.r64());
                 break;
         }
     }
 
-    void store_ram(const Inst& inst) {
-        const auto at = index(inst.a);
-        const auto& value = v(inst.b);
-        if (inst.aux == 1) {
-            cc_.mov(x86::byte_ptr(ram_, at), value.r8());
-            return;
+    void store_ram(const Inst& inst, std::uint32_t p) {
+        const auto at = use(inst.a, p);
+        const auto v = use(inst.b, p);
+        a_.mov(x86::ecx, at.r32());
+        switch (inst.aux) {
+            case 1: a_.mov(x86::byte_ptr(kRam, x86::rcx), v.r8()); break;
+            case 2:
+                a_.mov(x86::eax, v.r32());
+                a_.ror(x86::ax, 8);
+                a_.mov(x86::word_ptr(kRam, x86::rcx), x86::ax);
+                break;
+            case 4:
+                a_.mov(x86::eax, v.r32());
+                a_.bswap(x86::eax);
+                a_.mov(x86::dword_ptr(kRam, x86::rcx), x86::eax);
+                break;
+            default:
+                a_.mov(x86::rax, v.r64());
+                a_.bswap(x86::rax);
+                a_.mov(x86::qword_ptr(kRam, x86::rcx), x86::rax);
+                break;
         }
-        auto swapped = inst.aux == 8 ? cc_.new_gp64() : cc_.new_gp32();
-        cc_.mov(swapped, inst.aux == 8 ? value : value.r32());
-        if (inst.aux == 2) {
-            cc_.ror(swapped.r16(), 8);
-            cc_.mov(x86::word_ptr(ram_, at), swapped.r16());
-            return;
-        }
-        cc_.bswap(swapped);
-        cc_.mov(sized(ram_, at, inst.aux == 8 ? Type::I64 : Type::I32), swapped);
     }
 
     // The renderer's memory barrier, with no call: the block leaves through the barrier's
     // exit when the page has a newer packet than completed_seen, or the renderer failed.
-    bool barrier(const Inst& inst) {
+    // rax = view, rcx = page, rdx = sequences, r8 = table, r9 = slot / sequence.
+    void barrier(const Inst& inst, std::uint32_t p) {
         const bool write = (inst.imm & 1) != 0;
-        const Label slow = exits_[inst.imm >> Inst::kBarrierExitShift];
-        const auto done = cc_.new_label();
-        auto view = cc_.new_gp_ptr();
-        cc_.mov(view, x86::qword_ptr(ctx_, field(offsetof(Context, barrier))));
-        cc_.test(view, view);
-        cc_.jz(done);
-        const auto at = page(inst.a);
-        auto table = cc_.new_gp_ptr(), sequences = cc_.new_gp_ptr();
-        auto slot = cc_.new_gp64(), sequence = cc_.new_gp64();
-        cc_.mov(sequences, x86::qword_ptr(view, field(offsetof(PageBarrierView, slot_sequence))));
-        cc_.mov(table, x86::qword_ptr(view, field(offsetof(PageBarrierView, writers))));
-        cc_.movzx(slot.r32(), x86::word_ptr(table, at, 1));
-        cc_.mov(sequence, x86::qword_ptr(sequences, slot, 3));
+        const auto at = use(inst.a, p);
+        const auto slow = a_.new_label();
+        const auto done = a_.new_label();
+        a_.mov(x86::rax, x86::qword_ptr(kCtx, field(offsetof(Context, barrier))));
+        a_.test(x86::rax, x86::rax);
+        a_.jz(done);
+        a_.mov(x86::ecx, at.r32());
+        a_.shr(x86::ecx, 12);
+        a_.mov(x86::rdx, x86::qword_ptr(x86::rax, field(offsetof(PageBarrierView, slot_sequence))));
+        a_.mov(x86::r8, x86::qword_ptr(x86::rax, field(offsetof(PageBarrierView, writers))));
+        a_.movzx(x86::r9d, x86::word_ptr(x86::r8, x86::rcx, 1));
+        a_.mov(x86::r9, x86::qword_ptr(x86::rdx, x86::r9, 3));
         if (write) {
-            auto reader = cc_.new_gp64();
-            cc_.mov(table, x86::qword_ptr(view, field(offsetof(PageBarrierView, readers))));
-            cc_.movzx(slot.r32(), x86::word_ptr(table, at, 1));
-            cc_.mov(reader, x86::qword_ptr(sequences, slot, 3));
-            cc_.cmp(reader, sequence);
-            cc_.cmova(sequence, reader);
+            a_.mov(x86::r8, x86::qword_ptr(x86::rax, field(offsetof(PageBarrierView, readers))));
+            a_.movzx(x86::r8d, x86::word_ptr(x86::r8, x86::rcx, 1));
+            a_.mov(x86::r8, x86::qword_ptr(x86::rdx, x86::r8, 3));
+            a_.cmp(x86::r8, x86::r9);
+            a_.cmova(x86::r9, x86::r8);
         }
-        cc_.mov(table, x86::qword_ptr(view, field(offsetof(PageBarrierView, completed_seen))));
-        cc_.cmp(sequence, x86::qword_ptr(table));
-        cc_.ja(slow);
-        cc_.mov(table, x86::qword_ptr(view, field(offsetof(PageBarrierView, failed))));
-        cc_.cmp(x86::byte_ptr(table), 0);  // an acquire load is a plain load on x86-64
-        cc_.jne(slow);
-        cc_.bind(done);
+        a_.mov(x86::r8, x86::qword_ptr(x86::rax, field(offsetof(PageBarrierView, completed_seen))));
+        a_.cmp(x86::r9, x86::qword_ptr(x86::r8));
+        a_.ja(slow);
+        a_.mov(x86::r8, x86::qword_ptr(x86::rax, field(offsetof(PageBarrierView, failed))));
+        a_.cmp(x86::byte_ptr(x86::r8), 0);  // an acquire load is a plain load on x86-64
+        a_.jne(slow);
+        a_.bind(done);
+        jump_site(slow, static_cast<ExitId>(inst.imm >> Inst::kBarrierExitShift));
+    }
+
+    // The call is conditional, so the volatile registers are made safe on both paths.
+    void note_ram_write(const Inst& inst, std::uint32_t p) {
+        const auto at = use(inst.a, p);
+        a_.mov(x86::edx, at.r32());
+        alloc_.before_call(p, moves_);
+        flush();
+        const auto done = a_.new_label();
+        a_.mov(x86::ecx, x86::edx);
+        a_.shr(x86::ecx, 12);
+        a_.mov(x86::rax, x86::qword_ptr(kCtx, field(offsetof(Context, code_pages))));
+        a_.movzx(x86::eax, x86::byte_ptr(x86::rax, x86::rcx));
+        a_.test(x86::eax, x86::eax);
+        a_.jz(done);  // eax = 0: compiled code is unchanged
+        a_.mov(x86::rcx, kCtx);
+        a_.mov(x86::r8d, inst.aux);
+        a_.call(x86::qword_ptr(kCtx, field(offsetof(Context, code_write))));
+        a_.bind(done);
+        const auto d = def(inst, p);
+        a_.mov(d.r32(), x86::eax);
+    }
+
+    bool call(const Inst& inst, std::uint32_t p) {
+        if (!load(x86::rdx, inst.a) || !load(x86::r8, inst.b) || !load(x86::r9, inst.c)) return false;
+        alloc_.before_call(p, moves_);
+        flush();
+        a_.mov(x86::rcx, kCtx);
+        a_.mov(x86::rax, Imm(inst.imm));
+        a_.call(x86::rax);
+        const auto d = def(inst, p);
+        a_.mov(d.r64(), x86::rax);
         return true;
     }
 
-    bool note_ram_write(const Inst& inst) {
-        auto& d = def(inst);
-        const auto done = cc_.new_label();
-        auto pages = cc_.new_gp_ptr();
-        cc_.xor_(d, d);
-        cc_.mov(pages, x86::qword_ptr(ctx_, field(offsetof(Context, code_pages))));
-        const auto at = page(inst.a);
-        cc_.cmp(x86::byte_ptr(pages, at), 0);
-        cc_.je(done);
-        auto code_write = cc_.new_gp_ptr();
-        cc_.mov(code_write, x86::qword_ptr(ctx_, field(offsetof(Context, code_write))));
-        InvokeNode* node = nullptr;
-        cc_.invoke(Out(node), code_write, FuncSignature::build<std::uint32_t, Context*, std::uint32_t, std::uint32_t>());
-        if (node == nullptr) return false;
-        node->set_arg(0, ctx_);
-        node->set_arg(1, v(inst.a));
-        node->set_arg(2, Imm(inst.aux));
-        node->set_ret(0, d);
-        cc_.bind(done);
-        return true;
-    }
-
-    bool call(const Inst& inst) {
-        auto& d = def(inst);
-        auto helper = cc_.new_gp_ptr();
-        cc_.mov(helper, Imm(inst.imm));
-        InvokeNode* node = nullptr;
-        cc_.invoke(Out(node), helper,
-                   FuncSignature::build<std::uint64_t, Context*, std::uint64_t, std::uint64_t, std::uint64_t>());
-        if (node == nullptr) return false;
-        node->set_arg(0, ctx_);
-        node->set_arg(1, v(inst.a));
-        node->set_arg(2, v(inst.b));
-        node->set_arg(3, v(inst.c));
-        node->set_ret(0, d);
-        return true;
-    }
-
-    x86::Compiler& cc_;
+    CodeHolder& code_;
+    x86::Assembler& a_;
     const IrBlock& block_;
-    std::vector<x86::Gp> values_;
-    std::vector<Label> exits_;
-    x86::Gp ctx_, guest_, ram_;
+    UsePositions uses_;
+    RegAlloc alloc_;
+    std::vector<Move> moves_;
+    std::vector<Site> sites_;
+    Label epilogue_;
+    bool ctx_ = false, guest_ = false, ram_ = false, calls_ = false;
 };
 
 }  // namespace
@@ -389,9 +525,12 @@ Compiled compile(const IrBlock& block, CodeBuffer& buffer) {
         return {nullptr, CompileError::Unsupported};
     }
     code.set_error_handler(&errors);
-    asmjit::x86::Compiler cc(&code);
-    if (!Emitter(cc, block).emit() || errors.failed) return {nullptr, CompileError::Unsupported};
-    if (cc.finalize() != asmjit::Error::kOk || errors.failed) return {nullptr, CompileError::Unsupported};
+    asmjit::x86::Assembler assembler(&code);
+    try {
+        if (!Emitter(code, assembler, block).emit() || errors.failed) return {nullptr, CompileError::Unsupported};
+    } catch (const std::logic_error&) {  // the allocator rejected the block: the caller falls back
+        return {nullptr, CompileError::Unsupported};
+    }
     const auto size = code.code_size();
     if (size > impl.budget - impl.used) return {nullptr, CompileError::OutOfSpace};
     BlockFn fn = nullptr;

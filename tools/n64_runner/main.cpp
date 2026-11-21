@@ -23,6 +23,9 @@
 // --vi-output: --screenshot, --series and --benchmark save the VI's filtered 640x480 (PAL
 // 640x576) output (N64::output) instead of the framebuffer (N64::image); --benchmark also
 // times output(), called once per field.
+// --hold NAME[+NAME...][@FIELD] holds controller 1 buttons from field FIELD (default 0) on, for
+// --screenshot, --series, --dump-state and --benchmark (warm-up included). Names: A B Z Start Up
+// Down Left Right L R CU CD CL CR. --frame-times <csv> (--benchmark) writes field,ms,compile_ms.
 #include <cstdint>
 #include <charconv>
 #include <cstdio>
@@ -32,12 +35,14 @@
 #include <exception>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "n64/cpu/vr4300_jit.hpp"
 #include "n64/n64.hpp"
 #include "benchmark.hpp"
+#include "frame_stats.hpp"
 
 namespace {
 
@@ -153,7 +158,8 @@ void print_cpu_jit_stats(const N64& n64) {
     std::cout << "CPU JIT: blocks: " << s.compiled << ", in place: " << s.in_place << ", native: " << s.native
               << ", out of block: " << s.out_of_block << ", exits before: " << s.exits_before
               << ", compile ms: " << s.compile_ns / 1e6 << ", invalidations: " << s.invalidations
-              << ", flushes: " << s.flushes << '\n';
+              << ", flushes: " << s.flushes << ", resume skips: " << s.resume_skips
+              << ", compile max ms: " << s.compile_max_ns / 1e6 << ", code bytes: " << s.code_bytes << '\n';
 }
 
 // Selects the CPU mode; false (after printing why) when the JIT was asked for and is missing.
@@ -200,6 +206,8 @@ int run(int raw_argc, char* raw_argv[]) {
     int trace_from = 0;
     bool audio_hle = false, audio_hle_check = false, gfx_hle = false, cpu_jit = false, cpu_jit_check = false;
     bool vi_output = false;
+    const char* frame_times_path = nullptr;
+    std::optional<HoldSpec> hold;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--rdp-threaded") == 0) rdp_mode = ezy::n64::RdpMode::Threaded;
@@ -218,6 +226,11 @@ int run(int raw_argc, char* raw_argv[]) {
             if (error != std::errc{} || end != value.data() + value.size() || time_from < 0) {
                 std::cerr << "--time-from requires a nonnegative field index\n"; return 2;
             }
+        }
+        else if (std::strcmp(raw_argv[i], "--frame-times") == 0 && i + 1 < raw_argc) frame_times_path = raw_argv[++i];
+        else if (std::strcmp(raw_argv[i], "--hold") == 0 && i + 1 < raw_argc) {
+            hold = parse_hold(raw_argv[++i]);
+            if (!hold) { std::cerr << "--hold requires NAME[+NAME...][@FIELD], e.g. A+CU@1500\n"; return 2; }
         }
         else if (std::strcmp(raw_argv[i], "--profile") == 0 && i + 1 < raw_argc) profile_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--dump-final-state") == 0 && i + 1 < raw_argc) final_state_path = raw_argv[++i];
@@ -241,7 +254,10 @@ int run(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --state-check [frames]\n"
                      "       ezy_n64_runner <rom> --dump-state <out.bin> [frames]\n"
                      "       ezy_n64_runner <rom> --benchmark <out.bmp> <end> --time-from <first>\n"
-                     "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>\n"
+                     "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>,\n"
+                     "         --frame-times <out.csv> (field,ms,compile_ms per timed field)\n"
+                     "Hold buttons: --hold NAME[+NAME...][@FIELD] (A B Z Start Up Down Left Right L R CU CD\n"
+                     "         CL CR; from field FIELD, default 0; screenshot, series, dump-state, benchmark)\n"
                      "Screenshot options: --rdp-trace <out.bin> [--trace-from <field>]\n"
                      "Screenshot, series and benchmark: --vi-output (save the VI's filtered 640x480\n"
                      "         output instead of the framebuffer; --benchmark also times it)\n"
@@ -272,12 +288,18 @@ int run(int raw_argc, char* raw_argv[]) {
     std::cout << "RSP: " << (n64->bus().rsp().jit_active() ? "JIT available" : "interpreter") << '\n';
     std::cout << "CPU: " << (n64->cpu_jit() ? (cpu_jit_check ? "JIT (checked)" : "JIT") : "interpreter") << '\n';
     const std::string mode = args[2];
-    if (mode != "--benchmark" && (time_from != 0 || profile_path || final_state_path)) {
-        std::cerr << "--time-from, --profile and --dump-final-state require --benchmark\n"; return 2;
+    if (mode != "--benchmark" && (time_from != 0 || profile_path || final_state_path || frame_times_path)) {
+        std::cerr << "--time-from, --profile, --dump-final-state and --frame-times require --benchmark\n"; return 2;
     }
     if (vi_output && mode != "--screenshot" && mode != "--series" && mode != "--benchmark") {
         std::cerr << "--vi-output requires --screenshot, --series or --benchmark\n"; return 2;
     }
+    if (hold && mode != "--screenshot" && mode != "--series" && mode != "--dump-state" && mode != "--benchmark") {
+        std::cerr << "--hold requires --screenshot, --series, --dump-state or --benchmark\n"; return 2;
+    }
+    const auto press = [&](int field) {
+        if (hold && field >= hold->from_field) n64->bus().pif().set_buttons(0, hold->buttons, 0, 0);
+    };
     if (mode != "--screenshot" && (trace_path || trace_from != 0)) {
         std::cerr << "--rdp-trace and --trace-from require --screenshot\n"; return 2;
     }
@@ -288,7 +310,7 @@ int run(int raw_argc, char* raw_argv[]) {
         if (error != std::errc{} || end != value.data() + value.size() || end_frame <= time_from) {
             std::cerr << "Benchmark end must be greater than --time-from\n"; return 2;
         }
-        if (!benchmark_frames(*n64, time_from, end_frame, profile_path, vi_output)) return 2;
+        if (!benchmark_frames(*n64, time_from, end_frame, profile_path, vi_output, frame_times_path, hold)) return 2;
         const auto bmp = encode_bmp(picture(*n64, vi_output));
         std::ofstream image(args[3], std::ios::binary);
         image.write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
@@ -309,6 +331,7 @@ int run(int raw_argc, char* raw_argv[]) {
         std::vector<std::uint64_t> trace;
         for (int i = 0; i < frames; ++i) {
             if (trace_path && i == trace_from) n64->bus().rdp().set_trace(&trace);
+            press(i);
             n64->run_frame();
         }
         if (trace_path) {
@@ -331,6 +354,7 @@ int run(int raw_argc, char* raw_argv[]) {
         const int first = std::atoi(args[4]), last = std::atoi(args[5]), step = std::atoi(args[6]);
         if (first < 0 || last < first || step <= 0) { std::cerr << "Bad --series range\n"; return 2; }
         for (int i = 1; i <= last; ++i) {
+            press(i - 1);
             n64->run_frame();
             if (i < first || (i - first) % step != 0) continue;
             const std::vector<char> bmp = encode_bmp(picture(*n64, vi_output));
@@ -341,7 +365,7 @@ int run(int raw_argc, char* raw_argv[]) {
     }
     if (mode == "--dump-state" && argc >= 4) {
         const int frames=argc>4?std::atoi(args[4]):120;
-        for(int i=0;i<frames;++i) n64->run_frame();
+        for(int i=0;i<frames;++i) { press(i); n64->run_frame(); }
         const auto state=n64->save_state();
         std::ofstream file(args[3],std::ios::binary);
         file.write(reinterpret_cast<const char*>(state.data()),static_cast<std::streamsize>(state.size()));
