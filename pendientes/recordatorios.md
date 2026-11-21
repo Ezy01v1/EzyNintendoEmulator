@@ -321,7 +321,6 @@ eferenciares-v148` (fuera del repo).
     - [x] El usuario probó MK64 en ezyemu con filtro: "se ve bien". PRs abiertos y apilados (2026-11-21):
       #16 `n64/gfx-hle-port` → main, #17 `n64/cpu-jit` → `n64/gfx-hle-port`, #18 `n64/vi-output` → `n64/cpu-jit`.
       Fusionar en ese orden (al borrar la rama fusionada GitHub cambia la base del siguiente a main).
-    - [ ] El usuario dice que faltan "unos detallitos gráficos" en MK64: preguntar cuáles y revisarlos.
     - [x] Fila de basura en la última línea: solo está en el framebuffer crudo (`--vi-raw`); la salida
       del VI sigue V_VIDEO y la deja negra, como ares.
     - Menor (para después): en juegos entrelazados, si ezyemu dibuja un campo de cada dos, el campo
