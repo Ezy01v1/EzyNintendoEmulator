@@ -108,11 +108,41 @@ unsigned clamp_shade(std::int64_t start, const TextureGradient& gradient, int pi
     return (value & 0x80) ? 0 : 255;
 }
 
-// Z is 15.17 fixed point; the depth unit works on 18 bits and saturates outside them.
-std::uint32_t clamp_depth(std::int64_t z) {
-    const auto value = static_cast<std::uint32_t>(z >> 10) & 0x3FFFFF;
-    if (value & 0x200000) return 0;
-    return std::min(value, 0x3FFFFU);
+// The pixel's Z for the depth unit (angrylion's z_correct). The accumulator is s15.16; the
+// depth unit keeps 15.3 bits. A partly covered pixel moves Z from the pixel corner to its
+// first covered subsample (offset_x, offset_y in quarter pixels, using the X and Y slopes
+// >> 10). Then bit 18 saturates to the far plane and bits 17 and 18 together (negative)
+// clamp to zero.
+std::uint32_t correct_depth(std::int64_t z, unsigned coverage, int offset_x, int offset_y, std::int32_t dzdx,
+                            std::int32_t dzdy) {
+    auto value = static_cast<std::int32_t>((z >> 10) & 0x3FFFFF);
+    if (coverage == 8) {
+        value >>= 3;
+    } else {
+        value = ((value << 2) + offset_x * (dzdx >> 10) + offset_y * (dzdy >> 10)) >> 5;
+    }
+    switch ((value & 0x60000) >> 17) {
+        case 2: return 0x3FFFF;
+        case 3: return 0;
+        default: return static_cast<std::uint32_t>(value) & 0x3FFFF;
+    }
+}
+
+// The per-pixel DZ of a triangle from its Z slopes (angrylion's spans_dzpix): the integer
+// parts' magnitudes, summed, then rounded up to the next power of two (normalize_dzpix).
+unsigned triangle_dz(std::int32_t dzdx, std::int32_t dzdy) {
+    const auto magnitude = [](std::int32_t slope) {
+        const auto integer = static_cast<unsigned>(slope >> 16) & 0xFFFF;
+        return (integer & 0x8000) ? (~integer & 0x7FFF) : integer;
+    };
+    const unsigned sum = (magnitude(dzdx) + magnitude(dzdy)) & 0xFFFF;
+    if (sum & 0xC000) return 0x8000;
+    if (sum == 0) return 1;
+    if (sum == 1) return 3;
+    for (unsigned bit = 0x2000; bit != 0; bit >>= 1) {
+        if (sum & bit) return bit << 1;
+    }
+    return 0;
 }
 
 // 18-bit Z is stored as a 3-bit count of leading ones and an 11-bit mantissa.
@@ -274,6 +304,7 @@ bool RdpRasterizer::try_constant_rectangle(unsigned left, unsigned top, unsigned
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t base = color_address_ & ~(bytes - 1);
     std::array<std::uint8_t, 4> pattern{};
+    unsigned pattern_hidden = 0;
     bool ready = false;
     for (unsigned y = top >> 2; y < (bottom >> 2); ++y) {
         if (!field_matches(y)) continue;
@@ -284,6 +315,7 @@ bool RdpRasterizer::try_constant_rectangle(unsigned left, unsigned top, unsigned
         if (!ready) {
             if (!write_opaque_pixel(left >> 2, y, color, Rgba{}, 8, rdram)) return true;
             std::copy_n(rdram.begin() + static_cast<std::ptrdiff_t>(address), bytes, pattern.begin());
+            pattern_hidden = hidden_bits(address);  // RGBA5551's two low coverage bits
             ready = true;
         }
         EZY_RDP_ADD(constant_rectangle, 1, count);
@@ -293,6 +325,8 @@ bool RdpRasterizer::try_constant_rectangle(unsigned left, unsigned top, unsigned
             if (bytes == 4) {
                 rdram[at + 2] = pattern[2];
                 rdram[at + 3] = pattern[3];
+            } else {
+                set_hidden_bits(at, pattern_hidden);
             }
         }
     }
@@ -375,12 +409,9 @@ void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
         };
         z = {word(depth_at, 32), word(depth_at, 0), word(depth_at + 1, 32), word(depth_at + 1, 0)};
     }
-    // Pixel DZ is the sum of the X and Y slopes (or the primitive's DZ), rounded to a power of two.
-    const auto magnitude = [](std::int32_t slope) { return static_cast<std::int64_t>(slope < 0 ? ~slope : slope); };
-    const unsigned pixel_dz = highest_power_of_two(
-        (solid_.modes & (1U << 2)) ? prim_depth_ & 0xFFFF
-                                   : static_cast<unsigned>(std::min<std::int64_t>(
-                                         (magnitude(z.dx) + magnitude(z.dy)) >> 16, 0x7FFF)));
+    // Pixel DZ comes from the Z slopes, or is the primitive's DZ as given.
+    const unsigned pixel_dz = (solid_.modes & (1U << 2)) ? highest_power_of_two(prim_depth_ & 0xFFFF)
+                                                         : triangle_dz(z.dx, z.dy);
     const bool late = (major.step < 0) == major_left;
     for (int y = top >> 2; 4 * y < bottom; ++y) {
         if (!field_matches(static_cast<unsigned>(y))) continue;
@@ -435,8 +466,27 @@ void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
             }
             std::uint32_t pixel_z = 0;
             if (coverage != 0 && use_depth) {
-                pixel_z = (solid_.modes & (1U << 2)) ? ((prim_depth_ >> 16) & 0x7FFF) << 3
-                                                     : clamp_depth(start_z + std::int64_t{z.dx} * (x - texture_x));
+                if (solid_.modes & (1U << 2)) {
+                    pixel_z = ((prim_depth_ >> 16) & 0x7FFF) << 3;
+                } else {
+                    // The first covered subsample: topmost row, then leftmost of its two
+                    // samples (even rows sit at quarter-pixel columns 0 and 2, odd rows at 1 and 3).
+                    int offset_x = 0, offset_y = 0;
+                    for (unsigned row = 0; row < samples.size(); ++row) {
+                        const int odd = static_cast<int>(row & 1);
+                        const int sample = x * 8 + odd * 2;
+                        if (samples[row].covers(sample)) {
+                            offset_y = static_cast<int>(row), offset_x = odd;
+                            break;
+                        }
+                        if (samples[row].covers(sample + 4)) {
+                            offset_y = static_cast<int>(row), offset_x = 2 + odd;
+                            break;
+                        }
+                    }
+                    pixel_z = correct_depth(start_z + std::int64_t{z.dx} * (x - texture_x), coverage, offset_x,
+                                            offset_y, z.dx, z.dy);
+                }
                 if (!depth_test(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, pixel_dz, coverage, rdram)) {
                     continue;
                 }
@@ -511,10 +561,20 @@ void RdpRasterizer::fill_span(unsigned y, unsigned left, unsigned right, std::sp
         // The fill register is repeated as a packed big-endian word on the memory bus.
         rdram[addr] = static_cast<std::uint8_t>(fill_color_ >> ((3 - (addr & 3)) * 8));
     }
-    // Fills clear the hidden bits they cover. Hardware copies each halfword's low bit into them;
-    // only depth reads use them here, and depth clears (0xFFFC) have that bit clear.
+    // Fills copy each halfword's low bit into its hidden bits (3 or 0), like the hardware: a
+    // 16-bit color clear with the alpha bit set reads back as full coverage, and depth clears
+    // (0xFFFC) leave them clear. The packed word repeats, so even halfwords take bit 16 and odd
+    // ones bit 0.
     if (first < end) {
-        hidden_->clear(first >> 1, (end + 1) >> 1);
+        const unsigned even = (fill_color_ & 0x10000U) ? 3 : 0, odd = (fill_color_ & 1U) ? 3 : 0;
+        const std::size_t first_halfword = first >> 1, end_halfword = (end + 1) >> 1;
+        if ((even | odd) == 0) {
+            hidden_->clear(first_halfword, end_halfword);
+        } else {
+            for (std::size_t halfword = first_halfword; halfword < end_halfword; ++halfword) {
+                hidden_->write(halfword, (halfword & 1) ? odd : even);
+            }
+        }
     }
 }
 
@@ -698,14 +758,14 @@ RdpRasterizer::Rgba RdpRasterizer::combine(const Rgba& texel0, const Rgba& texel
     return result;
 }
 unsigned RdpRasterizer::memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const {
-    // Without image reads, memory coverage reads as full (7). RGBA5551 keeps only the top
-    // coverage bit; the two hidden low bits are taken as set.
+    // Without image reads, memory coverage reads as full (7). RGBA5551 keeps the top coverage
+    // bit in bit 0 and the two low bits in the halfword's hidden bits.
     if (!(solid_.modes & (1U << 6))) return 7;
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t address = (color_address_ & ~(bytes - 1)) +
         (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
     if (address + bytes > rdram.size()) return 7;
-    if (bytes == 2) return ((rdram[address + 1] & 1U) << 2) | 3;
+    if (bytes == 2) return ((rdram[address + 1] & 1U) << 2) | hidden_bits(address);
     return rdram[address + 3] >> 5;
 }
 
@@ -806,14 +866,14 @@ bool RdpRasterizer::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combi
     EZY_RDP_OBSERVE(true, coverage);
 
     // Memory color and coverage. Without image reads, memory coverage reads as full (7).
-    // RGBA5551 keeps only the top coverage bit; the two hidden low bits are taken as set.
+    // RGBA5551 keeps the top coverage bit in bit 0 and the two low bits in the hidden bits.
     std::array<unsigned, 3> memory{};
     unsigned memory_coverage = 7;
     if (solid_.modes & (1U << 6)) {
         if (bytes == 2) {
             const unsigned value = (unsigned{rdram[address]} << 8) | rdram[address + 1];
             memory = {((value >> 11) & 31) << 3, ((value >> 6) & 31) << 3, ((value >> 1) & 31) << 3};
-            memory_coverage = ((value & 1) << 2) | 3;
+            memory_coverage = ((value & 1) << 2) | hidden_bits(address);
         } else {
             memory = {rdram[address], rdram[address + 1], rdram[address + 2]};
             memory_coverage = rdram[address + 3] >> 5;
@@ -903,9 +963,11 @@ bool RdpRasterizer::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combi
         }
     }();
     if (bytes == 2) {
+        // RGBA5551 stores the coverage's top bit in bit 0 and its two low bits in the hidden bits.
         const unsigned packed = ((r & 0xF8) << 8) | ((g & 0xF8) << 3) | ((b & 0xF8) >> 2) | (stored >> 2);
         rdram[address] = static_cast<std::uint8_t>(packed >> 8);
         rdram[address + 1] = static_cast<std::uint8_t>(packed);
+        set_hidden_bits(address, stored & 3);
     } else {
         rdram[address] = static_cast<std::uint8_t>(r);
         rdram[address + 1] = static_cast<std::uint8_t>(g);

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <memory>
+#include <optional>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -53,6 +55,8 @@ public:
     void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const override {
         rdp_.prepare_memory(address, bytes, write);
     }
+    static_assert(RdpWorker::kRamSize == kRdramSize, "the RDP page tables must cover the RDRAM the CPU JIT indexes");
+    [[nodiscard]] std::optional<jit::PageBarrierView> barrier_view() const override { return rdp_.barrier_view(); }
     void drain_rdp() const { rdp_.drain(); }
     // DMA engines touch only their own RDRAM range: wait for the RDP packets touching it (a
     // write also waits for the readers), not for all of them. Outside RDRAM: everything.
@@ -64,10 +68,13 @@ public:
     // PI_RD_LEN (0x08) / PI_WR_LEN (0x0C) about to start a DMA of (value + 1) bytes at PI_DRAM_ADDR.
     // The cartridge -> RDRAM copy goes in blocks of up to 128 bytes that each end on an 8-byte
     // boundary (Pi::copy_to_rdram): at most 8 bytes past the length per block.
+    // A cartridge -> RDRAM copy is also reported to the code watch.
     void prepare_pi_dma(std::uint32_t reg, std::uint32_t value) const {
         const std::uint32_t length = (value & 0x00FFFFFF) + 1;
         const std::uint32_t start = pi_.read(0x00) & ~7U;
-        prepare_range(start, std::uint64_t{length} + 8 * (length / 128 + 2), reg == 0x0C);
+        const std::uint64_t bytes = std::uint64_t{length} + 8 * (length / 128 + 2);
+        prepare_range(start, bytes, reg == 0x0C);
+        if (reg == 0x0C) note_dram_write(start, bytes);
     }
     // Audio DMA reads only its own buffer: wait for the RDP packets touching it, not all of them.
     void prepare_ai_read(Ai::ReadRange range) const {
@@ -75,9 +82,20 @@ public:
         if (range.address + range.bytes <= rdram_.size()) rdp_.prepare_memory(range.address, range.bytes, false);
         else drain_rdp();
     }
+    // What the audio HLE does before it touches an RDRAM range (AudioHle::Access): waits
+    // for the RDP packets over it and reports a write to the code watch.
+    void audio_hle_access(std::uint32_t address, std::uint32_t bytes, bool write) const {
+        if (address + bytes <= rdram_.size()) rdp_.prepare_memory(address, bytes, write);
+        else drain_rdp();
+        if (write) note_dram_write(address, bytes);
+    }
     [[nodiscard]] bool rdp_threaded() const { return rdp_.threaded(); }
     [[nodiscard]] RdpWorker::Stats rdp_stats() const { return rdp_.stats(); }
     [[nodiscard]] Vi::Image image() const { drain_rdp(); return vi_.image(rdram_); }
+    [[nodiscard]] const RdpHiddenBits& hidden_bits() const { return rdp_.hidden_bits(); }
+    // The filtered 640-wide screen (Vi::output), after the RDP finishes its packets.
+    [[nodiscard]] Vi::Image output() const { drain_rdp(); return vi_.output(rdram_, &hidden_bits()); }
+    void output(Vi::Image& img) const { drain_rdp(); vi_.output(rdram_, &hidden_bits(), img); }
 
     // Audio tasks of a known microcode run at a high level instead of on the RSP.
     void set_audio_hle(bool enabled) { audio_hle_ = enabled; }
@@ -108,7 +126,8 @@ public:
     [[nodiscard]] Pi& pi() { return pi_; }
     [[nodiscard]] RspRegs& rsp() { return rsp_; }
     [[nodiscard]] Rdp& rdp() { return rdp_; }
-    // Raw RDRAM, for code that already waits for the RDP itself (HLE, tests).
+    // Raw RDRAM, for code that already waits for the RDP itself (HLE, tests). Writes through
+    // it are not reported to the code watch: a writer must call note_ram_write() itself.
     [[nodiscard]] std::span<std::uint8_t> rdram() { return rdram_; }
     [[nodiscard]] Vi& vi() { return vi_; }
     [[nodiscard]] Si& si() { return si_; }
@@ -137,6 +156,13 @@ public:
     }
 
 private:
+    // A write by an engine whose RDRAM address wraps at 16 MB (PI, SP DMA, audio HLE): the
+    // code watch gets the parts inside RDRAM, the wrapped one included.
+    void note_dram_write(std::uint32_t address, std::uint64_t bytes) const {
+        constexpr std::uint64_t kWrap = 0x1000000;
+        note_ram_write(address, static_cast<std::size_t>(std::min<std::uint64_t>(bytes, kWrap)));
+        if (address + bytes > kWrap) note_ram_write(0, static_cast<std::size_t>(std::min(address + bytes - kWrap, kWrap)));
+    }
     // 32-bit register/ROM read and write for everything that isn't RDRAM or SP memory.
     [[nodiscard]] std::uint32_t read_io(std::uint32_t paddr);
     void write_io(std::uint32_t paddr, std::uint32_t value);

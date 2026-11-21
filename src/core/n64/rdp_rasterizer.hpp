@@ -96,7 +96,8 @@ protected:
     std::uint32_t prim_lod_ = 0;  // Set Primitive Color: min level and LOD fraction
     mutable std::uint32_t noise_state_ = 1;
     std::uint32_t primitive_serial_ = 1;  // draws so far: the noise seed, saved in states
-    // Only depth writes set the hidden bits; fills clear them. Band copies share the table.
+    // RDRAM hidden bits: depth writes keep the DZ code's low bits, 16-bit color writes the
+    // coverage's low bits, and fills and COPY each halfword's low bit. Band copies share the table.
     std::shared_ptr<RdpHiddenBits> hidden_ = std::make_shared<RdpHiddenBits>();
     // Threaded rendering splits rows between band workers in groups of 4: this copy draws
     // the groups with (y / 4) % band_count_ == band_index_. Not saved: set by the owner.

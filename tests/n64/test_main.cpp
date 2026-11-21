@@ -16,6 +16,8 @@ int main(int argc, char** argv) {
             ezy::n64::set_default_rsp_mode(ezy::n64::RspMode::Jit);
         else if (std::strcmp(argv[i], "--rsp-interpreter") == 0)
             ezy::n64::set_default_rsp_mode(ezy::n64::RspMode::Interpreter);
+        else if (std::strcmp(argv[i], "--cpu-jit") == 0)
+            ezy::n64::set_default_cpu_mode(ezy::n64::CpuMode::Jit);
         else args.push_back(argv[i]);
     }
     doctest::Context context;

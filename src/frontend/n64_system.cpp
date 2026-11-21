@@ -10,6 +10,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <utility>
 
 #include "debug_ui.hpp"
 #include "file_util.hpp"
@@ -142,22 +143,27 @@ constexpr n64::RdpMode kFrontendRdpMode = n64::RdpMode::Threaded;
 // Audio tasks of known microcodes run at a high level (MK64: same RDRAM bytes as the RSP
 // over 1858 tasks, ~18 % faster). Unknown ones still run on the RSP. Graphics HLE only on
 // request (--gfx-hle) until it has been played enough.
-std::unique_ptr<n64::N64> create_n64(std::span<const std::uint8_t> rom, bool gfx_hle) {
+std::unique_ptr<n64::N64> create_n64(std::span<const std::uint8_t> rom, bool gfx_hle, bool cpu_jit) {
     auto n64 = n64::N64::create(rom, {}, kFrontendRdpMode);
     if (n64) {
         n64->bus().set_audio_hle(true);
         n64->bus().set_gfx_hle(gfx_hle);
+        if (cpu_jit && !n64->set_cpu_mode(n64::CpuMode::Jit)) {
+            static bool warned = false;  // create_n64 runs again on every reset
+            if (!std::exchange(warned, true))
+                std::cerr << "Warning: this build has no CPU JIT; the CPU runs in the interpreter\n";
+        }
     }
     return n64;
 }
 }  // namespace
 
 std::unique_ptr<N64System> N64System::create(std::span<const std::uint8_t> rom, std::filesystem::path rom_path,
-                                             bool gfx_hle) {
-    auto n64 = create_n64(rom, gfx_hle);
+                                             bool gfx_hle, bool cpu_jit, bool vi_raw) {
+    auto n64 = create_n64(rom, gfx_hle, cpu_jit);
     if (!n64) return nullptr;
     std::unique_ptr<N64System> system(
-        new N64System({rom.begin(), rom.end()}, std::move(n64), std::move(rom_path), gfx_hle));
+        new N64System({rom.begin(), rom.end()}, std::move(n64), std::move(rom_path), gfx_hle, cpu_jit, vi_raw));
     system->load_eeprom();
     return system;
 }
@@ -215,7 +221,7 @@ void N64System::collect_audio() {
 
 void N64System::reset() {
     flush_eeprom();
-    n64_ = create_n64(rom_, gfx_hle_);
+    n64_ = create_n64(rom_, gfx_hle_, cpu_jit_);
     load_eeprom();
     resample_phase_ = 0;
     update_controller();
@@ -281,7 +287,36 @@ void N64System::handle_key(SDL_Scancode scancode, bool pressed) {
     update_controller();
 }
 
+// The VI's output (Vi::output): 640x480 is copied as it is; PAL's 640x576 is scaled to 480
+// lines (nearest) and to 640 * 480 / 576 = 533 columns, keeping its 4:3 shape, between black
+// side bars. Called on the emulation thread, right after run_frame (output() reads RDRAM).
 void N64System::render(std::span<std::uint32_t> argb_pixels) const {
+    if (vi_raw_) {
+        render_raw(argb_pixels);
+        return;
+    }
+    n64_->output(frame_);
+    const n64::Vi::Image& img = frame_;
+    if (img.width == kCanvasWidth && img.height == kCanvasHeight) {
+        std::copy(img.argb.begin(), img.argb.end(), argb_pixels.begin());
+        return;
+    }
+    std::fill(argb_pixels.begin(), argb_pixels.end(), 0xFF000000);
+    if (img.width <= 0 || img.height <= 0) return;
+    const int width = std::min(kCanvasWidth, img.width * kCanvasHeight / img.height);
+    const int left = (kCanvasWidth - width) / 2;
+    for (int y = 0; y < kCanvasHeight; ++y) {
+        const int sy = y * img.height / kCanvasHeight;
+        for (int x = 0; x < width; ++x) {
+            const int sx = x * img.width / width;
+            argb_pixels[static_cast<std::size_t>(y * kCanvasWidth + left + x)] =
+                img.argb[static_cast<std::size_t>(sy * img.width + sx)];
+        }
+    }
+}
+
+// --vi-raw: the framebuffer itself (Vi::image), nearest-scaled to the whole canvas.
+void N64System::render_raw(std::span<std::uint32_t> argb_pixels) const {
     const n64::Vi::Image img = n64_->image();
     if (img.width <= 0 || img.height <= 0) {
         std::fill(argb_pixels.begin(), argb_pixels.end(), 0xFF000000);

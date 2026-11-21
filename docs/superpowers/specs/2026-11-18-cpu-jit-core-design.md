@@ -53,10 +53,10 @@ después una entrada PowerPC sobre el mismo núcleo.
 ## Restricciones
 
 - C++20, MSVC Build Tools 2022, Windows x64; solo los presets de CMake.
-- AsmJit, ya fijado por SHA en `src/core/n64/CMakeLists.txt` para el JIT del RSP. Hoy solo
-  se descarga dentro de `if(EZY_N64_RSP_JIT AND EZY_N64_HOST_X64)` y se enlaza PRIVATE a
-  `ezy_n64`; la descarga (y la detección de host x64) sube a un nivel común para que
-  `ezy_jit` lo tenga aunque el JIT del RSP esté apagado. El JIT de CPU va tras su propia
+- AsmJit, ya fijado por SHA en `cmake/asmjit.cmake` para el JIT del RSP. Antes solo se
+  descargaba dentro de `if(EZY_N64_RSP_JIT AND EZY_HOST_X64)` y se enlazaba PRIVATE a
+  `ezy_n64`; la descarga (y la detección de host x64, `EZY_HOST_X64`) sube a un nivel común
+  para que `ezy_jit` lo tenga aunque el JIT del RSP esté apagado. El JIT de CPU va tras su propia
   opción `EZY_N64_CPU_JIT` (ON por defecto en hosts x64, como `EZY_N64_RSP_JIT`); con la
   opción OFF todo compila y las suites pasan sin AsmJit.
 - Activación en tiempo de ejecución: `--cpu-jit` en `ezy_n64_runner` y en `ezyemu`,

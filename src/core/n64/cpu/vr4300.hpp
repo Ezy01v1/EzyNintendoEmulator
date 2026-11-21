@@ -10,6 +10,8 @@
 
 namespace ezy::n64 {
 
+class Vr4300Jit;
+
 // The NEC VR4300 (MIPS III): the N64's main CPU, interpreted one instruction per step().
 //
 // Branches: the instruction after a branch (its delay slot) always runs before the jump,
@@ -25,6 +27,19 @@ public:
     explicit Vr4300(CpuBus& bus) : bus_(bus) {}
 
     int step();
+
+    // For the JIT (vr4300_jit.hpp). These two methods return only Ok, Exception and
+    // ExitBefore; the JIT itself produces CodeChanged (the instruction rewrote compiled code).
+    // A C++ exception from an instruction is not a status: the JIT's run() stores it in error_.
+    enum class InPlace : std::uint8_t { Ok, Exception, ExitBefore, CodeChanged };
+    // step() without the interrupt check, fetch and retire: current_pc_ = pc_, in_delay_slot_
+    // = branch_taken_, pc_ = next_pc_, next_pc_ += 4, execute(instr), gpr_[0] = 0. `cycles`
+    // gets what the instruction took (>= 1). Ok or Exception.
+    InPlace execute_in_place(std::uint32_t instr, int& cycles);
+    // Loads/stores: ExitBefore (nothing changed) unless kernel mode and the address is
+    // kseg0/kseg1 inside direct_ram(); then like execute_in_place (kseg1 adds its uncached
+    // cycles). A misaligned address runs in place, raising the address error.
+    InPlace execute_memory_in_place(std::uint32_t instr, int& cycles);
 
     // Cycles of one iteration if the CPU sits at the start of an idle loop that no pending
     // interrupt would leave, else 0. skip_idle_cycles() then runs that many of its
@@ -75,6 +90,8 @@ public:
     }
 
 private:
+    friend class Vr4300Jit;
+
     // Physical address of a virtual one. False if it can't be translated (yet).
     struct Translation {
         std::uint32_t paddr;

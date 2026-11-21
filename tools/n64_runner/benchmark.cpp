@@ -1,7 +1,9 @@
 #include "benchmark.hpp"
 #include "n64/n64.hpp"
 #include "n64/rdp_counters.hpp"
+#include "n64/cpu/vr4300_jit.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -13,6 +15,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -136,7 +139,8 @@ private:
 };
 }
 
-bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profile_path) {
+bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profile_path, bool vi_output,
+                      const char* frame_times_path, std::optional<HoldSpec> hold) {
     if (first < 0 || first >= end) return false;
 #if EZY_N64_RDP_COUNTERS
     if (n64.bus().rdp_threaded()) {
@@ -145,7 +149,10 @@ bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profil
     }
 #endif
     Sampler sampler;
-    for (int frame = 0; frame < first; ++frame) n64.run_frame();
+    const auto press = [&](int field) {
+        if (hold && field >= hold->from_field) n64.bus().pif().set_buttons(0, hold->buttons, 0, 0);
+    };
+    for (int frame = 0; frame < first; ++frame) { press(frame); n64.run_frame(); }
     n64.bus().drain_rdp();
     if (profile_path && !sampler.start()) {
         std::cerr << "Sampling requires Windows x64 and access to the main thread\n";
@@ -155,8 +162,28 @@ bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profil
 #if EZY_N64_RDP_COUNTERS
     ezy::n64::rdp_counters::reset();
 #endif
+    double output_total = 0, output_max = 0;
+    std::uint64_t output_pixels = 0;  // keeps the calls from being optimized away
+    ezy::n64::Vi::Image picture;      // reused, as ezyemu does
     const auto started = std::chrono::steady_clock::now();
-    for (int frame = first; frame < end; ++frame) n64.run_frame();
+    std::vector<double> field_ms, field_compile_ms;
+    const auto compile_ns = [&] { return n64.cpu_jit() ? n64.cpu_jit()->stats().compile_ns : std::uint64_t{0}; };
+    for (int frame = first; frame < end; ++frame) {
+        press(frame);
+        const auto compile_before = compile_ns();
+        const auto field_start = std::chrono::steady_clock::now();
+        n64.run_frame();
+        field_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - field_start).count());
+        field_compile_ms.push_back(static_cast<double>(compile_ns() - compile_before) / 1e6);
+        if (!vi_output) continue;
+        n64.bus().drain_rdp();
+        const auto before = std::chrono::steady_clock::now();
+        n64.output(picture);
+        output_pixels += picture.argb.size();
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - before).count();
+        output_total += seconds;
+        output_max = std::max(output_max, seconds);
+    }
     n64.bus().drain_rdp();
     const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     const double cpu_end = process_cpu_seconds();
@@ -171,5 +198,24 @@ bool benchmark_frames(ezy::n64::N64& n64, int first, int end, const char* profil
               << ",\"cpu_seconds\":" << cpu << ",\"fields_per_second\":" << (end - first) / wall
               << ",\"rdp_counters\":" << (EZY_N64_RDP_COUNTERS ? "true" : "false")
               << ",\"profiled\":" << (profile_path ? "true" : "false") << "}\n";
+    if (vi_output) {
+        std::cout << "VI output: {\"calls\":" << end - first << ",\"pixels\":" << output_pixels
+                  << ",\"total_ms\":" << output_total * 1000 << ",\"mean_ms\":" << output_total * 1000 / (end - first)
+                  << ",\"max_ms\":" << output_max * 1000 << "}\n";
+    }
+    const FrameSummary frames = summarize_frames(field_ms, 16.7);
+    const FrameSummary compile = summarize_frames(field_compile_ms, 0);
+    std::cout << "Frames: {\"max_ms\":" << frames.max_ms << ",\"p99_ms\":" << frames.p99_ms
+              << ",\"mean_ms\":" << frames.mean_ms << ",\"over_16_7\":" << frames.over_budget
+              << ",\"compile_max_ms\":" << compile.max_ms << ",\"compile_total_ms\":"
+              << compile.mean_ms * static_cast<double>(field_compile_ms.size()) << "}\n";
+    if (frame_times_path) {
+        std::ofstream csv(frame_times_path);
+        csv << "field,ms,compile_ms\n";
+        for (std::size_t i = 0; i < field_ms.size(); ++i)
+            csv << first + static_cast<int>(i) << ',' << field_ms[i] << ',' << field_compile_ms[i] << '\n';
+        csv.close();
+        if (!csv) { std::cerr << "Could not write " << frame_times_path << '\n'; return false; }
+    }
     return !profile_path || sampler.write(profile_path);
 }

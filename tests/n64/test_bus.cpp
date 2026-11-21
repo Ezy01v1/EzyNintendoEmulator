@@ -1,9 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "mips_asm.hpp"
+#include "n64_test_helpers.hpp"
 #include "n64/bus.hpp"
 #include "n64/cartridge.hpp"
 #include "n64/scheduler.hpp"
@@ -23,7 +26,9 @@ Cartridge test_cart() {
 struct BusFixture {
     Scheduler scheduler;
     Cartridge cart = test_cart();
-    Bus bus{scheduler, cart};
+    Bus bus;
+
+    explicit BusFixture(RdpMode mode = default_rdp_mode()) : bus(scheduler, cart, mode) {}
 
     // Runs every event due up to `cycles` from now.
     void run(std::uint64_t cycles) {
@@ -44,6 +49,33 @@ constexpr std::uint32_t kDmem = 0x04000000, kImem = 0x04001000, kSpMemAddr = 0x0
                         kSpDramAddr = 0x04040004, kSpReadLen = 0x04040008, kSpWriteLen = 0x0404000C,
                         kSpStatus = 0x04040010, kSpDmaFull = 0x04040014, kSpDmaBusy = 0x04040018,
                         kSpPc = 0x04080000;
+
+// Records what the bus reports to its code watch. By default every page counts as holding
+// compiled code.
+struct CodeWatch {
+    std::vector<std::uint8_t> pages = std::vector<std::uint8_t>(Bus::kRdramSize >> 12, 1);
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges;
+    const std::uint8_t* probe = nullptr;  // sampled at every report
+    std::vector<std::uint8_t> probed;
+
+    explicit CodeWatch(Bus& bus) { bus.set_code_watch(pages.data(), &record, this); }
+    static void record(void* user, std::uint32_t begin, std::uint32_t end) {
+        auto& self = *static_cast<CodeWatch*>(user);
+        self.ranges.emplace_back(begin, end);
+        if (self.probe != nullptr) self.probed.push_back(*self.probe);
+    }
+    // Every byte of [begin, end) was in some report.
+    [[nodiscard]] bool covers(std::uint32_t begin, std::uint32_t end) const {
+        for (std::uint32_t at = begin; at < end; ++at) {
+            if (!std::any_of(ranges.begin(), ranges.end(), [at](const auto& r) { return r.first <= at && at < r.second; }))
+                return false;
+        }
+        return true;
+    }
+    [[nodiscard]] bool touches(std::uint32_t begin, std::uint32_t end) const {
+        return std::any_of(ranges.begin(), ranges.end(), [&](const auto& r) { return r.first < end && begin < r.second; });
+    }
+};
 
 }  // namespace
 
@@ -264,4 +296,116 @@ TEST_CASE("uncached RDRAM access has a penalty, RCP registers too") {
     CHECK(f.bus.uncached_cycles(0x1000) > 0);
     CHECK(f.bus.uncached_cycles(0x04300004) > 0);
     CHECK(f.bus.uncached_cycles(0x10000000) > f.bus.uncached_cycles(0x1000));
+}
+
+TEST_CASE("Bus reports PI, SI, SP DMA, audio HLE and RDP writes to the code watch") {
+    BusFixture f;
+    CodeWatch watch(f.bus);
+
+    SUBCASE("CPU accesses through the bus") {
+        f.bus.write32(0x500, 1);
+        f.bus.write8(0x601, 1);
+        f.bus.write64(0x700, 1);
+        CHECK(watch.covers(0x500, 0x504));
+        CHECK(watch.covers(0x601, 0x602));
+        CHECK(watch.covers(0x700, 0x708));
+        CHECK(f.bus.read32(0x500) == 1);
+        CHECK_FALSE(watch.touches(0x504, 0x601));
+    }
+    SUBCASE("PI DMA, cartridge to RDRAM") {
+        f.bus.write32(kPiDram, 0x1000);
+        f.bus.write32(kPiCart, 0x10002000);
+        f.bus.write32(kPiWrLen, 0x7F);
+        CHECK(watch.covers(0x1000, 0x1080));
+    }
+    SUBCASE("SI DMA, PIF RAM to RDRAM, and not the reverse") {
+        f.bus.write32(0x04800000, 0x2000);  // SI_DRAM_ADDR
+        f.bus.write32(0x04800004, 0);       // SI_PIF_AD_RD64B
+        CHECK(watch.covers(0x2000, 0x2040));
+        watch.ranges.clear();
+        f.run(100000);
+        f.bus.write32(0x04800010, 0);  // SI_PIF_AD_WR64B: reads RDRAM
+        CHECK(watch.ranges.empty());
+    }
+    SUBCASE("SP DMA, DMEM to RDRAM, and not the reverse") {
+        f.bus.write32(kSpMemAddr, 0);
+        f.bus.write32(kSpDramAddr, 0x3000);
+        f.bus.write32(kSpWriteLen, 0x7F);
+        f.run(1000);
+        CHECK(watch.covers(0x3000, 0x3080));
+        watch.ranges.clear();
+        f.bus.write32(kSpDramAddr, 0x3000);
+        f.bus.write32(kSpReadLen, 0x7F);
+        f.run(1000);
+        CHECK(watch.ranges.empty());
+    }
+    SUBCASE("SP DMA that wraps the 24-bit address reports the part at 0") {
+        f.bus.write32(kSpMemAddr, 0);
+        f.bus.write32(kSpDramAddr, 0xFFFFF8);
+        f.bus.write32(kSpWriteLen, 15);
+        f.run(1000);
+        CHECK(watch.covers(0, 8));
+        CHECK_FALSE(watch.touches(8, Bus::kRdramSize));
+    }
+    SUBCASE("audio HLE") {
+        // The callback AudioHle::run gets (a real task needs the MK64 microcode's data).
+        f.bus.audio_hle_access(0x4000, 16, true);
+        f.bus.audio_hle_access(0x5000, 16, false);
+        CHECK(watch.covers(0x4000, 0x4010));
+        CHECK_FALSE(watch.touches(0x5000, 0x5010));
+    }
+}
+
+TEST_CASE("Bus reports RDP draws to the code watch before they write") {
+    using n64_test::kFillMode;
+    using n64_test::rdp_rectangle;
+    // A 320x240 RGBA5551 image at 1 MB, filled whole: the report must cover it and come
+    // before the first pixel is written (in threaded mode, before the worker gets the draw).
+    constexpr std::uint32_t kImage = 0x100000, kBytes = 320 * 240 * 2;
+    const std::vector<std::uint64_t> list = {
+        0x3F10013F00000000ULL | kImage,
+        rdp_rectangle(0x2D, 0, 0, 320, 240),
+        kFillMode,
+        0x37000000F801F801ULL,
+        rdp_rectangle(0x36, 319, 239, 0, 0),
+    };
+    for (const RdpMode mode : {RdpMode::Synchronous, RdpMode::Threaded}) {
+        CAPTURE(static_cast<int>(mode));
+        BusFixture f(mode);
+        CodeWatch watch(f.bus);
+        watch.probe = &f.bus.rdram()[kImage];
+        f.bus.rdp().submit_words(list, f.bus.mi(), f.bus.rdram());
+        CHECK(watch.covers(kImage, kImage + kBytes));
+        REQUIRE(watch.probed.size() == watch.ranges.size());
+        for (const std::uint8_t before : watch.probed) CHECK(before == 0);
+        f.bus.drain_rdp();
+        CHECK(f.bus.read32(kImage) == 0xF801F801);
+        CHECK(f.bus.read32(kImage + kBytes - 4) == 0xF801F801);
+    }
+}
+
+TEST_CASE("Code watch reports only marked pages, clamped to RDRAM") {
+    BusFixture f;
+    CodeWatch watch(f.bus);
+    std::fill(watch.pages.begin(), watch.pages.end(), std::uint8_t{0});
+    watch.pages[2] = watch.pages[3] = watch.pages[5] = 1;
+    watch.pages.back() = 1;
+    f.bus.note_ram_write(0x1800, 0x5000);  // pages 1..6
+    REQUIRE(watch.ranges.size() == 2);
+    CHECK(watch.ranges[0] == std::pair<std::uint32_t, std::uint32_t>{0x2000, 0x4000});
+    CHECK(watch.ranges[1] == std::pair<std::uint32_t, std::uint32_t>{0x5000, 0x6000});
+    watch.ranges.clear();
+    f.bus.note_ram_write(0x2010, 4);
+    f.bus.note_ram_write(0x4010, 4);  // unmarked
+    REQUIRE(watch.ranges.size() == 1);
+    CHECK(watch.ranges[0] == std::pair<std::uint32_t, std::uint32_t>{0x2010, 0x2014});
+    watch.ranges.clear();
+    f.bus.note_ram_write(Bus::kRdramSize - 4, 64);  // runs off the end of RDRAM
+    f.bus.note_ram_write(Bus::kRdramSize, 64);      // past it
+    REQUIRE(watch.ranges.size() == 1);
+    CHECK(watch.ranges[0] == std::pair<std::uint32_t, std::uint32_t>{Bus::kRdramSize - 4, Bus::kRdramSize});
+    watch.ranges.clear();
+    f.bus.set_code_watch(nullptr, nullptr, nullptr);
+    f.bus.write32(0x2010, 1);
+    CHECK(watch.ranges.empty());
 }

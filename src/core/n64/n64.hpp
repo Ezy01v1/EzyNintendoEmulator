@@ -13,10 +13,20 @@
 
 namespace ezy::n64 {
 
+class Vr4300Jit;
+
+// How N64::step() runs the CPU: one instruction at a time (Vr4300::step), or blocks of
+// kseg0 code from RDRAM through the JIT (Vr4300Jit), with the same result. The default is
+// what N64::create applies.
+enum class CpuMode { Interpreter, Jit };
+CpuMode default_cpu_mode();
+void set_default_cpu_mode(CpuMode mode);
+
 // The whole console: what the frontend and the runner talk to.
 //
-// Main loop: the CPU runs one instruction, the scheduler advances by the cycles it took,
-// and every event that is due (VI lines, DMA completions, RSP and RDP work) is dispatched to the bus.
+// Main loop: each step() the CPU runs one instruction (or, with the JIT, blocks of them up
+// to the next event), the scheduler advances by the cycles it took, and every event that is
+// due (VI lines, DMA completions, RSP and RDP work) is dispatched to the bus.
 class N64 {
 public:
     // nullptr if the file isn't an N64 ROM. Without a PIF ROM the console boots through
@@ -32,8 +42,19 @@ public:
 
     N64(const N64&) = delete;
     N64& operator=(const N64&) = delete;
+    ~N64();
+
+    // Jit: false (and the CPU stays in the interpreter) when this build or host has no JIT.
+    // Interpreter drops the JIT and its compiled code.
+    bool set_cpu_mode(CpuMode mode);
+    [[nodiscard]] CpuMode cpu_mode() const { return cpu_jit_ ? CpuMode::Jit : CpuMode::Interpreter; }
+    [[nodiscard]] const Vr4300Jit* cpu_jit() const { return cpu_jit_.get(); }  // nullptr in interpreter mode
+    [[nodiscard]] Vr4300Jit* cpu_jit() { return cpu_jit_.get(); }
 
     void step();
+    // step() without the JIT: exactly one instruction (after an idle-loop skip), for the
+    // debugger's single step.
+    void step_interpreted();
 
     // Runs the due events; see n64.cpp.
     std::optional<std::uint64_t> run_due_events(bool watch_interrupt);
@@ -46,6 +67,8 @@ public:
     [[nodiscard]] const Cartridge& cartridge() const { return cart_; }
     [[nodiscard]] std::uint64_t cycles() const { return scheduler_.now(); }
     [[nodiscard]] Vi::Image image() const { return bus_.image(); }
+    [[nodiscard]] Vi::Image output() const { return bus_.output(); }
+    void output(Vi::Image& img) const { bus_.output(img); }  // reuses img's buffer
 
     // Save states: the whole machine as bytes. load_state() refuses a state of another
     // game or format version and, if the state turns out to be truncated, leaves the
@@ -55,6 +78,9 @@ public:
 
 private:
     explicit N64(Cartridge cart, RdpMode mode, RspMode rsp_mode);
+
+    void skip_idle_loop();
+    void step_cpu();  // one interpreted instruction, then the due events
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {
@@ -67,6 +93,8 @@ private:
     Scheduler scheduler_;
     Bus bus_;
     Vr4300 cpu_;
+    // Declared after bus_ and cpu_, so destroyed before them: it is the bus's code watch.
+    std::unique_ptr<Vr4300Jit> cpu_jit_;
 };
 
 }  // namespace ezy::n64

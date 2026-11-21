@@ -1,9 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <future>
 #include <initializer_list>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -12,6 +15,82 @@
 #include "common/state.hpp"
 
 using namespace ezy::n64;
+
+namespace {
+
+// The CPU JIT's inline barrier (x64_backend.cpp): an access goes on to wait_memory() when
+// the page's writer (and, for a write, reader) sequence is newer than completed_seen, or
+// when the renderer failed.
+bool view_says_wait(const ezy::jit::PageBarrierView& v, std::uint32_t address, bool write) {
+    const std::uint32_t page = address >> 12;
+    std::uint64_t sequence = v.slot_sequence[v.writers[page]];
+    if (write) sequence = std::max(sequence, v.slot_sequence[v.readers[page]]);
+    return sequence > *v.completed_seen || v.failed->load(std::memory_order_acquire);
+}
+
+}  // namespace
+
+TEST_CASE("RdpWorker barrier_view mirrors wait_memory's decision") {
+    // wait_memory() returns at once (changing nothing) exactly when the view says the access
+    // need not wait; otherwise it refreshes completed_seen or waits (counted in waits).
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    RdpWorker worker([&](const RdpPacket& packet) {
+        if (packet.words[0] == 1) { entered.set_value(); gate.wait(); }
+    });
+    const ezy::jit::PageBarrierView view = worker.barrier_view();
+    const ezy::jit::PageBarrierView again = worker.barrier_view();
+    CHECK(view.writers == again.writers);  // stable while the worker lives
+    CHECK(view.completed_seen == again.completed_seen);
+    const auto went_on = [&](std::uint32_t address, bool write) {
+        const std::uint64_t seen = *view.completed_seen, waits = worker.stats().waits;
+        worker.wait_memory(address, 4, write);
+        return *view.completed_seen != seen || worker.stats().waits != waits;
+    };
+    RdpPacket first{};
+    first.words[0] = 1;
+    worker.submit(first, RdpAccess::range(0x1000, 0x2000, true));   // sequence 1, blocked
+    worker.submit({}, RdpAccess::range(0x3000, 0x4000, false));     // sequence 2, behind it
+    entered.get_future().wait();
+    struct Probe { std::uint32_t address; bool write; bool waits; };
+    const Probe idle[] = {{0x3000, false, false}, {0x5000, false, false}, {0x5000, true, false}, {0x0FFC, true, false}};
+    for (const Probe& p : idle) {
+        CAPTURE(p.address);
+        CAPTURE(p.write);
+        CHECK(view_says_wait(view, p.address, p.write) == p.waits);
+        CHECK(went_on(p.address, p.write) == p.waits);
+    }
+    CHECK(view_says_wait(view, 0x1000, false));
+    CHECK(view_says_wait(view, 0x1FFC, true));
+    CHECK(view_says_wait(view, 0x3000, true));
+    auto waiter = std::async(std::launch::async, [&] { return went_on(0x1000, false); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    release.set_value();
+    CHECK(waiter.get());
+    // Packet 1 is complete now and completed_seen knows it.
+    CHECK_FALSE(view_says_wait(view, 0x1000, false));
+    CHECK_FALSE(went_on(0x1000, false));
+    worker.drain();
+    // Packet 2 is done, but completed_seen may lag: the view then sends the write on to
+    // wait_memory, which refreshes it; either way both agree.
+    const bool says = view_says_wait(view, 0x3000, true);
+    CHECK(went_on(0x3000, true) == says);
+    CHECK_FALSE(view_says_wait(view, 0x3000, true));
+}
+
+TEST_CASE("RdpWorker barrier_view reports a failed renderer") {
+    RdpWorker worker([](const RdpPacket&) { throw std::runtime_error("raster failure"); });
+    const ezy::jit::PageBarrierView view = worker.barrier_view();
+    CHECK_FALSE(view_says_wait(view, 0x5000, false));
+    worker.submit({}, RdpAccess::range(0, 0x1000, true));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!view.failed->load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(view.failed->load(std::memory_order_acquire));
+    CHECK(view_says_wait(view, 0x5000, false));  // every access goes on to wait_memory...
+    CHECK_THROWS_AS(worker.wait_memory(0x5000, 4, false), std::runtime_error);  // ...which rethrows
+}
 
 TEST_CASE("RDP worker preserves FIFO and fences writes across page boundaries") {
     std::promise<void> entered, release;

@@ -14,27 +14,43 @@
 //       Debugging: prints the CPU's PC and Cause after each frame (default 10 frames).
 // Option, anywhere after the ROM: --pif <file> (a real PIF ROM).
 // --rdp-threaded / --rdp-sync selects host execution without changing emulated timing.
-// --state-check [frames] compares a cross-mode save/load continuation for 120 frames.
+// --state-check [frames] compares a cross-mode save/load continuation for 120 frames
+// (the other machine swaps the RDP, RSP and CPU modes).
+// --cpu-jit runs the CPU through the JIT; --cpu-jit-check also compares each compiled block
+// with RAM before running it and stops with an error on a stale one.
 // --rdp-trace <file> [--trace-from <frame>] (with --screenshot): writes every RDP command word
 // consumed from that frame on, as little-endian uint64, for tools/rdp_trace_diff.
+// --vi-output: --screenshot, --series and --benchmark save the VI's filtered 640x480 (PAL
+// 640x576) output (N64::output) instead of the framebuffer (N64::image); --benchmark also
+// times output(), called once per field.
+// --hold NAME[+NAME...][@FIELD] holds controller 1 buttons from field FIELD (default 0) on, for
+// --screenshot, --series, --dump-state and --benchmark (warm-up included). Names: A B Z Start Up
+// Down Left Right L R CU CD CL CR. --frame-times <csv> (--benchmark) writes field,ms,compile_ms.
 #include <cstdint>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <exception>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "n64/cpu/vr4300_jit.hpp"
 #include "n64/n64.hpp"
 #include "benchmark.hpp"
+#include "frame_stats.hpp"
 
 namespace {
 
 using ezy::n64::N64;
 using ezy::n64::Vi;
+
+// What --screenshot, --series and --benchmark save.
+Vi::Image picture(const N64& n64, bool vi_output) { return vi_output ? n64.output() : n64.image(); }
 
 std::vector<std::uint8_t> read_file(const char* path) {
     std::ifstream file(path, std::ios::binary);
@@ -135,7 +151,29 @@ int run_isviewer(N64& n64, double seconds) {
     return all.find("Base: Failed 0 of") != std::string::npos ? 0 : 1;
 }
 
+void print_cpu_jit_stats(const N64& n64) {
+    const ezy::n64::Vr4300Jit* jit = n64.cpu_jit();
+    if (jit == nullptr) return;
+    const auto s = jit->stats();
+    std::cout << "CPU JIT: blocks: " << s.compiled << ", in place: " << s.in_place << ", native: " << s.native
+              << ", out of block: " << s.out_of_block << ", exits before: " << s.exits_before
+              << ", compile ms: " << s.compile_ns / 1e6 << ", invalidations: " << s.invalidations
+              << ", flushes: " << s.flushes << ", resume skips: " << s.resume_skips
+              << ", compile max ms: " << s.compile_max_ns / 1e6 << ", code bytes: " << s.code_bytes << '\n';
+}
+
+// Selects the CPU mode; false (after printing why) when the JIT was asked for and is missing.
+bool apply_cpu_mode(N64& n64, bool jit, bool check) {
+    if (!n64.set_cpu_mode(jit ? ezy::n64::CpuMode::Jit : ezy::n64::CpuMode::Interpreter)) {
+        std::cerr << "This build or host has no CPU JIT\n";
+        return false;
+    }
+    if (jit) n64.cpu_jit()->set_check(check);
+    return true;
+}
+
 void print_rdp_stats(N64& n64) {
+    print_cpu_jit_stats(n64);
     n64.bus().drain_rdp();
     const auto stats = n64.bus().rdp_stats();
     std::cout << "RDP packets: " << stats.submitted << ", waits: " << stats.waits
@@ -155,7 +193,7 @@ void print_rdp_stats(N64& n64) {
 
 }  // namespace
 
-int main(int raw_argc, char* raw_argv[]) {
+int run(int raw_argc, char* raw_argv[]) {
     std::vector<char*> args;
     std::vector<std::uint8_t> pif;
     auto rdp_mode = ezy::n64::RdpMode::Synchronous;
@@ -163,17 +201,24 @@ int main(int raw_argc, char* raw_argv[]) {
     int time_from = 0;
     const char* profile_path = nullptr;
     const char* final_state_path = nullptr;
+    const char* load_state_path = nullptr;
     const char* trace_path = nullptr;
     int trace_from = 0;
-    bool audio_hle = false, audio_hle_check = false, gfx_hle = false;
+    bool audio_hle = false, audio_hle_check = false, gfx_hle = false, cpu_jit = false, cpu_jit_check = false;
+    bool vi_output = false;
+    const char* frame_times_path = nullptr;
+    std::optional<HoldSpec> hold;
     for (int i = 0; i < raw_argc; ++i) {
         if (std::strcmp(raw_argv[i], "--pif") == 0 && i + 1 < raw_argc) pif = read_file(raw_argv[++i]);
         else if (std::strcmp(raw_argv[i], "--rdp-threaded") == 0) rdp_mode = ezy::n64::RdpMode::Threaded;
         else if (std::strcmp(raw_argv[i], "--rdp-sync") == 0) rdp_mode = ezy::n64::RdpMode::Synchronous;
         else if (std::strcmp(raw_argv[i], "--rsp-jit") == 0) rsp_mode = ezy::n64::RspMode::Jit;
         else if (std::strcmp(raw_argv[i], "--rsp-interpreter") == 0) rsp_mode = ezy::n64::RspMode::Interpreter;
+        else if (std::strcmp(raw_argv[i], "--cpu-jit") == 0) cpu_jit = true;
+        else if (std::strcmp(raw_argv[i], "--cpu-jit-check") == 0) cpu_jit = cpu_jit_check = true;
         else if (std::strcmp(raw_argv[i], "--audio-hle") == 0) audio_hle = true;
         else if (std::strcmp(raw_argv[i], "--gfx-hle") == 0) gfx_hle = true;
+        else if (std::strcmp(raw_argv[i], "--vi-output") == 0) vi_output = true;
         else if (std::strcmp(raw_argv[i], "--audio-hle-check") == 0) audio_hle_check = true;
         else if (std::strcmp(raw_argv[i], "--time-from") == 0 && i + 1 < raw_argc) {
             const std::string value = raw_argv[++i];
@@ -182,8 +227,14 @@ int main(int raw_argc, char* raw_argv[]) {
                 std::cerr << "--time-from requires a nonnegative field index\n"; return 2;
             }
         }
+        else if (std::strcmp(raw_argv[i], "--frame-times") == 0 && i + 1 < raw_argc) frame_times_path = raw_argv[++i];
+        else if (std::strcmp(raw_argv[i], "--hold") == 0 && i + 1 < raw_argc) {
+            hold = parse_hold(raw_argv[++i]);
+            if (!hold) { std::cerr << "--hold requires NAME[+NAME...][@FIELD], e.g. A+CU@1500\n"; return 2; }
+        }
         else if (std::strcmp(raw_argv[i], "--profile") == 0 && i + 1 < raw_argc) profile_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--dump-final-state") == 0 && i + 1 < raw_argc) final_state_path = raw_argv[++i];
+        else if (std::strcmp(raw_argv[i], "--load-state") == 0 && i + 1 < raw_argc) load_state_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--rdp-trace") == 0 && i + 1 < raw_argc) trace_path = raw_argv[++i];
         else if (std::strcmp(raw_argv[i], "--trace-from") == 0 && i + 1 < raw_argc) {
             const std::string value = raw_argv[++i];
@@ -203,11 +254,19 @@ int main(int raw_argc, char* raw_argv[]) {
                      "       ezy_n64_runner <rom> --state-check [frames]\n"
                      "       ezy_n64_runner <rom> --dump-state <out.bin> [frames]\n"
                      "       ezy_n64_runner <rom> --benchmark <out.bmp> <end> --time-from <first>\n"
-                     "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>\n"
+                     "Benchmark options: --profile <out.csv>, --dump-final-state <out.bin>,\n"
+                     "         --frame-times <out.csv> (field,ms,compile_ms per timed field)\n"
+                     "Hold buttons: --hold NAME[+NAME...][@FIELD] (A B Z Start Up Down Left Right L R CU CD\n"
+                     "         CL CR; from field FIELD, default 0; screenshot, series, dump-state, benchmark)\n"
                      "Screenshot options: --rdp-trace <out.bin> [--trace-from <field>]\n"
-                     "Options: --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter,\n"
+                     "Screenshot, series and benchmark: --vi-output (save the VI's filtered 640x480\n"
+                     "         output instead of the framebuffer; --benchmark also times it)\n"
+                     "Options: --load-state <file> (start from a --dump-state file of the same ROM),\n"
+                     "         --pif <pif rom>, --rdp-threaded, --rdp-sync, --rsp-jit, --rsp-interpreter,\n"
                      "         --audio-hle, --audio-hle-check (run audio tasks on the RSP and compare),\n"
-                     "         --gfx-hle (F3DEX/F3DLX 0.95 graphics tasks in C++, not bit-exact)\n";
+                     "         --gfx-hle (F3DEX/F3DLX 0.95 graphics tasks in C++, not bit-exact),\n"
+                     "         --cpu-jit (the CPU through the JIT), --cpu-jit-check (--cpu-jit, and compare\n"
+                     "         every compiled block with RAM before running it)\n";
         return 2;
     }
     const std::vector<std::uint8_t> rom = read_file(args[1]);
@@ -219,13 +278,28 @@ int main(int raw_argc, char* raw_argv[]) {
     n64->bus().set_audio_hle(audio_hle);
     n64->bus().set_audio_hle_check(audio_hle_check);
     n64->bus().set_gfx_hle(gfx_hle);
+    if (!apply_cpu_mode(*n64, cpu_jit, cpu_jit_check)) return 2;
+    if (load_state_path) {
+        const auto state = read_file(load_state_path);
+        if (!n64->load_state(state)) { std::cerr << "Could not load state " << load_state_path << '\n'; return 2; }
+    }
     std::cout << "Title: " << n64->cartridge().title() << '\n';
     std::cout << "RDP: " << (n64->bus().rdp_threaded() ? "threaded" : "synchronous") << '\n';
     std::cout << "RSP: " << (n64->bus().rsp().jit_active() ? "JIT available" : "interpreter") << '\n';
+    std::cout << "CPU: " << (n64->cpu_jit() ? (cpu_jit_check ? "JIT (checked)" : "JIT") : "interpreter") << '\n';
     const std::string mode = args[2];
-    if (mode != "--benchmark" && (time_from != 0 || profile_path || final_state_path)) {
-        std::cerr << "--time-from, --profile and --dump-final-state require --benchmark\n"; return 2;
+    if (mode != "--benchmark" && (time_from != 0 || profile_path || final_state_path || frame_times_path)) {
+        std::cerr << "--time-from, --profile, --dump-final-state and --frame-times require --benchmark\n"; return 2;
     }
+    if (vi_output && mode != "--screenshot" && mode != "--series" && mode != "--benchmark") {
+        std::cerr << "--vi-output requires --screenshot, --series or --benchmark\n"; return 2;
+    }
+    if (hold && mode != "--screenshot" && mode != "--series" && mode != "--dump-state" && mode != "--benchmark") {
+        std::cerr << "--hold requires --screenshot, --series, --dump-state or --benchmark\n"; return 2;
+    }
+    const auto press = [&](int field) {
+        if (hold && field >= hold->from_field) n64->bus().pif().set_buttons(0, hold->buttons, 0, 0);
+    };
     if (mode != "--screenshot" && (trace_path || trace_from != 0)) {
         std::cerr << "--rdp-trace and --trace-from require --screenshot\n"; return 2;
     }
@@ -236,8 +310,8 @@ int main(int raw_argc, char* raw_argv[]) {
         if (error != std::errc{} || end != value.data() + value.size() || end_frame <= time_from) {
             std::cerr << "Benchmark end must be greater than --time-from\n"; return 2;
         }
-        if (!benchmark_frames(*n64, time_from, end_frame, profile_path)) return 2;
-        const auto bmp = encode_bmp(n64->image());
+        if (!benchmark_frames(*n64, time_from, end_frame, profile_path, vi_output, frame_times_path, hold)) return 2;
+        const auto bmp = encode_bmp(picture(*n64, vi_output));
         std::ofstream image(args[3], std::ios::binary);
         image.write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         image.close();
@@ -257,6 +331,7 @@ int main(int raw_argc, char* raw_argv[]) {
         std::vector<std::uint64_t> trace;
         for (int i = 0; i < frames; ++i) {
             if (trace_path && i == trace_from) n64->bus().rdp().set_trace(&trace);
+            press(i);
             n64->run_frame();
         }
         if (trace_path) {
@@ -267,9 +342,10 @@ int main(int raw_argc, char* raw_argv[]) {
             if (!file) return 2;
             std::cout << "Traced " << trace.size() << " RDP words to " << trace_path << '\n';
         }
-        const std::vector<char> bmp = encode_bmp(n64->image());
+        const Vi::Image shot = picture(*n64, vi_output);
+        const std::vector<char> bmp = encode_bmp(shot);
         std::ofstream(args[3], std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
-        std::cout << "Saved " << args[3] << " (" << n64->image().width << "x" << n64->image().height << ")\n";
+        std::cout << "Saved " << args[3] << " (" << shot.width << "x" << shot.height << ")\n";
         print_rdp_stats(*n64);
         return 0;
     }
@@ -278,9 +354,10 @@ int main(int raw_argc, char* raw_argv[]) {
         const int first = std::atoi(args[4]), last = std::atoi(args[5]), step = std::atoi(args[6]);
         if (first < 0 || last < first || step <= 0) { std::cerr << "Bad --series range\n"; return 2; }
         for (int i = 1; i <= last; ++i) {
+            press(i - 1);
             n64->run_frame();
             if (i < first || (i - first) % step != 0) continue;
-            const std::vector<char> bmp = encode_bmp(n64->image());
+            const std::vector<char> bmp = encode_bmp(picture(*n64, vi_output));
             const std::string path = std::string(args[3]) + std::to_string(i) + ".bmp";
             std::ofstream(path, std::ios::binary).write(bmp.data(), static_cast<std::streamsize>(bmp.size()));
         }
@@ -288,7 +365,7 @@ int main(int raw_argc, char* raw_argv[]) {
     }
     if (mode == "--dump-state" && argc >= 4) {
         const int frames=argc>4?std::atoi(args[4]):120;
-        for(int i=0;i<frames;++i) n64->run_frame();
+        for(int i=0;i<frames;++i) { press(i); n64->run_frame(); }
         const auto state=n64->save_state();
         std::ofstream file(args[3],std::ios::binary);
         file.write(reinterpret_cast<const char*>(state.data()),static_cast<std::streamsize>(state.size()));
@@ -315,6 +392,14 @@ int main(int raw_argc, char* raw_argv[]) {
         if (!other) return 1;
         other->bus().set_audio_hle(audio_hle);
         other->bus().set_gfx_hle(gfx_hle);
+        // Cross the CPU mode when the JIT exists; an explicit --cpu-jit without it already failed above.
+        const bool cross_cpu = cpu_jit || other->set_cpu_mode(ezy::n64::CpuMode::Jit);
+        if (cross_cpu) {
+            if (!apply_cpu_mode(*other, !cpu_jit, cpu_jit_check)) return 1;
+        } else {
+            other->set_cpu_mode(ezy::n64::CpuMode::Interpreter);
+            std::cout << "CPU mode not crossed: this build or host has no CPU JIT\n";
+        }
         if (!other->load_state(state) || other->save_state() != state) return 1;
         for (int i = 0; i < 120; ++i) { n64->run_frame(); other->run_frame(); }
         if (n64->save_state() != other->save_state() || n64->image().argb != other->image().argb) {
@@ -342,4 +427,13 @@ int main(int raw_argc, char* raw_argv[]) {
     }
     std::cerr << "Unknown mode " << mode << '\n';
     return 2;
+}
+
+int main(int argc, char* argv[]) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {  // e.g. --cpu-jit-check finding a stale block
+        std::cerr << "Error: " << e.what() << '\n';
+        return 3;
+    }
 }
