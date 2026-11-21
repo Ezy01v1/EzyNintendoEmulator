@@ -7,6 +7,9 @@
 
 namespace ezy::n64 {
 
+// The RSP's reciprocal (VRCP/VRCPL) or reciprocal square root (VRSQ/VRSQL) of a 32-bit input.
+[[nodiscard]] std::uint32_t rsp_reciprocal(std::int32_t input, bool square_root);
+
 class RspVector {
 public:
     void execute(std::uint32_t word, std::uint32_t& scalar);
@@ -24,7 +27,9 @@ public:
     }
 
 private:
+    friend class RspRegs; // supplies a register pointer to the transient native execution view
     using Vector = std::array<std::uint16_t, 8>;
+    static_assert(sizeof(Vector)==16); // native execution view has 16-byte rows
 
     static std::uint8_t byte(const Vector& vector, unsigned index);
     static void set_byte(Vector& vector, unsigned index, std::uint8_t value);
@@ -36,6 +41,7 @@ private:
     std::uint16_t alu_lane(unsigned lane, std::uint16_t lhs, std::uint16_t rhs);
     template <unsigned op>
     void run_lanes(Vector& dest, const Vector& vs, const Vector& selected, unsigned source);
+    void run_vmadn_avx2(Vector& dest,const Vector& vs,const Vector& selected,unsigned source);
     using LaneOp = void (RspVector::*)(Vector&, const Vector&, const Vector&, unsigned);
     template <std::size_t... ops>
     static constexpr std::array<LaneOp, 64> lane_ops(std::index_sequence<ops...>);

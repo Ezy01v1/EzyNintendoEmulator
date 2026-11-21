@@ -8,24 +8,50 @@
 #include "n64/mi.hpp"
 #include "n64/rdp.hpp"
 #include "n64/rsp_vector.hpp"
+#include "n64/rsp_jit.hpp"
 #include "n64/scheduler.hpp"
 
 namespace ezy::n64 {
 
+enum class RspMode { Interpreter, Jit };
+RspMode default_rsp_mode();
+void set_default_rsp_mode(RspMode mode);
+
 // RSP scalar and vector cores, their two 4 KiB memory banks and the SP DMA interface.
 class RspRegs {
 public:
-    [[nodiscard]] std::uint8_t* mem() { return mem_.data(); }  // DMEM then IMEM
+    explicit RspRegs(RspMode mode = default_rsp_mode());
+    ~RspRegs();
+    [[nodiscard]] bool jit_active() const { return jit_ && jit_->available(); }
+    [[nodiscard]] RspJit::Stats jit_stats() const { return jit_ ? jit_->stats() : RspJit::Stats{}; }
+    // Iterations of DMA wait loops jumped over by run() (diagnostics; not in save states).
+    [[nodiscard]] std::uint64_t skipped_dma_wait_iterations() const { return skipped_dma_wait_iterations_; }
+    [[nodiscard]] const std::uint8_t* mem() const { return mem_.data(); } // inspection only
+    [[nodiscard]] std::uint8_t read_memory8(std::uint32_t address) const { return mem_[address & 0x1FFF]; }
+    void write_memory(std::uint32_t address, std::span<const std::uint8_t> bytes);
     [[nodiscard]] std::span<const std::uint8_t, 0x1000> dmem() const { return std::span(mem_).first<0x1000>(); }
+    [[nodiscard]] std::span<std::uint8_t, 0x1000> dmem() { return std::span(mem_).first<0x1000>(); }
+    [[nodiscard]] bool halted() const { return (sp_status_ & kHalt) != 0; }
+    // Ends a task that ran at a high level the way its microcode would: BREAK with
+    // SIG2 (task done) set, interrupting the CPU if it asked for that.
+    void finish_hle_task(Mi& mi, Scheduler& scheduler);
+    // The CPU just started a task that runs at a high level later on: the RSP itself stays
+    // halted (and does not step) until finish_hle_task().
+    void hold_for_hle(Scheduler& scheduler);
     [[nodiscard]] std::uint32_t read_sp(std::uint32_t offset);
     void write_sp(std::uint32_t offset, std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
     void finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when);
+    // RDRAM range the next finish_dma_row call touches, so a threaded RDP only has to
+    // finish the packets that overlap it. bytes == 0 means no transfer is active.
+    struct DmaRow { std::uint32_t address = 0, bytes = 0; bool write = false; };
+    [[nodiscard]] DmaRow dma_row() const;
     void step(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when);
     // Steps from `when` while each next one is due and before every other event (see rsp_scalar.cpp).
     std::optional<std::uint64_t> run(Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when, bool stop_on_line);
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version, Rdp& rdp) {
+        if constexpr (Ar::kLoading) invalidate_jit();
         ar(mem_);
         std::array<std::uint32_t, 8> legacy_regs{};
         if (version == 1) ar(legacy_regs);
@@ -47,6 +73,9 @@ public:
     }
 
 private:
+    static void jit_vector(void* self, std::uint32_t word) noexcept;
+    void invalidate_jit() { ++imem_generation_; }
+    std::uint64_t imem_generation_ = 0; // host cache identity, never serialized
     static constexpr std::uint32_t kPcMask = 0xFFC;
     static constexpr std::uint32_t kHalt = 1U << 0, kBroke = 1U << 1, kSingleStep = 1U << 5,
                                    kInterruptOnBreak = 1U << 6;
@@ -66,6 +95,8 @@ private:
     void write_status(std::uint32_t value, Mi& mi, Scheduler& scheduler, std::uint64_t when);
     [[nodiscard]] std::uint32_t load_dmem(std::uint32_t address, unsigned width) const;
     void store_dmem(std::uint32_t address, unsigned width, std::uint32_t value);
+    // Jumps over whole iterations of a "wait for my own DMA" loop (see rsp_scalar.cpp).
+    [[nodiscard]] bool skip_dma_wait(std::uint32_t word, std::uint32_t pc, std::uint64_t& when, std::uint64_t limit);
     void execute_scalar(std::uint32_t word, std::uint32_t pc, Mi& mi, Rdp& rdp, Scheduler& scheduler, std::uint64_t when);
     void execute_special(std::uint32_t word, std::uint32_t pc, Mi& mi);
 
@@ -78,6 +109,9 @@ private:
     std::uint32_t next_pc_ = 4;  // a branch sets the PC after its delay slot
     bool short_step_ = false;   // alternate 2 and 1 CPU cycles per RSP cycle
     RspVector vector_;
+    std::unique_ptr<RspJit> jit_;
+    std::uint64_t jit_generation_ = ~std::uint64_t{0};
+    std::uint64_t skipped_dma_wait_iterations_ = 0;
 };
 
 }  // namespace ezy::n64

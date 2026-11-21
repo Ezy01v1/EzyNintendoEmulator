@@ -4,10 +4,59 @@
 
 #include "mips_asm.hpp"
 
+namespace {
+struct GuardBus final : ezy::n64::CpuBus {
+    FlatBus inner;
+    mutable unsigned reads = 0, writes = 0, idle_reads = 0;
+    bool change_idle_slot = false;
+    GuardBus() { set_direct_ram(inner.mem.data(), FlatBus::kSize); set_memory_guard(true); }
+    void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const override {
+        if (write) ++writes; else ++reads;
+        if (bytes == 8) {
+            ++idle_reads;
+            if (change_idle_slot) direct_ram()[address + 7] = 1;
+        }
+    }
+    std::uint8_t read8(std::uint32_t a) override { return inner.read8(a); }
+    std::uint16_t read16(std::uint32_t a) override { return inner.read16(a); }
+    std::uint32_t read32(std::uint32_t a) override { return inner.read32(a); }
+    std::uint64_t read64(std::uint32_t a) override { return inner.read64(a); }
+    void write8(std::uint32_t a, std::uint8_t v) override { inner.write8(a, v); }
+    void write16(std::uint32_t a, std::uint16_t v) override { inner.write16(a, v); }
+    void write32(std::uint32_t a, std::uint32_t v) override { inner.write32(a, v); }
+    void write64(std::uint32_t a, std::uint64_t v) override { inner.write64(a, v); }
+    std::uint32_t uncached_cycles(std::uint32_t) const override { return 0; }
+    bool interrupt_line() const override { return false; }
+};
+}
+
 using namespace mips;
 
 // Register numbers used below.
 constexpr int t0 = 8, t1 = 9, t2 = 10, t3 = 11, ra = 31;
+
+TEST_CASE("CPU direct fetch load store and idle detection obey memory guards") {
+    GuardBus bus;
+    ezy::n64::Vr4300 cpu(bus);
+    cpu.cop0().write(ezy::n64::Cop0::kStatus, 0);
+    cpu.set_pc(0xFFFFFFFF80001000ULL);
+    bus.inner.write32(0x1000, lui(t0, 0x8000));
+    bus.inner.write32(0x1004, addiu(t1, 0, 37));
+    bus.inner.write32(0x1008, sw(t1, t0, 0x100));
+    bus.inner.write32(0x100C, lw(t2, t0, 0x100));
+    for (unsigned i = 0; i < 4; ++i) cpu.step();
+    CHECK(cpu.gpr(t2) == 37);
+    CHECK(bus.reads == 5);
+    CHECK(bus.writes == 1);
+    bus.inner.write32(0x2000, beq(0, 0, -1));
+    bus.inner.write32(0x2004, nop());
+    cpu.set_pc(0xFFFFFFFF80002000ULL);
+    cpu.step(); cpu.step();
+    CHECK(cpu.idle_loop_cycles() == 2);
+    bus.change_idle_slot = true;
+    CHECK(cpu.idle_loop_cycles() == 0);
+    CHECK(bus.idle_reads == 2);
+}
 
 TEST_CASE("ADDIU and LUI build a 32-bit constant") {
     CpuFixture f;

@@ -1,5 +1,8 @@
 #include "n64/bus.hpp"
 
+#include <algorithm>
+#include <cstdio>
+
 namespace ezy::n64 {
 
 namespace {
@@ -20,16 +23,19 @@ constexpr std::uint32_t kIsViewerMagic = 0x49533634;  // "IS64"
 
 }  // namespace
 
-Bus::Bus(Scheduler& scheduler, const Cartridge& cart) : scheduler_(scheduler), cart_(cart) {
+Bus::Bus(Scheduler& scheduler, const Cartridge& cart, RdpMode mode, RspMode rsp_mode)
+    : scheduler_(scheduler), cart_(cart), rsp_(rsp_mode) {
     vi_.set_region(cart.region());
     ai_.set_region(cart.region());
     vi_.start(scheduler_);
     set_direct_ram(rdram_.data(), kRdramSize);
+    if (mode == RdpMode::Threaded) set_memory_guard(rdp_.enable_threaded(rdram_));
+    // Every RDP draw reports what it writes, on this thread, before the pixels change.
+    rdp_.set_ram_write_listener([this](std::uint32_t begin, std::uint32_t end) { note_ram_write(begin, end - begin); });
 }
 
 std::uint8_t* Bus::memory(std::uint32_t paddr) {
     if (paddr < kRdramSize) return &rdram_[paddr];
-    if (paddr >= kSpMem && paddr < kSpRegs) return rsp_.mem() + (paddr & 0x1FFF);  // mirrored
     if (paddr >= kIsViewer + 0x20 && paddr < kIsViewer + 0x10000) return &isviewer_[paddr - kIsViewer];
     return nullptr;
 }
@@ -66,7 +72,9 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     if (paddr >= 0x03F00000 && paddr < 0x04000000) {
         rdram_regs_[(paddr >> 2) & 15] = value;
     } else if (paddr >= kSpRegs && paddr < kDp) {
+        const bool was_halted = rsp_.halted();
         rsp_.write_sp(paddr - kSpRegs, value, mi_, scheduler_, scheduler_.now());
+        if (was_halted && !rsp_.halted() && (audio_hle_ || check_audio_hle_ || gfx_hle_)) on_rsp_start();
     } else if (paddr >= kDp && paddr < kDp + 0x100000) {
         rdp_.write(paddr - kDp, value, scheduler_, scheduler_.now());
     } else if (paddr >= kMi && paddr < kVi) {
@@ -74,12 +82,20 @@ void Bus::write_io(std::uint32_t paddr, std::uint32_t value) {
     } else if (paddr >= kVi && paddr < kAi) {
         vi_.write(paddr - kVi, value, mi_);
     } else if (paddr >= kAi && paddr < kPi) {
+        if (((paddr - kAi) & 0x1F) == 4) prepare_ai_read(ai_.next_read_on_length(value));
         ai_.write(paddr - kAi, value, mi_, scheduler_, rdram_);
     } else if (paddr >= kPi && paddr < kRi) {
+        if (((paddr - kPi) & 0x3F) == 8 || ((paddr - kPi) & 0x3F) == 12) prepare_pi_dma((paddr - kPi) & 0x3F, value);
         pi_.write(paddr - kPi, value, mi_, scheduler_, rdram_, cart_);
     } else if (paddr >= kRi && paddr < kSi) {
         ri_[(paddr >> 2) & 7] = value;
     } else if (paddr >= kSi && paddr < kSi + 0x100000) {
+        if (((paddr - kSi) & 0x1F) == 4 || ((paddr - kSi) & 0x1F) == 16) {
+            // 64 bytes at SI_DRAM_ADDR: written by PIF -> RDRAM (0x04), read by RDRAM -> PIF (0x10).
+            const bool to_rdram = ((paddr - kSi) & 0x1F) == 4;
+            prepare_range(si_.read(0x00), 64, to_rdram);
+            if (to_rdram) note_ram_write(si_.read(0x00), 64);
+        }
         si_.write(paddr - kSi, value, mi_, scheduler_, rdram_, pif_);
     } else if (paddr >= kPifRam && paddr < kPifRam + 64) {
         const std::uint32_t o = paddr - kPifRam;
@@ -102,6 +118,8 @@ std::uint16_t Bus::cart_read16(std::uint32_t paddr) { return static_cast<std::ui
 bool Bus::is_cart(std::uint32_t paddr) { return paddr >= 0x05000000 && paddr < kPifRom; }
 
 std::uint8_t Bus::read8(std::uint32_t paddr) {
+    guard_memory(paddr, 1, false);
+    if (paddr >= kSpMem && paddr < kSpRegs) return rsp_.read_memory8(paddr);
     if (std::uint8_t* m = memory(paddr)) return *m;
     if (is_cart(paddr)) {
         const std::uint16_t half = cart_read16(paddr);
@@ -111,12 +129,19 @@ std::uint8_t Bus::read8(std::uint32_t paddr) {
 }
 
 std::uint16_t Bus::read16(std::uint32_t paddr) {
+    if (paddr >= kSpMem && paddr < kSpRegs) return static_cast<std::uint16_t>((read8(paddr) << 8) | read8(paddr + 1));
     if (memory(paddr)) return static_cast<std::uint16_t>((read8(paddr) << 8) | read8(paddr + 1));
     if (is_cart(paddr)) return cart_read16(paddr);
     return static_cast<std::uint16_t>(read_io(paddr) >> ((2 - (paddr & 2)) * 8));
 }
 
 std::uint32_t Bus::read32(std::uint32_t paddr) {
+    guard_memory(paddr, 4, false);
+    if (paddr >= kSpMem && paddr < kSpRegs) {
+        std::uint32_t value = 0;
+        for (unsigned i = 0; i < 4; ++i) value = (value << 8) | rsp_.read_memory8(paddr + i);
+        return value;
+    }
     if (std::uint8_t* m = memory(paddr)) {
         return (static_cast<std::uint32_t>(m[0]) << 24) | (m[1] << 16) | (m[2] << 8) | m[3];
     }
@@ -128,14 +153,22 @@ std::uint64_t Bus::read64(std::uint32_t paddr) {
 }
 
 void Bus::write8(std::uint32_t paddr, std::uint8_t value) {
+    guard_memory(paddr, 1, true);
+    if (paddr >= kSpMem && paddr < kSpRegs) { rsp_.write_memory(paddr, std::span(&value, 1)); return; }
     if (std::uint8_t* m = memory(paddr)) {
         *m = value;
+        note_ram_write(paddr, 1);
         return;
     }
     write_io(paddr, static_cast<std::uint32_t>(value) << ((3 - (paddr & 3)) * 8));
 }
 
 void Bus::write16(std::uint32_t paddr, std::uint16_t value) {
+    if (paddr >= kSpMem && paddr < kSpRegs) {
+        const std::array bytes{static_cast<std::uint8_t>(value >> 8), static_cast<std::uint8_t>(value)};
+        rsp_.write_memory(paddr, bytes);
+        return;
+    }
     if (memory(paddr)) {
         write8(paddr, static_cast<std::uint8_t>(value >> 8));
         write8(paddr + 1, static_cast<std::uint8_t>(value));
@@ -145,11 +178,19 @@ void Bus::write16(std::uint32_t paddr, std::uint16_t value) {
 }
 
 void Bus::write32(std::uint32_t paddr, std::uint32_t value) {
+    guard_memory(paddr, 4, true);
+    if (paddr >= kSpMem && paddr < kSpRegs) {
+        const std::array bytes{static_cast<std::uint8_t>(value >> 24), static_cast<std::uint8_t>(value >> 16),
+                               static_cast<std::uint8_t>(value >> 8), static_cast<std::uint8_t>(value)};
+        rsp_.write_memory(paddr, bytes);
+        return;
+    }
     if (std::uint8_t* m = memory(paddr)) {
         m[0] = static_cast<std::uint8_t>(value >> 24);
         m[1] = static_cast<std::uint8_t>(value >> 16);
         m[2] = static_cast<std::uint8_t>(value >> 8);
         m[3] = static_cast<std::uint8_t>(value);
+        note_ram_write(paddr, 4);
         return;
     }
     write_io(paddr, value);
@@ -172,12 +213,105 @@ void Bus::handle_event(EventType type, std::uint64_t when) {
         case EventType::PiDma: pi_.finish_dma(mi_); break;
         case EventType::ViLine: vi_.on_line(mi_, scheduler_, when); break;
         case EventType::SiDma: si_.finish_dma(mi_); break;
-        case EventType::AiDma: ai_.on_dma_end(mi_, scheduler_, rdram_); break;
-        case EventType::SpDma: rsp_.finish_dma_row(scheduler_, rdram_, when); break;
-        case EventType::RspStep: rsp_.step(mi_, rdp_, scheduler_, when); break;
+        case EventType::AiDma:
+            prepare_ai_read(ai_.next_read_on_dma_end());
+            ai_.on_dma_end(mi_, scheduler_, rdram_);
+            break;
+        case EventType::SpDma: {
+            // Only the RDP packets overlapping this row's RDRAM range must finish first.
+            const auto row = rsp_.dma_row();
+            if (row.address + row.bytes <= rdram_.size()) rdp_.prepare_memory(row.address, row.bytes, row.write);
+            else drain_rdp();  // wraps or leaves RDRAM: rare, keep the full barrier
+            if (row.write) note_dram_write(row.address, row.bytes);
+            rsp_.finish_dma_row(scheduler_, rdram_, when);
+            break;
+        }
+        case EventType::RspStep: rsp_step(when); break;
         case EventType::RdpWord: rdp_.step(mi_, scheduler_, rdram_, rsp_.dmem(), when); break;
+        case EventType::GfxHleDone: rsp_.finish_hle_task(mi_, scheduler_); break;
+        case EventType::GfxHleRdpDone: rdp_.finish_deferred_sync(mi_); break;
         default: break;
     }
+}
+
+void Bus::set_audio_hle_check(bool enabled) {
+    check_audio_hle_ = enabled;
+    if (!enabled) shadow_.reset();
+}
+
+// The CPU just started the RSP: libultra has put the task description at DMEM 0xFC0.
+void Bus::on_rsp_start() {
+    if (gfx_hle_ && start_gfx_hle_task()) return;
+    if (!audio_hle_ && !check_audio_hle_) return;
+    const RspTask task = RspTask::read(rsp_.dmem());
+    if (!AudioHle::supports(task, rdram_)) return;
+    if (check_audio_hle_) {
+        drain_rdp();
+        auto shadow = std::make_unique<Shadow>();
+        shadow->rdram = rdram_;
+        std::array<std::uint8_t, 0x1000> dmem{};
+        std::copy_n(rsp_.dmem().begin(), dmem.size(), dmem.begin());
+        AudioHle::run(task, shadow->rdram, dmem, [&](std::uint32_t address, std::uint32_t bytes, bool write) {
+            if (write) shadow->writes.emplace_back(address, bytes);
+        });
+        shadow_ = std::move(shadow);
+        return;  // the RSP runs the task too
+    }
+    AudioHle::run(task, rdram_, rsp_.dmem(), [this](std::uint32_t address, std::uint32_t bytes, bool write) {
+        audio_hle_access(address, bytes, write);
+    });
+    rsp_.finish_hle_task(mi_, scheduler_);
+}
+
+bool Bus::start_gfx_hle_task() {
+    const OsTask task = read_os_task(rsp_.dmem());
+    if (task.type != kOsTaskGraphics) return false;
+    rdp_.prepare_memory(task.ucode_data & 0xFFFFFF, task.ucode_data_size, false);
+    const GfxUcode ucode = identify_gfx_ucode(task, rdram_);
+    if (ucode == GfxUcode::Unknown) return false;
+    // Games wait for a task's end before the next one; if one did not, the old one ends now.
+    if (scheduler_.pending(EventType::GfxHleDone)) {
+        scheduler_.cancel(EventType::GfxHleDone);
+        rsp_.finish_hle_task(mi_, scheduler_);
+    }
+    // One deferred Sync Full at a time: the previous task's is delivered before this one's.
+    if (scheduler_.pending(EventType::GfxHleRdpDone)) {
+        scheduler_.cancel(EventType::GfxHleRdpDone);
+        rdp_.finish_deferred_sync(mi_);
+    }
+    const std::uint64_t when = scheduler_.now();
+    const F3dex::Result result = f3dex_.run_task(task, ucode, rdram_, rdp_, mi_);
+    rsp_.hold_for_hle(scheduler_);
+    // The RSP needs time for the task: it ends later, as the microcode's BREAK would, and
+    // the RDP's Sync Full (if the list had one) once it would have drawn what it got.
+    constexpr std::uint64_t kTaskOverheadCycles = 2000;
+    const std::uint64_t done = when + kTaskOverheadCycles + result.work;
+    scheduler_.schedule(EventType::GfxHleDone, done);
+    scheduler_.schedule(EventType::GfxHleRdpDone, done + result.drawing);
+    return true;
+}
+
+void Bus::finish_shadow() {
+    if (!rsp_.halted()) return;
+    drain_rdp();
+    const auto shadow = std::move(shadow_);
+    std::uint64_t mismatched = 0;
+    for (const auto& [address, bytes] : shadow->writes) {
+        for (std::uint32_t i = 0; i < bytes; ++i) {
+            const std::uint32_t at = address + i;
+            if (at >= rdram_.size()) continue;
+            ++check_.bytes;
+            if (shadow->rdram[at] == rdram_[at]) continue;
+            if (mismatched == 0) {
+                std::fprintf(stderr, "Audio HLE mismatch in task %llu at %06X: HLE %02X, RSP %02X\n",
+                             static_cast<unsigned long long>(check_.tasks), at, shadow->rdram[at], rdram_[at]);
+            }
+            ++mismatched;
+        }
+    }
+    check_.mismatched_bytes += mismatched;
+    if (mismatched) ++check_.mismatched_tasks;
+    ++check_.tasks;
 }
 
 void Bus::set_pif_rom(std::span<const std::uint8_t> rom) { pif_rom_.assign(rom.begin(), rom.end()); }

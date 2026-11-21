@@ -2,25 +2,82 @@
 
 #include <array>
 #include <cstdint>
-#include <map>
+#include <functional>
 #include <optional>
 #include <span>
+#include <memory>
+#include <utility>
+#include <vector>
 
 #include "n64/mi.hpp"
+#include "n64/rdp_rasterizer.hpp"
+#include "n64/rdp_memory.hpp"
 #include "n64/scheduler.hpp"
 
 namespace ezy::n64 {
 
-// Display Processor command interface and software rasterizer.
-class Rdp {
+enum class RdpMode { Synchronous, Threaded };
+RdpMode default_rdp_mode();
+void set_default_rdp_mode(RdpMode mode);
+
+// A copy of the raster state that draws one band of rows for the threaded RDP.
+class RdpBand : public RdpRasterizer {
 public:
+    void assign(const RdpRasterizer& source, unsigned index, unsigned count) {
+        RdpRasterizer::operator=(source);
+        band_index_ = index, band_count_ = count;
+    }
+    void run(const RdpPacket& packet, std::span<std::uint8_t> rdram) { execute_packet(packet, rdram); }
+};
+
+// Display Processor command interface and software rasterizer.
+class Rdp : private RdpRasterizer {
+public:
+    Rdp() { rebuild_memory_state(); }
+    ~Rdp();
+    // Threaded mode draws on `bands` worker threads (0 picks one per four hardware threads,
+    // at most 4), each owning every band-th group of 4 rows. Results match synchronous mode.
+    bool enable_threaded(std::span<std::uint8_t> rdram, unsigned bands = 0);
+    [[nodiscard]] unsigned bands() const { return worker_ ? static_cast<unsigned>(worker_->consumers()) : 0; }
+    void bind_memory(std::span<std::uint8_t> rdram) { drain(); worker_ram_ = rdram; }
+    [[nodiscard]] bool threaded() const { return worker_ != nullptr; }
+    [[nodiscard]] RdpWorker::Stats stats() const { return worker_ ? worker_->stats() : RdpWorker::Stats{}; }
+    void drain() const { if (worker_) worker_->drain(); }
+    // RDRAM's hidden bits (two per halfword): depth DZ low bits and 16-bit color coverage.
+    // Drains the worker first, so they match the pixels drawn so far.
+    [[nodiscard]] const RdpHiddenBits& hidden_bits() const { drain(); return *hidden_; }
+    // The worker's barrier view (RdpWorker::barrier_view); none without a worker.
+    [[nodiscard]] std::optional<jit::PageBarrierView> barrier_view() const {
+        if (!worker_) return std::nullopt;
+        return worker_->barrier_view();
+    }
+    void prepare_memory(std::uint32_t address, std::size_t bytes, bool write) const {
+        if (worker_) worker_->wait_memory(address, bytes, write);  // cheap when nothing touches the range
+    }
     [[nodiscard]] std::uint32_t read(std::uint32_t offset, std::uint64_t now) const;
     void write(std::uint32_t offset, std::uint32_t value, Scheduler& scheduler, std::uint64_t when);
     void step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
               std::span<const std::uint8_t, 0x1000> dmem, std::uint64_t when);
+    // Command words that skip DPC (the graphics HLE): same framing as words fetched from
+    // RDRAM or DMEM, without touching START/END/CURRENT. With defer_sync_full, a Sync Full
+    // among them raises DP only at finish_deferred_sync(), when the task's drawing would end.
+    void submit_words(std::span<const std::uint64_t> words, Mi& mi, std::span<std::uint8_t> rdram,
+                      bool defer_sync_full = false);
+    void finish_deferred_sync(Mi& mi);
+    // Called with every RDRAM range [begin, end) a draw may write (color and depth image),
+    // on the calling thread before the draw runs: synchronous mode executes it right after,
+    // threaded mode hands it to the worker. The bounds may overestimate the pixels drawn.
+    void set_ram_write_listener(std::function<void(std::uint32_t begin, std::uint32_t end)> listener) {
+        ram_write_listener_ = std::move(listener);
+    }
+    // When set, every command word the RDP consumes is appended here (for comparing runs).
+    void set_trace(std::vector<std::uint64_t>* trace) { trace_ = trace; }
+    // How many 64-bit words the command with this opcode (bits 61:56) takes.
+    [[nodiscard]] static unsigned words_in_command(unsigned op);
 
     template <class Ar>
     void serialize(Ar& ar, std::uint32_t version) {
+        drain();
         ar(start_), ar(end_), ar(current_), ar(status_), ar(words_to_skip_);
         ar(clock_origin_), ar(last_update_), ar(command_cycles_), ar(pipe_cycles_);
         ar(color_address_), ar(color_width_), ar(pixel_size_), ar(fill_color_), ar(cycle_type_), ar(scissor_);
@@ -46,25 +103,19 @@ public:
         else texture_ = {};
         if (version >= 9) ar(mask_address_), ar(prim_depth_);
         else mask_address_ = prim_depth_ = 0;
-        if (version >= 10) ar(key_gb_), ar(key_r_), ar(noise_state_), ar(convert_), ar(prim_lod_);
-        else key_gb_ = 0, key_r_ = 0, noise_state_ = 1, convert_ = 0, prim_lod_ = 0;
+        // The old noise state slot now holds the primitive serial, the seed noise restarts from.
+        if (version >= 10) ar(key_gb_), ar(key_r_), ar(primitive_serial_), ar(convert_), ar(prim_lod_);
+        else key_gb_ = 0, key_r_ = 0, primitive_serial_ = 1, convert_ = 0, prim_lod_ = 0;
         if (version >= 11) {
-            auto count = static_cast<std::uint32_t>(hidden_.size());
-            ar(count);
-            if constexpr (Ar::kLoading) {
-                hidden_.clear();
-                for (std::uint32_t i = 0; i < count; ++i) {
-                    std::uint32_t halfword = 0;
-                    std::uint8_t bits = 0;
-                    ar(halfword), ar(bits);
-                    if (bits > 3) ar.fail();
-                    else if (bits != 0) hidden_[halfword] = bits;
-                }
-            } else {
-                for (auto [halfword, bits] : hidden_) ar(halfword), ar(bits);
-            }
+            hidden_->serialize(ar);
         } else {
-            hidden_.clear();
+            hidden_->clear();
+        }
+        if (version >= 13) ar(pending_sync_full_);
+        else pending_sync_full_ = false;
+        if constexpr (Ar::kLoading) {
+            rebuild_memory_state();
+            sync_bands();
         }
     }
 
@@ -72,101 +123,41 @@ public:
     void load_legacy(Ar& ar) {
         std::array<std::uint32_t, 8> registers{};
         ar(registers);
-        *this = {};
+        reset_state();
         start_ = registers[0] & 0xFFFFF8;
         end_ = registers[1] & 0xFFFFF8;
         current_ = registers[2] & 0xFFFFF8;
     }
 
 private:
-    static constexpr std::uint64_t kTexturePerspective = 1ULL << 51;
+    void dispatch(const RdpPacket& packet, std::span<std::uint8_t> rdram);
+    void reset_state();
+    void rebuild_memory_state();
+    // After the main thread changed the raster state (load, reset): copy it to every band.
+    void sync_bands();
+    [[nodiscard]] bool needs_barrier(const RdpPacket& packet, const RdpAccess& access);
     static unsigned buffered_draw_words(unsigned op);
+    void consume_word(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram);
     void update_counters(std::uint64_t when);
     void schedule_word(Scheduler& scheduler, std::uint64_t when);
-    void execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram);
-    [[nodiscard]] bool can_fill() const;
-    void fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const;
-    void draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const;
-    void draw_triangle(std::span<std::uint8_t> rdram) const;
-    void fill_span(unsigned y, unsigned left, unsigned right, std::span<std::uint8_t> rdram) const;
-    [[nodiscard]] bool field_matches(unsigned y) const;
-    [[nodiscard]] bool can_write_opaque(bool depth = false) const;
-    [[nodiscard]] unsigned hidden_bits(std::size_t address) const;
-    void set_hidden_bits(std::size_t address, unsigned bits) const;
-    [[nodiscard]] unsigned memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const;
-    [[nodiscard]] bool depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned& coverage,
-                                  std::span<std::uint8_t> rdram) const;
-    using Rgba = std::array<unsigned, 4>;
-    [[nodiscard]] unsigned texels_read() const;
-    unsigned next_noise() const;
-    struct LodLevel {
-        unsigned first, second;  // TEXEL0 and TEXEL1 tile offsets from the primitive's tile
-        int fraction;            // LOD_FRACTION combiner input (9-bit signed)
-    };
-    [[nodiscard]] LodLevel select_lod(int step, unsigned max_level) const;
-    [[nodiscard]] Rgba combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction = 0,
-                               const Rgba* next_texel0 = nullptr) const;
-    void write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const;
-    bool write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
-                            std::span<std::uint8_t> rdram) const;
-    void load_texture(std::uint64_t word, bool block, std::span<const std::uint8_t> rdram);
-    void load_palette(std::uint64_t word, std::span<const std::uint8_t> rdram);
-    void draw_textured_rectangle(std::span<std::uint8_t> rdram) const;
-    void copy_rectangle(std::span<std::uint8_t> rdram) const;
-
-    struct Tile {
-        std::uint64_t descriptor = 0, bounds = 0;
-
-        template <class Ar>
-        void serialize(Ar& ar) { ar(descriptor), ar(bounds); }
-    };
-
-    [[nodiscard]] bool can_sample_texture(const Tile& tile, bool allow_lod = false) const;
-    [[nodiscard]] Rgba sample_texel(const Tile& tile, int s, int t) const;
-    [[nodiscard]] std::uint16_t read_texel(const Tile& tile, unsigned s, unsigned t, unsigned bank) const;
-    [[nodiscard]] Rgba sample_texture_rgba(const Tile& tile, int s, int t) const;
-
-    struct TextureState {
-        std::uint64_t image = 0;
-        std::array<Tile, 8> tiles{};
-        std::array<std::uint16_t, 2048> tmem{};  // 4 KiB, in physical halfword order
-
-        template <class Ar>
-        void serialize(Ar& ar) { ar(image), ar(tiles), ar(tmem); }
-    };
-
-    struct SolidState {
-        std::uint64_t modes = 0, combine = 0;
-        std::uint32_t blend = 0, fog = 0, primitive = 0, environment = 0;
-        std::uint32_t format = 0;
-
-        template <class Ar>
-        void serialize(Ar& ar) {
-            ar(modes), ar(combine), ar(blend), ar(fog), ar(primitive), ar(environment), ar(format);
-        }
-    };
-
     std::uint32_t start_ = 0, end_ = 0, current_ = 0, status_ = 0x80;
     std::uint32_t words_to_skip_ = 0;
     std::uint64_t clock_origin_ = 0, last_update_ = 0;
     std::uint32_t command_cycles_ = 0, pipe_cycles_ = 0;
-    std::uint32_t color_address_ = 0, color_width_ = 0, pixel_size_ = 0;
-    std::uint32_t fill_color_ = 0, cycle_type_ = 0;
-    // Two 10.2 fixed-point coordinate pairs and the field selection bits.
-    std::uint64_t scissor_ = 0;
     std::uint32_t draw_words_ = 0;
-    std::array<std::uint64_t, 22> draw_command_{};  // up to edges, shade, texture and depth
-    std::uint32_t mask_address_ = 0, prim_depth_ = 0;  // Set Mask Image and Set Prim Depth
-    std::uint64_t key_gb_ = 0;  // Set Key GB
-    std::uint32_t key_r_ = 0;   // Set Key R
-    std::uint64_t convert_ = 0;   // Set Convert: K0..K5, 9 bits each
-    std::uint32_t prim_lod_ = 0;  // Set Primitive Color: min level and LOD fraction
-    mutable std::uint32_t noise_state_ = 1;
-    // RDRAM hidden bits (two per halfword), kept sparse: only nonzero entries, keyed by
-    // halfword index. Only depth writes set them; fills clear them.
-    mutable std::map<std::uint32_t, std::uint8_t> hidden_;  // combiner noise generator, advanced per pixel
-    SolidState solid_;
-    TextureState texture_;
+    std::array<std::uint64_t, 22> draw_command_{};
+    RdpMemoryState memory_state_;
+    std::span<std::uint8_t> worker_ram_;
+    std::vector<std::unique_ptr<RdpBand>> bands_;  // bands 1.. (band 0 is this object)
+    // RDRAM the bands drew since the last barrier: a texture load from it must wait for
+    // every band (render to texture), as must a new color or depth image.
+    std::array<RdpAccess::Range, 8> drawn_{};
+    unsigned drawn_count_ = 0;
+    std::unique_ptr<RdpWorker> worker_;
+    std::vector<std::uint64_t>* trace_ = nullptr;  // not saved: a debugging aid
+    std::function<void(std::uint32_t, std::uint32_t)> ram_write_listener_;  // not saved: wiring
+    bool deferring_sync_full_ = false;  // inside a deferred submit_words
+    bool pending_sync_full_ = false;    // a deferred Sync Full not delivered yet
 };
 
-}  // namespace ezy::n64
+} // namespace ezy::n64

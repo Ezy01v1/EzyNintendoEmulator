@@ -1,29 +1,15 @@
-#include "n64/rdp.hpp"
+#include "n64/rdp_rasterizer.hpp"
+#include "n64/rdp_counters.hpp"
 
 #include <algorithm>
 #include <bit>
+#include <memory>
 
 namespace ezy::n64 {
 
 namespace {
 
-constexpr std::uint32_t kXbus = 1U << 0, kFreeze = 1U << 1, kFlush = 1U << 2, kStartClock = 1U << 3,
-                        kPipeBusy = 1U << 5, kCommandBusy = 1U << 6, kDmaBusy = 1U << 8, kStartValid = 1U << 10;
-constexpr std::uint32_t kAddressMask = 0xFFFFF8, kCounterMask = 0xFFFFFF;
-constexpr std::uint64_t kWordCycles = 3;  // approximate command fetch and execution in CPU cycles
-
-std::uint64_t rdp_cycles(std::uint64_t cpu_cycles) {
-    return (cpu_cycles / 3) * 2 + (cpu_cycles % 3) * 2 / 3;
-}
-
 unsigned opcode(std::uint64_t word) { return static_cast<unsigned>(word >> 56) & 63; }
-
-unsigned command_words(unsigned op) {
-    if (op >= 0x08 && op <= 0x0F) {  // Edges plus optional shade, texture and depth coefficients.
-        return 4 + ((op & 4) ? 8U : 0U) + ((op & 2) ? 8U : 0U) + ((op & 1) ? 2U : 0U);
-    }
-    return (op == 0x24 || op == 0x25) ? 2 : 1;  // Texture Rectangle and Texture Rectangle Flip
-}
 
 unsigned coordinate(std::uint64_t word, unsigned shift) {
     return static_cast<unsigned>(word >> shift) & 0xFFF;
@@ -122,11 +108,41 @@ unsigned clamp_shade(std::int64_t start, const TextureGradient& gradient, int pi
     return (value & 0x80) ? 0 : 255;
 }
 
-// Z is 15.17 fixed point; the depth unit works on 18 bits and saturates outside them.
-std::uint32_t clamp_depth(std::int64_t z) {
-    const auto value = static_cast<std::uint32_t>(z >> 10) & 0x3FFFFF;
-    if (value & 0x200000) return 0;
-    return std::min(value, 0x3FFFFU);
+// The pixel's Z for the depth unit (angrylion's z_correct). The accumulator is s15.16; the
+// depth unit keeps 15.3 bits. A partly covered pixel moves Z from the pixel corner to its
+// first covered subsample (offset_x, offset_y in quarter pixels, using the X and Y slopes
+// >> 10). Then bit 18 saturates to the far plane and bits 17 and 18 together (negative)
+// clamp to zero.
+std::uint32_t correct_depth(std::int64_t z, unsigned coverage, int offset_x, int offset_y, std::int32_t dzdx,
+                            std::int32_t dzdy) {
+    auto value = static_cast<std::int32_t>((z >> 10) & 0x3FFFFF);
+    if (coverage == 8) {
+        value >>= 3;
+    } else {
+        value = ((value << 2) + offset_x * (dzdx >> 10) + offset_y * (dzdy >> 10)) >> 5;
+    }
+    switch ((value & 0x60000) >> 17) {
+        case 2: return 0x3FFFF;
+        case 3: return 0;
+        default: return static_cast<std::uint32_t>(value) & 0x3FFFF;
+    }
+}
+
+// The per-pixel DZ of a triangle from its Z slopes (angrylion's spans_dzpix): the integer
+// parts' magnitudes, summed, then rounded up to the next power of two (normalize_dzpix).
+unsigned triangle_dz(std::int32_t dzdx, std::int32_t dzdy) {
+    const auto magnitude = [](std::int32_t slope) {
+        const auto integer = static_cast<unsigned>(slope >> 16) & 0xFFFF;
+        return (integer & 0x8000) ? (~integer & 0x7FFF) : integer;
+    };
+    const unsigned sum = (magnitude(dzdx) + magnitude(dzdy)) & 0xFFFF;
+    if (sum & 0xC000) return 0x8000;
+    if (sum == 0) return 1;
+    if (sum == 1) return 3;
+    for (unsigned bit = 0x2000; bit != 0; bit >>= 1) {
+        if (sum & bit) return bit << 1;
+    }
+    return 0;
 }
 
 // 18-bit Z is stored as a 3-bit count of leading ones and an 11-bit mantissa.
@@ -163,122 +179,25 @@ unsigned dither_channel(unsigned channel, unsigned threshold) {
 
 }  // namespace
 
-unsigned Rdp::buffered_draw_words(unsigned op) {
-    switch (op) {
-        case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E: case 0x0F:
-            return command_words(op);
-        case 0x24: return 2;
-        default: return 0;
+void RdpRasterizer::execute_packet(const RdpPacket& packet, std::span<std::uint8_t> rdram) {
+    if (packet.count == 0) return;
+    const auto op = opcode(packet.words[0]);
+    if ((op >= 0x08 && op <= 0x0F) || op == 0x24 || op == 0x36) {
+        ++primitive_serial_;
+        reseed_noise(0xFFFFFFFFU);
     }
-}
-
-std::uint32_t Rdp::read(std::uint32_t offset, std::uint64_t now) const {
-    const auto elapsed = static_cast<std::uint32_t>(rdp_cycles(now) - rdp_cycles(last_update_));
-    switch (offset & 0x1F) {
-        case 0x00: return start_;
-        case 0x04: return end_;
-        case 0x08: return current_;
-        case 0x0C: return status_;
-        case 0x10: return static_cast<std::uint32_t>(rdp_cycles(now) - rdp_cycles(clock_origin_)) & kCounterMask;
-        case 0x14: return (command_cycles_ + ((status_ & kCommandBusy) ? elapsed : 0)) & kCounterMask;
-        case 0x18: return (pipe_cycles_ + ((status_ & kPipeBusy) ? elapsed : 0)) & kCounterMask;
-        default: return 0;  // TMEM has no active load pipeline yet.
-    }
-}
-
-void Rdp::update_counters(std::uint64_t when) {
-    const auto elapsed = static_cast<std::uint32_t>(rdp_cycles(when) - rdp_cycles(last_update_));
-    if (status_ & kCommandBusy) command_cycles_ = (command_cycles_ + elapsed) & kCounterMask;
-    if (status_ & kPipeBusy) pipe_cycles_ = (pipe_cycles_ + elapsed) & kCounterMask;
-    last_update_ = when;
-}
-
-void Rdp::write(std::uint32_t offset, std::uint32_t value, Scheduler& scheduler, std::uint64_t when) {
-    switch (offset & 0x1F) {
-        case 0x00:  // START latches once and becomes CURRENT on the next END write.
-            if (!(status_ & kStartValid)) start_ = value & kAddressMask;
-            status_ |= kStartValid;
-            break;
-        case 0x04:
-            update_counters(when);
-            end_ = value & kAddressMask;
-            if (status_ & kStartValid) {
-                current_ = start_;
-                status_ &= ~kStartValid;
-            }
-            if (!(status_ & (kFreeze | kFlush))) status_ |= kStartClock | kPipeBusy;
-            schedule_word(scheduler, when);
-            break;
-        case 0x0C: {
-            update_counters(when);
-            const auto apply_pair = [this, value](unsigned shift, std::uint32_t flag) {
-                if (value & (1U << shift)) status_ &= ~flag;
-                if (value & (2U << shift)) status_ |= flag;
-            };
-            apply_pair(0, kXbus);
-            apply_pair(2, kFreeze);
-            apply_pair(4, kFlush);
-            if (value & (1U << 7)) pipe_cycles_ = 0;
-            if (value & (1U << 8)) command_cycles_ = 0;
-            if (value & (1U << 9)) clock_origin_ = when;
-            schedule_word(scheduler, when);
-            break;
-        }
-        default: break;
-    }
-}
-
-void Rdp::schedule_word(Scheduler& scheduler, std::uint64_t when) {
-    if ((status_ & (kFreeze | kFlush)) || current_ >= end_) {
-        status_ &= ~(kDmaBusy | kCommandBusy);
-        scheduler.cancel(EventType::RdpWord);
-        return;
-    }
-    status_ |= kStartClock | kPipeBusy | kDmaBusy | kCommandBusy;
-    if (!scheduler.pending(EventType::RdpWord)) scheduler.schedule(EventType::RdpWord, when + kWordCycles);
-}
-
-void Rdp::step(Mi& mi, Scheduler& scheduler, std::span<std::uint8_t> rdram,
-               std::span<const std::uint8_t, 0x1000> dmem, std::uint64_t when) {
-    if ((status_ & (kFreeze | kFlush)) || current_ >= end_) return;
-    update_counters(when);
-    if (words_to_skip_) {
-        --words_to_skip_;
+    if ((op >= 0x08 && op <= 0x0F) || op == 0x24) {
+        raster_command_ = packet.words;
+        if (op != 0x24) draw_triangle(rdram);
+        else if (cycle_type_ == 2) copy_rectangle(rdram);
+        else draw_textured_rectangle(rdram);
     } else {
-        std::uint64_t word = 0;
-        const bool xbus = (status_ & kXbus) != 0;
-        const std::size_t address = xbus ? current_ & 0xFF8 : current_;
-        const std::span<const std::uint8_t> source = xbus ? std::span<const std::uint8_t>(dmem)
-                                                          : std::span<const std::uint8_t>(rdram);
-        if (address + 8 <= source.size()) {
-            for (unsigned i = 0; i < 8; ++i) word = (word << 8) | source[address + i];
-        }
-        const unsigned op = opcode(word);
-        if (draw_words_ != 0 || buffered_draw_words(op) != 0) {
-            draw_command_[draw_words_++] = word;
-            const unsigned draw_op = opcode(draw_command_[0]);
-            if (draw_words_ == buffered_draw_words(draw_op)) {
-                if (draw_op != 0x24) draw_triangle(rdram);
-                else if (cycle_type_ == 2) copy_rectangle(rdram);
-                else draw_textured_rectangle(rdram);
-                draw_words_ = 0;
-            }
-        } else {
-            // Preserve packet framing for unsupported commands across END extensions.
-            words_to_skip_ = command_words(op) - 1;
-            if (words_to_skip_ == 0) execute(word, mi, rdram);
-        }
+        execute(packet.words[0], rdram);
     }
-    current_ += 8;
-    schedule_word(scheduler, when);
 }
 
-void Rdp::execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
+void RdpRasterizer::execute(std::uint64_t word, std::span<std::uint8_t> rdram) {
     switch (opcode(word)) {
-        case 0x29:  // Sync Full: writes are complete before the CPU sees the interrupt.
-            status_ &= ~(kStartClock | kPipeBusy);
-            mi.raise(MiInterrupt::Dp);
-            break;
         case 0x2D: scissor_ = word; break;  // Set Scissor
         case 0x2E: prim_depth_ = static_cast<std::uint32_t>(word); break;  // Set Prim Depth
         case 0x2A: key_gb_ = word & 0xFFFFFFFFFFFFFFULL; break;  // Set Key GB
@@ -316,11 +235,11 @@ void Rdp::execute(std::uint64_t word, Mi& mi, std::span<std::uint8_t> rdram) {
     }
 }
 
-bool Rdp::can_fill() const {
+bool RdpRasterizer::can_fill() const {
     return cycle_type_ == 3 && pixel_size_ >= 1 && pixel_size_ <= 3 && color_width_ != 0;
 }
 
-void Rdp::fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const {
+void RdpRasterizer::fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const {
     if (cycle_type_ <= 1) {
         draw_flat_rectangle(word, rdram);
         return;
@@ -335,7 +254,8 @@ void Rdp::fill_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) cons
     for (unsigned y = top; y < bottom; ++y) fill_span(y, left, right, rdram);
 }
 
-void Rdp::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const {
+void RdpRasterizer::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram) const {
+    EZY_RDP_PRIMITIVE(1);
     // In one- and two-cycle modes, Fill Rectangle goes through the combiner and blender like a
     // rectangle with no texture or shade, excluding its lower-right edge. Depth, if enabled,
     // can only come from the primitive depth.
@@ -352,8 +272,10 @@ void Rdp::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram)
     const unsigned dz = highest_power_of_two(prim_depth_ & 0xFFFF);
     const auto covers_x = [left, right](unsigned sample) { return left <= sample && sample < right; };
     const Rgba color = combine(Rgba{}, Rgba{}, Rgba{});
+    if (try_constant_rectangle(left, top, right, bottom, color, rdram)) return;
     for (unsigned y = top >> 2; 4 * y < bottom; ++y) {
         if (!field_matches(y)) continue;
+        reseed_noise(y);
         for (unsigned x = left >> 2; 4 * x < right; ++x) {
             if (!antialias && (4 * y < top || !covers_x(4 * x))) continue;
             unsigned coverage = 0;
@@ -369,8 +291,51 @@ void Rdp::draw_flat_rectangle(std::uint64_t word, std::span<std::uint8_t> rdram)
     }
 }
 
-void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
-    const std::uint64_t header = draw_command_[0];
+bool RdpRasterizer::try_constant_rectangle(unsigned left, unsigned top, unsigned right, unsigned bottom,
+                                          const Rgba& color, std::span<std::uint8_t> rdram) const {
+    EZY_RDP_RECT_BOUNDS(left, top, right, bottom);
+    // Aligned bounds give every pixel coverage 8. Without framebuffer/depth reads,
+    // RGB dither or random alpha compare, the existing writer gives the same result
+    // everywhere. Evaluate it once, preserving all blend/alpha/coverage arithmetic.
+    if (((left | top | right | bottom) & 3) != 0 ||
+        (solid_.modes & ((1U << 4) | (1U << 5) | (1U << 6))) != 0 ||
+        ((solid_.modes >> 38) & 3) != 3 || (solid_.modes & 3) == 3) return false;
+    EZY_RDP_COUNT(constant_rectangle, 0);
+    const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
+    const std::size_t base = color_address_ & ~(bytes - 1);
+    std::array<std::uint8_t, 4> pattern{};
+    unsigned pattern_hidden = 0;
+    bool ready = false;
+    for (unsigned y = top >> 2; y < (bottom >> 2); ++y) {
+        if (!field_matches(y)) continue;
+        const auto address = base + (static_cast<std::size_t>(y) * color_width_ + (left >> 2)) * bytes;
+        if (address >= rdram.size()) continue;
+        const auto count = std::min<std::size_t>((right - left) >> 2, (rdram.size() - address) / bytes);
+        if (count == 0) continue;
+        if (!ready) {
+            if (!write_opaque_pixel(left >> 2, y, color, Rgba{}, 8, rdram)) return true;
+            std::copy_n(rdram.begin() + static_cast<std::ptrdiff_t>(address), bytes, pattern.begin());
+            pattern_hidden = hidden_bits(address);  // RGBA5551's two low coverage bits
+            ready = true;
+        }
+        EZY_RDP_ADD(constant_rectangle, 1, count);
+        for (std::size_t pixel = 0, at = address; pixel < count; ++pixel, at += bytes) {
+            rdram[at] = pattern[0];
+            rdram[at + 1] = pattern[1];
+            if (bytes == 4) {
+                rdram[at + 2] = pattern[2];
+                rdram[at + 3] = pattern[3];
+            } else {
+                set_hidden_bits(at, pattern_hidden);
+            }
+        }
+    }
+    return true;
+}
+
+void RdpRasterizer::draw_triangle(std::span<std::uint8_t> rdram) const {
+    EZY_RDP_PRIMITIVE(2);
+    const std::uint64_t header = raster_command_[0];
     const unsigned op = opcode(header);
     const bool textured = (op & 2) != 0, shaded = (op & 4) != 0;
     // Primitive depth also lets triangles without Z coefficients use the depth buffer.
@@ -404,19 +369,19 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     if (top >= bottom || clip_left >= clip_right) return;
 
     const bool major_left = (header & (1ULL << 55)) != 0;
-    const TriangleEdge major(draw_command_[2], yh & ~3);
-    const TriangleEdge upper(draw_command_[3], yh & ~3);
-    const TriangleEdge lower(draw_command_[1], ym);
+    const TriangleEdge major(raster_command_[2], yh & ~3);
+    const TriangleEdge upper(raster_command_[3], yh & ~3);
+    const TriangleEdge lower(raster_command_[1], ym);
     const bool perspective = sample && textured && (solid_.modes & kTexturePerspective);
     TextureGradient s, t, w;
     if (sample && textured) {
         // STW integer and fractional halves are stored in separate words.
         const auto gradient = [&](unsigned shift) -> TextureGradient {
             const unsigned i = texture_at;
-            return {texture_coefficient(draw_command_[i], draw_command_[i + 2], shift),
-                    texture_coefficient(draw_command_[i + 1], draw_command_[i + 3], shift),
-                    texture_coefficient(draw_command_[i + 4], draw_command_[i + 6], shift),
-                    texture_coefficient(draw_command_[i + 5], draw_command_[i + 7], shift)};
+            return {texture_coefficient(raster_command_[i], raster_command_[i + 2], shift),
+                    texture_coefficient(raster_command_[i + 1], raster_command_[i + 3], shift),
+                    texture_coefficient(raster_command_[i + 4], raster_command_[i + 6], shift),
+                    texture_coefficient(raster_command_[i + 5], raster_command_[i + 7], shift)};
         };
         s = gradient(48);
         t = gradient(32);
@@ -427,29 +392,30 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
         // RGBA coefficients share the STW layout: integers and fractions in separate words.
         for (unsigned i = 0; i < shade.size(); ++i) {
             const unsigned at = 48 - 16 * i;
-            shade[i] = {texture_coefficient(draw_command_[4], draw_command_[6], at),
-                        texture_coefficient(draw_command_[5], draw_command_[7], at),
-                        texture_coefficient(draw_command_[8], draw_command_[10], at),
-                        texture_coefficient(draw_command_[9], draw_command_[11], at)};
+            shade[i] = {texture_coefficient(raster_command_[4], raster_command_[6], at),
+                        texture_coefficient(raster_command_[5], raster_command_[7], at),
+                        texture_coefficient(raster_command_[8], raster_command_[10], at),
+                        texture_coefficient(raster_command_[9], raster_command_[11], at)};
         }
     }
     TextureGradient z;
+    EZY_RDP_TRIANGLE(op, texels, std::all_of(shade.begin(), shade.end(), [](const auto& channel) {
+        return channel.dx == 0 && channel.de == 0 && channel.dy == 0;
+    }));
     const bool use_depth = !fill && (solid_.modes & ((1U << 4) | (1U << 5)));
     if (use_depth && (op & 1)) {
         const auto word = [this](unsigned i, unsigned shift) {
-            return static_cast<std::int32_t>(draw_command_[i] >> shift);
+            return static_cast<std::int32_t>(raster_command_[i] >> shift);
         };
         z = {word(depth_at, 32), word(depth_at, 0), word(depth_at + 1, 32), word(depth_at + 1, 0)};
     }
-    // Pixel DZ is the sum of the X and Y slopes (or the primitive's DZ), rounded to a power of two.
-    const auto magnitude = [](std::int32_t slope) { return static_cast<std::int64_t>(slope < 0 ? ~slope : slope); };
-    const unsigned pixel_dz = highest_power_of_two(
-        (solid_.modes & (1U << 2)) ? prim_depth_ & 0xFFFF
-                                   : static_cast<unsigned>(std::min<std::int64_t>(
-                                         (magnitude(z.dx) + magnitude(z.dy)) >> 16, 0x7FFF)));
+    // Pixel DZ comes from the Z slopes, or is the primitive's DZ as given.
+    const unsigned pixel_dz = (solid_.modes & (1U << 2)) ? highest_power_of_two(prim_depth_ & 0xFFFF)
+                                                         : triangle_dz(z.dx, z.dy);
     const bool late = (major.step < 0) == major_left;
     for (int y = top >> 2; 4 * y < bottom; ++y) {
         if (!field_matches(static_cast<unsigned>(y))) continue;
+        reseed_noise(static_cast<std::uint32_t>(y));
         int left = clip_right, right = clip_left;
         bool valid = false, all_left = true, all_right = true;
         std::array<SampleSpan, 4> samples{};
@@ -500,8 +466,27 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
             }
             std::uint32_t pixel_z = 0;
             if (coverage != 0 && use_depth) {
-                pixel_z = (solid_.modes & (1U << 2)) ? ((prim_depth_ >> 16) & 0x7FFF) << 3
-                                                     : clamp_depth(start_z + std::int64_t{z.dx} * (x - texture_x));
+                if (solid_.modes & (1U << 2)) {
+                    pixel_z = ((prim_depth_ >> 16) & 0x7FFF) << 3;
+                } else {
+                    // The first covered subsample: topmost row, then leftmost of its two
+                    // samples (even rows sit at quarter-pixel columns 0 and 2, odd rows at 1 and 3).
+                    int offset_x = 0, offset_y = 0;
+                    for (unsigned row = 0; row < samples.size(); ++row) {
+                        const int odd = static_cast<int>(row & 1);
+                        const int sample = x * 8 + odd * 2;
+                        if (samples[row].covers(sample)) {
+                            offset_y = static_cast<int>(row), offset_x = odd;
+                            break;
+                        }
+                        if (samples[row].covers(sample + 4)) {
+                            offset_y = static_cast<int>(row), offset_x = 2 + odd;
+                            break;
+                        }
+                    }
+                    pixel_z = correct_depth(start_z + std::int64_t{z.dx} * (x - texture_x), coverage, offset_x,
+                                            offset_y, z.dx, z.dy);
+                }
                 if (!depth_test(static_cast<unsigned>(x), static_cast<unsigned>(y), pixel_z, pixel_dz, coverage, rdram)) {
                     continue;
                 }
@@ -557,13 +542,15 @@ void Rdp::draw_triangle(std::span<std::uint8_t> rdram) const {
     }
 }
 
-bool Rdp::field_matches(unsigned y) const {
+bool RdpRasterizer::field_matches(unsigned y) const {
+    // Every draw loop asks this per row, so it also picks this band worker's rows.
+    if (band_count_ > 1 && (y >> 2) % band_count_ != band_index_) return false;
     const bool field_only = (scissor_ & (1ULL << 25)) != 0;
     const unsigned field = static_cast<unsigned>(scissor_ >> 24) & 1;
     return !field_only || (y & 1) == field;
 }
 
-void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::uint8_t> rdram) const {
+void RdpRasterizer::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::uint8_t> rdram) const {
     if (!field_matches(y)) return;
     const unsigned bytes_per_pixel = 1U << (pixel_size_ - 1);
     const auto stride = static_cast<std::size_t>(color_width_) * bytes_per_pixel;
@@ -574,15 +561,24 @@ void Rdp::fill_span(unsigned y, unsigned left, unsigned right, std::span<std::ui
         // The fill register is repeated as a packed big-endian word on the memory bus.
         rdram[addr] = static_cast<std::uint8_t>(fill_color_ >> ((3 - (addr & 3)) * 8));
     }
-    // Fills clear the hidden bits they cover. Hardware copies each halfword's low bit into them;
-    // only depth reads use them here, and depth clears (0xFFFC) have that bit clear.
+    // Fills copy each halfword's low bit into its hidden bits (3 or 0), like the hardware: a
+    // 16-bit color clear with the alpha bit set reads back as full coverage, and depth clears
+    // (0xFFFC) leave them clear. The packed word repeats, so even halfwords take bit 16 and odd
+    // ones bit 0.
     if (first < end) {
-        hidden_.erase(hidden_.lower_bound(static_cast<std::uint32_t>(first >> 1)),
-                      hidden_.lower_bound(static_cast<std::uint32_t>((end + 1) >> 1)));
+        const unsigned even = (fill_color_ & 0x10000U) ? 3 : 0, odd = (fill_color_ & 1U) ? 3 : 0;
+        const std::size_t first_halfword = first >> 1, end_halfword = (end + 1) >> 1;
+        if ((even | odd) == 0) {
+            hidden_->clear(first_halfword, end_halfword);
+        } else {
+            for (std::size_t halfword = first_halfword; halfword < end_halfword; ++halfword) {
+                hidden_->write(halfword, (halfword & 1) ? odd : even);
+            }
+        }
     }
 }
 
-bool Rdp::can_write_opaque(bool depth) const {
+bool RdpRasterizer::can_write_opaque(bool depth) const {
     // Depth is only modeled for primitives that carry one.
     const bool depth_modes = (solid_.modes & ((1U << 4) | (1U << 5))) != 0;
     if (depth_modes && !depth) return false;
@@ -614,7 +610,7 @@ constexpr CombinerFields kCycle1{37, 24, 32, 6, 21, 3, 18, 0};
 
 }  // namespace
 
-unsigned Rdp::texels_read() const {
+unsigned RdpRasterizer::texels_read() const {
     // Returns bit 0 for the primitive's tile and bit 1 for the next tile.
     const auto field = [this](unsigned shift, unsigned mask) {
         return static_cast<unsigned>(solid_.combine >> shift) & mask;
@@ -641,7 +637,7 @@ unsigned Rdp::texels_read() const {
     return used;
 }
 
-Rdp::LodLevel Rdp::select_lod(int step, unsigned max_level) const {
+RdpRasterizer::LodLevel RdpRasterizer::select_lod(int step, unsigned max_level) const {
     // step is in 10.5 texels per pixel. Each mip level halves the texture, so the level is
     // log2 of the whole-texel step and the fraction is the position between two levels.
     unsigned lod = static_cast<unsigned>(step);
@@ -670,13 +666,13 @@ Rdp::LodLevel Rdp::select_lod(int step, unsigned max_level) const {
     return {first, (!distant && !magnify) ? level + 2 : level + 1, fraction};
 }
 
-unsigned Rdp::next_noise() const {
+unsigned RdpRasterizer::next_noise() const {
     // A deterministic generator stands in for the hardware's free-running noise.
     noise_state_ = noise_state_ * 1103515245U + 12345U;
     return noise_state_ >> 16;
 }
 
-Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction,
+RdpRasterizer::Rgba RdpRasterizer::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade, int lod_fraction,
                        const Rgba* next_texel0) const {
     // Each cycle evaluates (A - B) * C + D. Two-cycle mode feeds cycle 0 into COMBINED.
     // Key center and scale per channel (R, G, B) and the 4.8 key widths.
@@ -706,18 +702,13 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
     const auto unclamped = [](int a, int b, int c, int d) { return ((a - b) * c + (d << 8) + 0x80) >> 8; };
     const auto equation = [&](int a, int b, int c, int d) { return clamp_combined(unclamped(a, b, c, d)); };
 
+    static constexpr Rgba kAllOne{255, 255, 255, 255}, kAllZero{};
     const auto cycle = [&](const CombinerFields& f, const Rgba& combined, const Rgba& t0, const Rgba& t1) {
-        const auto input = [&](unsigned source, unsigned channel) -> int {
-            switch (source) {
-                case kCombined: return static_cast<int>(combined[channel]);
-                case kTexel0: return static_cast<int>(t0[channel]);
-                case kTexel1: return static_cast<int>(t1[channel]);
-                case kPrimitive: return static_cast<int>(primitive[channel]);
-                case kShade: return static_cast<int>(shade[channel]);
-                case kEnvironment: return static_cast<int>(environment[channel]);
-                case kOne: return 255;
-                default: return 0;
-            }
+        // Indexed by CombinerSource: a table lookup the compiler inlines, unlike a switch
+        // per channel and term (the hottest code of the rasterizer).
+        const std::array<const Rgba*, 8> sources{&combined, &t0, &t1, &primitive, &shade, &environment, &kAllOne, &kAllZero};
+        const auto input = [&sources](unsigned source, unsigned channel) -> int {
+            return static_cast<int>((*sources[source & 7])[channel]);
         };
         Rgba out{};
         const unsigned sub_a = field(f.a, 15), sub_b = field(f.b, 15), multiplier = field(f.c, 31), add = field(f.d, 7);
@@ -766,25 +757,34 @@ Rdp::Rgba Rdp::combine(const Rgba& texel0, const Rgba& texel1, const Rgba& shade
     }
     return result;
 }
-unsigned Rdp::memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const {
-    // Without image reads, memory coverage reads as full (7). RGBA5551 keeps only the top
-    // coverage bit; the two hidden low bits are taken as set.
+unsigned RdpRasterizer::memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const {
+    // Without image reads, memory coverage reads as full (7). RGBA5551 keeps the top coverage
+    // bit in bit 0 and the two low bits in the halfword's hidden bits.
     if (!(solid_.modes & (1U << 6))) return 7;
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t address = (color_address_ & ~(bytes - 1)) +
         (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
     if (address + bytes > rdram.size()) return 7;
-    if (bytes == 2) return ((rdram[address + 1] & 1U) << 2) | 3;
+    if (bytes == 2) return ((rdram[address + 1] & 1U) << 2) | hidden_bits(address);
     return rdram[address + 3] >> 5;
 }
 
-bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned& coverage,
+bool RdpRasterizer::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsigned& coverage,
                      std::span<std::uint8_t> rdram) const {
     const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
     if (address + 2 > rdram.size()) return false;
     if (!(solid_.modes & (1U << 4))) return true;
     const unsigned stored = (unsigned{rdram[address]} << 8) | rdram[address + 1];
     const std::uint32_t memory_z = decompress_depth(stored >> 2);
+    const unsigned mode = static_cast<unsigned>(solid_.modes >> 10) & 3;
+    EZY_RDP_COUNT(depth_mode, mode);
+    const bool in_front = z < memory_z;
+    const bool max = memory_z == 0x3FFFF;
+    // Transparent Z never uses DZ. Full opaque pixels also only compare Z, so avoid
+    // looking up hidden DZ bits and calculating a tolerance that cannot affect them.
+    if (mode == 2) return in_front || max;
+    const bool overflow = ((coverage + memory_coverage(x, y, rdram)) & 8) != 0;
+    if (mode == 0 && (overflow || max)) return in_front || max;
     // The DZ code's low two bits live in the RDRAM hidden bits of the same halfword.
     const unsigned memory_dz_code = ((stored & 3) << 2) | hidden_bits(address);
     unsigned memory_dz = 1U << memory_dz_code;
@@ -799,10 +799,7 @@ bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsig
     const std::int64_t pixel = z, memory = memory_z;
     const bool farther = coplanar || pixel + range >= memory;
     const bool nearer = coplanar || pixel - range <= memory;
-    const bool in_front = pixel < memory;
-    const bool max = memory_z == 0x3FFFF;
-    const bool overflow = ((coverage + memory_coverage(x, y, rdram)) & 8) != 0;
-    switch ((solid_.modes >> 10) & 3) {
+    switch (mode) {
         case 1:  // interpenetrating
             // Where a full pixel pierces the stored surface within the DZ range, coverage is
             // scaled by how far in front it is, so intersecting surfaces antialias their seam.
@@ -818,18 +815,15 @@ bool Rdp::depth_test(unsigned x, unsigned y, std::uint32_t z, unsigned dz, unsig
     }
 }
 
-unsigned Rdp::hidden_bits(std::size_t address) const {
-    const auto found = hidden_.find(static_cast<std::uint32_t>(address >> 1));
-    return found == hidden_.end() ? 0 : found->second;
+unsigned RdpRasterizer::hidden_bits(std::size_t address) const {
+    return hidden_->read(address >> 1);
 }
 
-void Rdp::set_hidden_bits(std::size_t address, unsigned bits) const {
-    const auto key = static_cast<std::uint32_t>(address >> 1);
-    if (bits & 3) hidden_[key] = static_cast<std::uint8_t>(bits & 3);
-    else hidden_.erase(key);
+void RdpRasterizer::set_hidden_bits(std::size_t address, unsigned bits) const {
+    hidden_->write(address >> 1, bits);
 }
 
-void Rdp::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const {
+void RdpRasterizer::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std::span<std::uint8_t> rdram) const {
     if (!(solid_.modes & (1U << 5))) return;
     const std::size_t address = (mask_address_ & ~1U) + (static_cast<std::size_t>(y) * color_width_ + x) * 2;
     if (address + 2 > rdram.size()) return;
@@ -841,8 +835,12 @@ void Rdp::write_depth(unsigned x, unsigned y, std::uint32_t z, unsigned dz, std:
     set_hidden_bits(address, code & 3);
 }
 
-bool Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
+bool RdpRasterizer::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const Rgba& shade, unsigned coverage,
                              std::span<std::uint8_t> rdram) const {
+    EZY_RDP_COUNT(pixel_cycle, cycle_type_);
+    EZY_RDP_COUNT(pixel_size, pixel_size_);
+    EZY_RDP_COUNT(pixel_exit, 0);
+    EZY_RDP_OBSERVE(false, coverage);
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t address = (color_address_ & ~(bytes - 1)) +
         (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
@@ -860,19 +858,22 @@ bool Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
     // With dither alpha the threshold is random instead of the blend color alpha.
     if (solid_.modes & 1) {
         const unsigned threshold = (solid_.modes & 2) ? next_noise() & 255 : solid_.blend & 255;
-        if (alpha < threshold) return false;
+        if (alpha < threshold) { EZY_RDP_COUNT(pixel_exit, 1); return false; }
     }
-    if (coverage == 0) return false;
+    if (coverage == 0) { EZY_RDP_COUNT(pixel_exit, 2); return false; }
+    EZY_RDP_COUNT(image_read, (solid_.modes >> 6) & 1);
+    EZY_RDP_COUNT(force_blend, (solid_.modes >> 14) & 1);
+    EZY_RDP_OBSERVE(true, coverage);
 
     // Memory color and coverage. Without image reads, memory coverage reads as full (7).
-    // RGBA5551 keeps only the top coverage bit; the two hidden low bits are taken as set.
+    // RGBA5551 keeps the top coverage bit in bit 0 and the two low bits in the hidden bits.
     std::array<unsigned, 3> memory{};
     unsigned memory_coverage = 7;
     if (solid_.modes & (1U << 6)) {
         if (bytes == 2) {
             const unsigned value = (unsigned{rdram[address]} << 8) | rdram[address + 1];
             memory = {((value >> 11) & 31) << 3, ((value >> 6) & 31) << 3, ((value >> 1) & 31) << 3};
-            memory_coverage = ((value & 1) << 2) | 3;
+            memory_coverage = ((value & 1) << 2) | hidden_bits(address);
         } else {
             memory = {rdram[address], rdram[address + 1], rdram[address + 2]};
             memory_coverage = rdram[address + 3] >> 5;
@@ -899,6 +900,10 @@ bool Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
             }
         };
         const auto first = input(p_shift);
+        if (final) {
+            EZY_RDP_COUNT(blend_bypass, !force_blend && overflow);
+            EZY_RDP_COUNT(final_blend_source, (solid_.modes >> p_shift) & 3);
+        }
         if (final && !force_blend && overflow) return first;
         const unsigned factor = [&] {
             switch ((solid_.modes >> a_shift) & 3) {
@@ -958,9 +963,11 @@ bool Rdp::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combined, const
         }
     }();
     if (bytes == 2) {
+        // RGBA5551 stores the coverage's top bit in bit 0 and its two low bits in the hidden bits.
         const unsigned packed = ((r & 0xF8) << 8) | ((g & 0xF8) << 3) | ((b & 0xF8) >> 2) | (stored >> 2);
         rdram[address] = static_cast<std::uint8_t>(packed >> 8);
         rdram[address + 1] = static_cast<std::uint8_t>(packed);
+        set_hidden_bits(address, stored & 3);
     } else {
         rdram[address] = static_cast<std::uint8_t>(r);
         rdram[address + 1] = static_cast<std::uint8_t>(g);

@@ -42,13 +42,27 @@ std::optional<std::vector<std::uint8_t>> read_file(const char* path) {
     return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(file), {});
 }
 
-// Game Boy options after the ROM path: --model auto|dmg|cgb, --boot-rom <file>,
-// --no-color-correction. Returns nullopt (after printing why) on a bad option.
-std::optional<ezy::frontend::GameBoySettings> parse_gb_options(int argc, char* argv[]) {
-    ezy::frontend::GameBoySettings settings;
+struct Options {
+    ezy::frontend::GameBoySettings gb;
+    bool n64_gfx_hle = false;
+    bool n64_cpu_jit = false;
+    bool n64_vi_raw = false;
+};
+
+// Options after the ROM path. Game Boy: --model auto|dmg|cgb, --boot-rom <file>,
+// --no-color-correction. N64: --gfx-hle, --cpu-jit, --vi-raw. Returns nullopt (after printing why) on a bad option.
+std::optional<Options> parse_options(int argc, char* argv[]) {
+    Options options;
+    auto& settings = options.gb;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--model" && i + 1 < argc) {
+        if (arg == "--gfx-hle") {
+            options.n64_gfx_hle = true;
+        } else if (arg == "--cpu-jit") {
+            options.n64_cpu_jit = true;
+        } else if (arg == "--vi-raw") {
+            options.n64_vi_raw = true;
+        } else if (arg == "--model" && i + 1 < argc) {
             const std::string model = argv[++i];
             if (model == "auto") {
                 settings.model = ezy::gb::ModelChoice::Auto;
@@ -73,23 +87,23 @@ std::optional<ezy::frontend::GameBoySettings> parse_gb_options(int argc, char* a
             return std::nullopt;
         }
     }
-    return settings;
+    return options;
 }
 
 // Picks the console from the file extension.
-std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom,
-                                      ezy::frontend::GameBoySettings gb_settings) {
+std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom, Options options) {
     std::string ext = std::filesystem::path(path).extension().string();
     std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (ext == ".gba") {
         return ezy::frontend::GbaSystem::create(rom, {}, std::filesystem::path(path).replace_extension(".sav"));
     }
     if (ext == ".z64" || ext == ".v64" || ext == ".n64") {
-        return ezy::frontend::N64System::create(rom, std::filesystem::path(path));
+        return ezy::frontend::N64System::create(rom, std::filesystem::path(path), options.n64_gfx_hle,
+                                                 options.n64_cpu_jit, options.n64_vi_raw);
     }
     if (ext == ".gb" || ext == ".gbc") {
         return ezy::frontend::GameBoySystem::create(rom, std::filesystem::path(path).replace_extension(".sav"),
-                                                    std::move(gb_settings));
+                                                    std::move(options.gb));
     }
     return ezy::frontend::Chip8System::create(rom);
 }
@@ -110,17 +124,21 @@ bool handle_shortcut(SDL_Scancode scancode, RunState& run) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba | rom.z64/.v64/.n64> [Game Boy options]\n"
-                     "  --model auto|dmg|cgb    hardware to emulate (auto = Game Boy Color)\n"
+        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba | rom.z64/.v64/.n64> [options]\n"
+                     "  --model auto|dmg|cgb    Game Boy hardware to emulate (auto = Game Boy Color)\n"
                      "  --boot-rom <file>       run a real CGB boot ROM dump (2304 bytes)\n"
-                     "  --no-color-correction   show raw CGB colours\n";
+                     "  --no-color-correction   show raw CGB colours\n"
+                     "  --gfx-hle               N64: run F3DEX 0.95 graphics in C++ (experimental)\n"
+                     "  --cpu-jit               N64: run the CPU through the JIT (experimental)\n"
+                     "  --vi-raw                N64: show the raw framebuffer instead of the VI's filtered\n"
+                     "                          output (antialias, divot, gamma at 640x480)\n";
         return 1;
     }
 
-    auto gb_settings = parse_gb_options(argc, argv);
-    if (!gb_settings) return 1;
+    auto options = parse_options(argc, argv);
+    if (!options) return 1;
     const auto rom = read_file(argv[1]);
-    std::unique_ptr<System> system = rom ? create_system(argv[1], *rom, std::move(*gb_settings)) : nullptr;
+    std::unique_ptr<System> system = rom ? create_system(argv[1], *rom, std::move(*options)) : nullptr;
     if (!system) {
         std::cerr << "Could not load ROM: " << argv[1] << '\n';
         return 1;
@@ -140,7 +158,9 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return 1;
     }
-    SDL_SetRenderVSync(renderer, 1);
+    // No vsync: a present that waits for the next refresh would round every slow frame up
+    // to two refreshes (a 21 ms N64 frame became 33 ms, 30 fps). The loop paces itself.
+    SDL_SetRenderVSync(renderer, 0);
 
     SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
                                              system->screen_width(), system->screen_height());
@@ -170,6 +190,8 @@ int main(int argc, char* argv[]) {
         const double counter_freq = static_cast<double>(SDL_GetPerformanceFrequency());
         std::uint64_t previous = SDL_GetPerformanceCounter();
         double accumulator = 0.0;
+        int emulated_frames = 0;
+        std::uint64_t fps_window_start = previous;
 
         bool running = true;
         while (running) {
@@ -198,6 +220,14 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Sleep until the next emulated frame is due instead of spinning (the RDP thread
+            // and the OS need the cores); render only when a new frame was emulated.
+            const double waited = static_cast<double>(SDL_GetPerformanceCounter() - previous) / counter_freq;
+            if (run.paused) {
+                SDL_DelayPrecise(static_cast<std::uint64_t>(frame_seconds * 1e9));  // keep the UI at ~60 Hz
+            } else if (accumulator + waited < frame_seconds) {
+                SDL_DelayPrecise(static_cast<std::uint64_t>((frame_seconds - accumulator - waited) * 1e9));
+            }
             const std::uint64_t now = SDL_GetPerformanceCounter();
             accumulator += static_cast<double>(now - previous) / counter_freq;
             accumulator = std::min(accumulator, kMaxCatchUpSeconds);
@@ -218,9 +248,19 @@ int main(int argc, char* argv[]) {
                 // time, it slows the game down instead of showing one frame out of many.
                 for (int frames = 0; accumulator >= frame_seconds && frames < kMaxFramesPerRender; ++frames) {
                     system->run_frame();
+                    ++emulated_frames;
                     accumulator -= frame_seconds;
                 }
                 if (accumulator >= frame_seconds) accumulator = 0.0;
+            }
+            // Emulated frames per second in the title, refreshed every second: the speed the
+            // game really runs at (60 = full speed for NTSC N64 games).
+            if (const double elapsed = static_cast<double>(now - fps_window_start) / counter_freq; elapsed >= 1.0) {
+                const std::string speed = title + "  |  " + std::to_string(static_cast<int>(emulated_frames / elapsed + 0.5)) +
+                                          " fps";
+                SDL_SetWindowTitle(window, speed.c_str());
+                emulated_frames = 0;
+                fps_window_start = now;
             }
             if (own_audio) {
                 if (run.paused) {

@@ -10,7 +10,7 @@ namespace ezy::n64 {
 
 void hle_boot(Vr4300& cpu, Bus& bus, const Cartridge& cart) {
     const auto rom = cart.rom();
-    std::copy(rom.begin() + 0x40, rom.begin() + 0x1000, bus.rsp().mem() + 0x40);
+    bus.rsp().write_memory(0x40, rom.subspan(0x40, 0xFC0));
 
     // GPRs as IPL2 leaves them for the IPL3.
     constexpr int s3 = 19, s4 = 20, s5 = 21, s6 = 22, s7 = 23, sp = 29;

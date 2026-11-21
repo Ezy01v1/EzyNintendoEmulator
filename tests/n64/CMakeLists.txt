@@ -1,7 +1,31 @@
-add_executable(ezy_n64_tests test_main.cpp test_scheduler.cpp test_cartridge.cpp test_cpu.cpp test_cop0.cpp test_tlb.cpp test_cop1.cpp test_bus.cpp test_vi.cpp test_pif.cpp test_ai.cpp test_state.cpp)
+add_executable(ezy_n64_tests test_main.cpp test_scheduler.cpp test_cartridge.cpp test_cpu.cpp test_cop0.cpp test_tlb.cpp test_cop1.cpp test_bus.cpp test_vi.cpp test_pif.cpp test_ai.cpp test_state.cpp test_rdp_worker.cpp test_audio_hle.cpp test_gfx_hle.cpp)
 target_link_libraries(ezy_n64_tests PRIVATE ezy_n64 doctest::doctest ezy_warnings)
+target_sources(ezy_n64_tests PRIVATE test_rsp_jit.cpp test_rsp_vector_native.cpp)
+target_sources(ezy_n64_tests PRIVATE test_rsp_vector_multiply.cpp test_rsp_dma_wait.cpp)
+target_sources(ezy_n64_tests PRIVATE test_rdp_hidden_bits.cpp)
+target_sources(ezy_n64_tests PRIVATE test_vi_filter.cpp)
+target_sources(ezy_n64_tests PRIVATE test_rdp_combiner.cpp)
+target_sources(ezy_n64_tests PRIVATE test_rdp_constant_rectangle.cpp)
+target_sources(ezy_n64_tests PRIVATE test_cpu_jit.cpp test_cpu_jit_invalidation.cpp test_cpu_jit_alu.cpp test_cpu_jit_branch.cpp
+    test_cpu_jit_memory.cpp test_runner_frame_stats.cpp)
+if(TARGET asmjit::asmjit)
+    target_link_libraries(ezy_n64_tests PRIVATE asmjit::asmjit)
+endif()
+target_include_directories(ezy_n64_tests PRIVATE ${PROJECT_SOURCE_DIR}/tools/n64_runner)
 target_compile_definitions(ezy_n64_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
 add_test(NAME ezy_n64_tests COMMAND ezy_n64_tests)
+add_test(NAME ezy_n64_threaded_tests COMMAND ezy_n64_tests --rdp-threaded)
+set_tests_properties(ezy_n64_tests ezy_n64_threaded_tests PROPERTIES TIMEOUT 120)
+if(EZY_N64_RSP_JIT AND TARGET asmjit::asmjit)
+    add_test(NAME ezy_n64_rsp_jit_tests COMMAND ezy_n64_tests --rsp-jit)
+    add_test(NAME ezy_n64_rsp_jit_threaded_tests COMMAND ezy_n64_tests --rsp-jit --rdp-threaded)
+    set_tests_properties(ezy_n64_rsp_jit_tests ezy_n64_rsp_jit_threaded_tests PROPERTIES TIMEOUT 180)
+endif()
+if(EZY_N64_CPU_JIT AND EZY_HOST_X64)
+    add_test(NAME ezy_n64_cpu_jit_tests COMMAND ezy_n64_tests --cpu-jit)
+    add_test(NAME ezy_n64_cpu_jit_threaded_tests COMMAND ezy_n64_tests --cpu-jit --rdp-threaded)
+    set_tests_properties(ezy_n64_cpu_jit_tests ezy_n64_cpu_jit_threaded_tests PROPERTIES TIMEOUT 180)
+endif()
 
 # PeterLemon's CPU test ROMs (roms/README.md): each one whose .bmp reference sits next to
 # it, compared on the VI image. Release only, and only when the ROMs are present.
@@ -23,4 +47,22 @@ foreach(rom IN LISTS EZY_PETERLEMON_ROMS)
     string(REPLACE "/" "_" group ${rel})
     add_test(NAME n64_peterlemon_${group}_${name} COMMAND ezy_n64_runner ${rom} --compare ${dir}/${name}.bmp
              CONFIGURATIONS Release)
+    # The same ROM through the CPU JIT, checked against the interpreter on every block.
+    if(EZY_N64_CPU_JIT AND EZY_HOST_X64)
+        add_test(NAME n64_peterlemon_cpu_jit_${group}_${name}
+                 COMMAND ezy_n64_runner ${rom} --cpu-jit-check --compare ${dir}/${name}.bmp
+                 CONFIGURATIONS Release)
+    endif()
 endforeach()
+
+# n64-systemtest through the CPU JIT. The runner exits 0 only when no base test fails, and
+# 737 of 3721 are known failures (same set as the interpreter), so the summary line is the
+# check: PASS_REGULAR_EXPRESSION replaces the exit code. A changed baseline (a fix, or a new
+# failure) must update the count here.
+if(EZY_N64_CPU_JIT AND EZY_HOST_X64 AND EXISTS ${EZY_N64_ROMS}/n64-systemtest.z64)
+    add_test(NAME n64_systemtest_cpu_jit
+             COMMAND ezy_n64_runner ${EZY_N64_ROMS}/n64-systemtest.z64 --rdp-threaded --isviewer 60 --cpu-jit
+             CONFIGURATIONS Release)
+    set_tests_properties(n64_systemtest_cpu_jit PROPERTIES
+        PASS_REGULAR_EXPRESSION "Base: Failed 737 of 3721 tests" TIMEOUT 180)
+endif()

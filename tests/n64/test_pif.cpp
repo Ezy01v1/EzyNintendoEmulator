@@ -80,6 +80,25 @@ TEST_CASE("SI write DMA runs the PIF commands and interrupts") {
     CHECK(bus.read8(0x2000 + 3) == 0x10);
 }
 
+TEST_CASE("SI reads rerun an armed command block, like libultra's repeated controller polls") {
+    // osContStartReadData writes the block only when the command changes; afterwards it
+    // just reads PIF RAM and expects fresh buttons (Spider-Man never saw A pressed).
+    Pif pif;
+    put(pif, {0x01, 0x04, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE});
+    pif.ram()[63] = 0x01;
+    pif.after_write();
+    CHECK(pif.ram()[3] == 0x00);
+    pif.set_buttons(0, 0x8000, 0, 0);  // A pressed after the write
+    pif.before_read();
+    CHECK(pif.ram()[3] == 0x80);
+    // A write without the run bit (e.g. the boot acknowledge) disarms the block.
+    pif.ram()[63] = 0x08;
+    pif.after_write();
+    pif.set_buttons(0, 0x1000, 0, 0);
+    pif.before_read();
+    CHECK(pif.ram()[3] == 0x80);
+}
+
 TEST_CASE("HLE boot copies IPL3 to DMEM and starts at 0xA4000040") {
     Scheduler scheduler;
     const Cartridge cart = boot_cart('E');
@@ -124,4 +143,56 @@ TEST_CASE("HLE boot loads the PI domain 1 timing from the ROM header") {
     CHECK(bus.read32(0x04600018) == 0x12);
     CHECK(bus.read32(0x0460001C) == 0x07);
     CHECK(bus.read32(0x04600020) == 0x03);
+}
+
+// Channel 4 is the cartridge's EEPROM: skip the four controller channels to reach it.
+TEST_CASE("EEPROM status reports a 4 Kbit EEPROM on channel 4") {
+    Pif pif;
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x00, 0xFF, 0xFF, 0xFF, 0xFE});
+    pif.run_commands();
+    CHECK((pif.ram()[5] & 0x80) == 0);  // device present
+    CHECK(pif.ram()[7] == 0x00);
+    CHECK(pif.ram()[8] == 0x80);
+    CHECK(pif.ram()[9] == 0x00);
+}
+
+TEST_CASE("EEPROM blocks written are read back, and 4 Kbit has 64 blocks") {
+    Pif pif;
+    // Write block 3: tx = 10 (command, block, 8 bytes), rx = 1.
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x0A, 0x01, 0x05, 0x03, 1, 2, 3, 4, 5, 6, 7, 8, 0xFF, 0xFE});
+    pif.run_commands();
+    // Read block 3, and block 67 (wraps to 3 on a 4 Kbit part): tx = 2, rx = 8.
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x04, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE});
+    pif.run_commands();
+    CHECK(std::vector<std::uint8_t>(pif.ram().begin() + 8, pif.ram().begin() + 16) ==
+          std::vector<std::uint8_t>{1, 2, 3, 4, 5, 6, 7, 8});
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x04, 67, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE});
+    pif.run_commands();
+    CHECK(pif.ram()[8] == 1);
+    CHECK(pif.eeprom()[3 * 8 + 7] == 8);
+}
+
+TEST_CASE("EEPROM writes mark it dirty, and a .eep image of 512 bytes loads") {
+    Pif pif;
+    CHECK_FALSE(pif.eeprom_dirty());
+    // Reading does not dirty it.
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x04, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE});
+    pif.run_commands();
+    CHECK_FALSE(pif.eeprom_dirty());
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x0A, 0x01, 0x05, 0x01, 9, 9, 9, 9, 9, 9, 9, 9, 0xFF, 0xFE});
+    pif.run_commands();
+    CHECK(pif.eeprom_dirty());
+    pif.clear_eeprom_dirty();
+    CHECK_FALSE(pif.eeprom_dirty());
+
+    std::vector<std::uint8_t> image(512);
+    for (std::size_t i = 0; i < image.size(); ++i) image[i] = static_cast<std::uint8_t>(i);
+    CHECK_FALSE(pif.load_eeprom(std::span(image).first(511)));  // wrong size: unchanged
+    CHECK(pif.eeprom()[8] == 9);
+    REQUIRE(pif.load_eeprom(image));
+    CHECK_FALSE(pif.eeprom_dirty());
+    put(pif, {0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x04, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0xFE});
+    pif.run_commands();
+    CHECK(std::vector<std::uint8_t>(pif.ram().begin() + 8, pif.ram().begin() + 16) ==
+          std::vector<std::uint8_t>{16, 17, 18, 19, 20, 21, 22, 23});
 }

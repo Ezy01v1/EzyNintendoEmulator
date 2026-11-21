@@ -1,6 +1,36 @@
 #include "n64/rsp_regs.hpp"
 
+#include <atomic>
+#include <new>
+
 namespace ezy::n64 {
+
+namespace { std::atomic<RspMode> selected_mode{RspMode::Interpreter}; }
+RspMode default_rsp_mode() { return selected_mode.load(std::memory_order_relaxed); }
+void set_default_rsp_mode(RspMode mode) { selected_mode.store(mode,std::memory_order_relaxed); }
+RspRegs::RspRegs(RspMode mode) {
+    if(mode==RspMode::Jit) {
+        try { jit_=std::make_unique<RspJit>(); }
+        catch(const std::bad_alloc&) { /* Interpreter remains usable. */ }
+    }
+}
+RspRegs::~RspRegs()=default;
+
+void RspRegs::jit_vector(void* opaque,std::uint32_t word) noexcept {
+    auto& rsp=*static_cast<RspRegs*>(opaque);
+    if((word>>26)==0x12) rsp.vector_.execute(word,rsp.gpr_[(word>>16)&31]);
+    else rsp.vector_.access_memory(word,rsp.gpr_[(word>>21)&31],std::span(rsp.mem_).first<0x1000>());
+}
+
+void RspRegs::write_memory(std::uint32_t address, std::span<const std::uint8_t> bytes) {
+    bool imem = false;
+    for (const auto byte : bytes) {
+        imem |= (address & 0x1000) != 0;
+        mem_[address & 0x1FFF] = byte;
+        ++address;
+    }
+    if (imem) invalidate_jit();
+}
 
 namespace {
 
@@ -78,6 +108,18 @@ void RspRegs::write_status(std::uint32_t value, Mi& mi, Scheduler& scheduler, st
     }
 }
 
+void RspRegs::finish_hle_task(Mi& mi, Scheduler& scheduler) {
+    constexpr std::uint32_t kTaskDone = 1U << 9;  // SIG2
+    sp_status_ |= kHalt | kBroke | kTaskDone;
+    scheduler.cancel(EventType::RspStep);
+    if (sp_status_ & kInterruptOnBreak) mi.raise(MiInterrupt::Sp);
+}
+
+void RspRegs::hold_for_hle(Scheduler& scheduler) {
+    sp_status_ |= kHalt;
+    scheduler.cancel(EventType::RspStep);
+}
+
 void RspRegs::start_dma(Scheduler& scheduler, std::uint64_t when) {
     if (dma_.direction != DmaDirection::Idle || pending_.direction == DmaDirection::Idle) return;
     dma_ = pending_;
@@ -91,10 +133,16 @@ void RspRegs::schedule_dma_row(Scheduler& scheduler, std::uint64_t when) const {
     scheduler.schedule(EventType::SpDma, when + (beats * 9 + 1) / 2);
 }
 
+RspRegs::DmaRow RspRegs::dma_row() const {
+    if (dma_.direction == DmaDirection::Idle) return {};
+    return {dma_.dram_address & kDramMask, (dma_.length & kLengthMask) + 8, dma_.direction == DmaDirection::ToDram};
+}
+
 void RspRegs::finish_dma_row(Scheduler& scheduler, std::span<std::uint8_t> rdram, std::uint64_t when) {
     if (dma_.direction == DmaDirection::Idle) return;
     const std::uint32_t bytes = (dma_.length & kLengthMask) + 8;
     const std::uint32_t bank = dma_.sp_address & 0x1000;
+    if (dma_.direction == DmaDirection::ToSp && bank != 0) invalidate_jit();
     for (std::uint32_t i = 0; i < bytes; ++i) {
         std::uint8_t& sp = mem_[bank | ((dma_.sp_address + i) & 0xFFF)];
         const std::uint32_t dram = (dma_.dram_address + i) & kDramMask;

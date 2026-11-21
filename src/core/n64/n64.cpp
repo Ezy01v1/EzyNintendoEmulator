@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 
 #include "common/state.hpp"
+#include "n64/cpu/vr4300_jit.hpp"
 #include "n64/hle_boot.hpp"
 
 namespace ezy::n64 {
@@ -11,30 +13,59 @@ namespace ezy::n64 {
 namespace {
 
 constexpr std::uint32_t kStateMagic = 0x364E5A45;  // "EZN6"
-constexpr std::uint32_t kStateVersion = 11;          // bump whenever a serialize() changes
+constexpr std::uint32_t kStateVersion = 13;          // bump whenever a serialize() changes
 constexpr std::uint32_t kFirstStateVersion = 1;
 constexpr std::size_t kPifRomSize = 1984;
 // A field is at most this many instructions even if the VI is misprogrammed.
 constexpr std::uint64_t kMaxFrameCycles = 93'750'000 / 10;
 
+std::atomic<CpuMode> selected_cpu_mode{CpuMode::Interpreter};
+
 }  // namespace
 
-N64::N64(Cartridge cart) : cart_(std::move(cart)), bus_(scheduler_, cart_), cpu_(bus_) {}
+CpuMode default_cpu_mode() { return selected_cpu_mode.load(std::memory_order_relaxed); }
+void set_default_cpu_mode(CpuMode mode) { selected_cpu_mode.store(mode, std::memory_order_relaxed); }
 
-std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> pif_rom) {
+N64::N64(Cartridge cart, RdpMode mode, RspMode rsp_mode)
+    : cart_(std::move(cart)), bus_(scheduler_, cart_, mode, rsp_mode), cpu_(bus_) {}
+
+N64::~N64() = default;
+
+bool N64::set_cpu_mode(CpuMode mode) {
+    if (mode == CpuMode::Interpreter) {
+        cpu_jit_.reset();
+        return true;
+    }
+    if (cpu_jit_) return true;
+#if EZY_JIT_AVAILABLE
+    auto jit = std::make_unique<Vr4300Jit>(cpu_, bus_);
+    if (!jit->available()) return false;  // its destructor gives the code watch back
+    cpu_jit_ = std::move(jit);
+    return true;
+#else
+    return false;
+#endif
+}
+
+RdpMode N64::default_rdp_mode() { return ezy::n64::default_rdp_mode(); }
+void N64::set_default_rdp_mode(RdpMode mode) { ezy::n64::set_default_rdp_mode(mode); }
+
+std::unique_ptr<N64> N64::create(std::span<const std::uint8_t> rom, std::span<const std::uint8_t> pif_rom,
+                                 RdpMode mode, RspMode rsp_mode) {
     auto cart = Cartridge::load(rom);
     if (!cart) return nullptr;
-    std::unique_ptr<N64> n64(new N64(std::move(*cart)));
+    std::unique_ptr<N64> n64(new N64(std::move(*cart), mode, rsp_mode));
     if (pif_rom.size() == kPifRomSize) {
         n64->bus_.set_pif_rom(pif_rom);
         n64->cpu_.set_pc(0xFFFFFFFFBFC00000ULL);  // Cop0 starts in its reset state (BEV, ERL)
     } else {
         hle_boot(n64->cpu_, n64->bus_, n64->cart_);
     }
+    n64->set_cpu_mode(default_cpu_mode());  // after the boot's RAM writes: nothing compiled yet
     return n64;
 }
 
-void N64::step() {
+void N64::skip_idle_loop() {
     // Idle loop: jump over whole iterations up to just before the next event or Compare, so
     // everything happens at the same cycle as when stepping one instruction at a time.
     //
@@ -57,6 +88,35 @@ void N64::step() {
             cpu_.skip_idle_cycles(stop - start);
         }
     }
+}
+
+void N64::step() {
+    skip_idle_loop();
+    // The JIT runs up to just before the next event (or Compare, which it watches itself),
+    // so no event falls inside a block and every one still runs at its cycle.
+    if (cpu_jit_) {
+        const std::uint64_t now = scheduler_.now(), next = scheduler_.earliest_except(0);
+        const std::uint64_t budget = next > now ? next - now : 0;  // ~0 (nothing pending) included
+        if (budget != 0) {
+            // A throw from execute() (check mode or a failed RDP worker; both are fatal) skips the
+            // scheduler advance below: what ran is retired in the CPU but not in time.
+            const Vr4300Jit::Result r = cpu_jit_->execute(budget);
+            if (r.instructions != 0) {
+                scheduler_.advance(r.cycles);
+                run_due_events(false);
+                return;
+            }
+        }
+    }
+    step_cpu();
+}
+
+void N64::step_interpreted() {
+    skip_idle_loop();
+    step_cpu();
+}
+
+void N64::step_cpu() {
     scheduler_.advance(static_cast<std::uint64_t>(cpu_.step()));
     run_due_events(false);
 }
@@ -86,6 +146,7 @@ void N64::run_frame() {
 }
 
 std::vector<std::uint8_t> N64::save_state() {
+    bus_.drain_rdp(); // Drain before serializing even the scheduler and RAM.
     StateWriter writer;
     std::uint32_t magic = kStateMagic, version = kStateVersion, crc = cart_.crc32();
     writer(magic), writer(version), writer(crc);
@@ -104,10 +165,13 @@ bool N64::load_state(std::span<const std::uint8_t> state) {
     StateReader reader(state);
     reader(magic), reader(version), reader(crc);
     serialize(reader, version);
+    // Bus::serialize rewrites RDRAM without telling the JIT: its compiled code may be stale.
+    if (cpu_jit_) cpu_jit_->flush();
     if (reader.failed() || !reader.at_end()) {
         StateReader undo(previous);
         undo(magic), undo(version), undo(crc);
         serialize(undo, version);
+        if (cpu_jit_) cpu_jit_->flush();
         return false;
     }
     return true;

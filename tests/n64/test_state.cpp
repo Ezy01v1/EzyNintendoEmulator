@@ -10,32 +10,14 @@
 
 #include "common/state.hpp"
 #include "mips_asm.hpp"
+#include "n64/cpu/vr4300_jit.hpp"
 #include "n64/n64.hpp"
+#include "n64_test_helpers.hpp"
 
 using namespace ezy::n64;
+using namespace n64_test;
 
 namespace {
-
-// A ROM whose "IPL3" (at 0x40, run from SP DMEM at 0xA4000040) counts in t1 and stores
-// the count to RDRAM forever.
-std::vector<std::uint8_t> counting_rom(const std::string& title) {
-    std::vector<std::uint8_t> rom(0x2000, 0);
-    rom[0] = 0x80, rom[1] = 0x37, rom[2] = 0x12, rom[3] = 0x40;
-    for (std::size_t i = 0; i < title.size() && i < 20; ++i) rom[0x20 + i] = static_cast<std::uint8_t>(title[i]);
-    rom[0x3E] = 'E';
-    using namespace mips;
-    constexpr int t0 = 8, t1 = 9;
-    const std::uint32_t program[] = {lui(t0, 0x8000), addiu(t1, t1, 1), sw(t1, t0, 0x100), j(0x02, 0xA4000044), nop()};
-    std::size_t at = 0x40;
-    for (const std::uint32_t w : program) {
-        rom[at] = static_cast<std::uint8_t>(w >> 24);
-        rom[at + 1] = static_cast<std::uint8_t>(w >> 16);
-        rom[at + 2] = static_cast<std::uint8_t>(w >> 8);
-        rom[at + 3] = static_cast<std::uint8_t>(w);
-        at += 4;
-    }
-    return rom;
-}
 
 constexpr std::uint32_t vector_op(int function, int dest, int vs, int vt, int element = 0) {
     return mips::r(0x12, 16 | element, vt, vs, dest, function);
@@ -56,18 +38,6 @@ void write_rsp_program(Bus& bus, std::initializer_list<std::uint32_t> program) {
         bus.write32(address, word);
         address += 4;
     }
-}
-
-constexpr std::uint32_t kDpcStart = 0x04100000, kDpcEnd = 0x04100004, kDpcCurrent = 0x04100008,
-                        kDpcStatus = 0x0410000C;
-constexpr std::uint64_t kFillMode = 0x2F30000000000000ULL, kSyncFull = 0x2900000000000000ULL;
-constexpr std::uint64_t kPointMode = (0x2FULL << 56) | (6ULL << 41) | (3ULL << 38);  // G_TC_FILT, RGB dither off
-constexpr std::uint64_t kFilterMode = kPointMode | (1ULL << 45);
-
-constexpr std::uint64_t rdp_rectangle(std::uint64_t opcode, unsigned hi_x, unsigned hi_y, unsigned lo_x, unsigned lo_y) {
-    // Each coordinate is encoded in quarter pixels.
-    return (opcode << 56) | (std::uint64_t{hi_x * 4} << 44) | (std::uint64_t{hi_y * 4} << 32) |
-           (std::uint64_t{lo_x * 4} << 12) | (lo_y * 4);
 }
 
 constexpr std::uint64_t rdp_triangle_header(bool major_left, int yh, int ym, int yl) {
@@ -816,8 +786,10 @@ TEST_CASE("RDP combiner noise input is a 9-bit value with random top bits") {
         CAPTURE(x);
         const auto pixel = n64->bus().read32(0x4000 + 4 * x);
         const unsigned r = pixel >> 24;
-        // Positive noise 0x20, 0x60, 0xA0, 0xE0 times 255/256; negative values clamp to 0.
-        CHECK((r == 0 || r == 32 || r == 96 || r == 159 || r == 223));
+        CAPTURE(pixel);
+        // Positive noise 0x20, 0x60, 0xA0, 0xE0 times 255/256. Negative noise wraps in the
+        // 9-bit clamp: -0x20 and -0x60 read as 0, -0xA0 and -0xE0 (bit 7 clear) as 255.
+        CHECK((r == 0 || r == 32 || r == 96 || r == 159 || r == 223 || r == 255));
         CHECK(((pixel >> 16) & 255) == r);  // the same noise feeds all three channels
     }
 }
@@ -970,6 +942,64 @@ TEST_CASE("RDP two-cycle TEXEL1 in cycle 1 is the next pixel's TEXEL0") {
     CHECK(bus.read32(0x4008) == 0xFFFFFFE0U);
 }
 
+TEST_CASE("RDP textured rectangles sample intensity textures (I8, I4 and IA8)") {
+    // Spider-Man draws its text in I4: these formats used to be rejected and drew nothing.
+    struct Case {
+        const char* name;
+        std::uint64_t source, load_image, load_tile, render_tile;
+        std::array<std::uint32_t, 4> expected;
+    };
+    const std::uint64_t i_format = 4, ia_format = 3;
+    const std::array<Case, 3> cases{{
+        {"I8", 0x0040'80FF'0000'0000ULL, (i_format << 53) | (1ULL << 51) | (3ULL << 32),
+         rdp_tile(4, 1, 1, 1, 0), rdp_tile(4, 1, 0, 1, 0),
+         {0x000000E0U, 0x404040E0U, 0x808080E0U, 0xFFFFFFE0U}},
+        // I4 is loaded as 8-bit pairs: 0x0F, 0x8F hold texels 0, F, 8, F.
+        {"I4", 0x0F8F'0000'0000'0000ULL, (i_format << 53) | (1ULL << 51) | (1ULL << 32),
+         rdp_tile(4, 1, 1, 1, 0), rdp_tile(4, 0, 0, 1, 0),
+         {0x000000E0U, 0xFFFFFFE0U, 0x888888E0U, 0xFFFFFFE0U}},
+        // IA8: intensity in the high nibble, alpha in the low one.
+        {"IA8", 0x0F30'F0FF'0000'0000ULL, (ia_format << 53) | (1ULL << 51) | (3ULL << 32),
+         rdp_tile(3, 1, 1, 1, 0), rdp_tile(3, 1, 0, 1, 0),
+         {0x000000E0U, 0x333333E0U, 0xFFFFFFE0U, 0xFFFFFFE0U}},
+    }};
+    for (const auto& c : cases) {
+        const std::string name = c.name;
+        CAPTURE(name);
+        const auto n64 = N64::create(counting_rom("RDP INTENSITY"));
+        REQUIRE(n64);
+        auto& bus = n64->bus();
+        constexpr std::uint32_t source = 0x2000;
+        bus.write64(source, c.source);
+        const std::uint64_t modes = (0x2FULL << 56) | (6ULL << 41) | (3ULL << 38) | (1U << 9);
+        const unsigned load_width = c.render_tile == rdp_tile(4, 0, 0, 1, 0) ? 1 : 3;
+        const std::vector<std::uint64_t> commands{
+            0x3F18000300004000ULL,
+            rdp_rectangle(0x2D, 0, 0, 4, 4),
+            modes,
+            set_combine({15, 15, 31, 1, 7, 7, 7, 1}, {15, 15, 31, 1, 7, 7, 7, 1}),  // TEXEL0
+            (0x3DULL << 56) | c.load_image | source,
+            c.load_tile,
+            rdp_rectangle(0x34, 0, 0, load_width, 0) | (1ULL << 24),
+            c.render_tile,
+            rdp_rectangle(0x32, 0, 0, 3, 0),  // tile 0 covers texels 0..3
+            rdp_rectangle(0x24, 4, 1, 0, 0),
+            rdp_texture_coords(0, 0, 1024, 1024),  // one texel per pixel
+            kSyncFull,
+        };
+        std::uint32_t end = 0x1000;
+        for (const auto command : commands) bus.write64(end, command), end += 8;
+        bus.write32(kDpcStart, 0x1000);
+        bus.write32(kDpcEnd, end);
+        for (unsigned i = 0; i < 40; ++i) n64->step();
+        CHECK(bus.read32(kDpcCurrent) == end);
+        for (unsigned x = 0; x < 4; ++x) {
+            CAPTURE(x);
+            CHECK(bus.read32(0x4000 + 4 * x) == c.expected[x]);
+        }
+    }
+}
+
 TEST_CASE("RDP one-cycle fill rectangle goes through the combiner and blender") {
     const auto n64 = N64::create(counting_rom("RDP FLAT RECT"));
     REQUIRE(n64);
@@ -1079,7 +1109,7 @@ TEST_CASE("RDP depth triangles hide farther pixels and store compressed Z") {
     constexpr int pixel = 65536;
     for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);  // farthest depth
     // Z-buffered triangle (0x09) covering x = left..4 on rows 0 and 1, at a constant depth.
-    // Z has 10 fractional bits below the 18 the depth unit uses.
+    // Z is s15.16; the depth unit keeps 15.3 bits (z >> 13).
     const auto triangle = [](unsigned left, std::uint32_t z) {
         return std::array{
             rdp_triangle_header(true, 0, 0, 8) | (0x01ULL << 56),
@@ -1102,9 +1132,9 @@ TEST_CASE("RDP depth triangles hide farther pixels and store compressed Z") {
         commands.push_back(0x3A00000000000000ULL | color);
         for (const auto word : triangle(left, z)) commands.push_back(word);
     };
-    add(0, 0x4000U << 10, 0xFF0000FF);  // red, middle depth
-    add(2, 0x8000U << 10, 0x00FF00FF);  // green, behind red
-    add(3, 0x2000U << 10, 0x0000FFFF);  // blue, in front of red
+    add(0, 0x4000U << 13, 0xFF0000FF);  // red, middle depth
+    add(2, 0x8000U << 13, 0x00FF00FF);  // green, behind red
+    add(3, 0x2000U << 13, 0x0000FFFF);  // blue, in front of red
     commands.push_back(kSyncFull);
     std::uint32_t end = 0x1000;
     for (const auto command : commands) bus.write64(end, command), end += 8;
@@ -1122,6 +1152,48 @@ TEST_CASE("RDP depth triangles hide farther pixels and store compressed Z") {
         }
     }
     CHECK(bus.read32(0x6010) == 0xFFFCFFFC);  // row 2 untouched
+}
+
+TEST_CASE("RDP keeps far depths apart instead of saturating them") {
+    // Z coefficients are s15.16 and the depth unit keeps 15.3 (z >> 13). MK64's distant
+    // scenery sits near the far plane: a sign at Z 0x7000 must still hide a hill at 0x7800
+    // drawn after it (it saturated to 0x3FFFF, which always passes).
+    const auto n64 = N64::create(counting_rom("RDP FAR Z"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);
+    std::vector<std::uint64_t> commands{
+        0x3F18000300004000ULL,
+        0x3E00000000006000ULL,
+        rdp_rectangle(0x2D, 0, 0, 4, 4),
+        0x2F0000C000000230ULL,   // opaque Z, compare and update
+        0x3C00001F000000C0ULL,
+    };
+    const auto add = [&](std::uint32_t z_integer, std::uint32_t color) {
+        commands.push_back(0x3A00000000000000ULL | color);
+        for (const auto word : {rdp_triangle_header(true, 0, 0, 4) | (0x01ULL << 56), rdp_edge(4 * pixel, 0),
+                                rdp_edge(0, 0), rdp_edge(0, 0), std::uint64_t{z_integer << 16} << 32,
+                                std::uint64_t{0}}) {
+            commands.push_back(word);
+        }
+    };
+    add(0x7000, 0xFF0000FF);  // red sign, nearer
+    add(0x7800, 0x00FF00FF);  // green hill, farther, drawn after
+    commands.push_back(kSyncFull);
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 40; ++i) n64->step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read32(0x4000 + 4 * x) == 0xFF0000E0U);
+        // 0x7000 << 3 = 0x38000: exponent 3 (three leading ones), mantissa 0 -> 0x1800 << 2.
+        // A flat triangle's DZ sum is 0, which the RDP normalizes to 1 (code 0).
+        CHECK(bus.read16(0x6000 + 2 * x) == 0x6000);
+    }
 }
 
 TEST_CASE("RDP decal Z mode only draws pixels coplanar with the depth buffer") {
@@ -1145,11 +1217,11 @@ TEST_CASE("RDP decal Z mode only draws pixels coplanar with the depth buffer") {
             commands.push_back(word);
         }
     };
-    add(0, 0x4000U << 10, 0xFF0000FF);           // red base surface
+    add(0, 0x4000U << 13, 0xFF0000FF);           // red base surface
     commands.push_back(0x2F0000C000000E10ULL);   // decal Z, compare only
     // Flat memory DZ at a low exponent widens to 16, so the coplanar range is 16 << 3 = 128.
-    add(2, (0x4000U - 0x40) << 10, 0x00FF00FF);  // green decal, within the DZ range
-    add(3, (0x4000U - 0x100) << 10, 0x0000FFFF); // blue is nearer than the range, so not coplanar
+    add(2, (0x4000U - 0x40) << 13, 0x00FF00FF);  // green decal, within the DZ range
+    add(3, (0x4000U - 0x100) << 13, 0x0000FFFF); // blue is nearer than the range, so not coplanar
     commands.push_back(kSyncFull);
     std::uint32_t end = 0x1000;
     for (const auto command : commands) bus.write64(end, command), end += 8;
@@ -1170,7 +1242,7 @@ TEST_CASE("RDP depth writes the DZ code from the Z slopes and uses it for non-ov
     auto& bus = n64->bus();
     constexpr int pixel = 65536;
     for (std::uint32_t at = 0x6000; at < 0x6020; at += 4) bus.write32(at, 0xFFFCFFFC);
-    // Constant Z with DzDy = 0x0100'0000: DZ = 0x100, code 8, stored top bits 2.
+    // Constant Z with DzDy = 0x0100'0000: DZ 0x100 rounds up to 0x200, code 9, stored top bits 2.
     const std::vector<std::uint64_t> commands{
         0x3F18000300004000ULL,
         0x3E00000000006000ULL,
@@ -1179,7 +1251,7 @@ TEST_CASE("RDP depth writes the DZ code from the Z slopes and uses it for non-ov
         0x3C00001F000000C0ULL,
         0x3A000000FF0000FFULL,
         rdp_triangle_header(true, 0, 0, 8) | (0x01ULL << 56), rdp_edge(4 * pixel, 0), rdp_edge(0, 0),
-        rdp_edge(0, 0), std::uint64_t{0x4000U << 10} << 32, 0x01000000ULL,
+        rdp_edge(0, 0), std::uint64_t{0x4000U << 13} << 32, 0x01000000ULL,
         kSyncFull,
     };
     std::uint32_t end = 0x1000;
@@ -1214,9 +1286,9 @@ std::array<std::uint32_t, 4> draw_depth_pair(N64& n64, std::uint32_t base_dzdy, 
             commands.push_back(word);
         }
     };
-    add(0x4000U << 10, base_dzdy, 0xFF0000FF);  // red base surface
+    add(0x4000U << 13, base_dzdy, 0xFF0000FF);  // red base surface
     commands.push_back(second_modes);
-    add(second_z << 10, 0, 0x00FF00FF);         // green
+    add(second_z << 13, 0, 0x00FF00FF);         // green
     commands.push_back(kSyncFull);
     std::uint32_t end = 0x1000;
     for (const auto command : commands) bus.write64(end, command), end += 8;
@@ -1234,8 +1306,8 @@ std::array<std::uint32_t, 4> draw_depth_pair(N64& n64, std::uint32_t base_dzdy, 
 TEST_CASE("RDP keeps the low DZ bits in RDRAM hidden bits") {
     const auto n64 = N64::create(counting_rom("RDP HIDDEN DZ"));
     REQUIRE(n64);
-    // DzDy 0x700 rounds to DZ 0x400, code 10: top bits 2 in RDRAM, low bits 2 hidden.
-    // Memory DZ 0x400 widens to 0x800, so the decal range is 0x800 << 3 = 0x4000; losing the
+    // DzDy 0x700 rounds up to DZ 0x800, code 11: top bits 2 in RDRAM, low bits 3 hidden.
+    // Memory DZ 0x800 widens to 0x1000, so the decal range is 0x1000 << 3 = 0x8000; losing the
     // hidden bits would leave 0x100 -> 0x200 and a range of only 0x1000.
     const auto row = draw_depth_pair(*n64, 0x07000000U, 0x2F0000C000000E10ULL, 0x4000 - 0x2000);
     for (unsigned x = 0; x < 4; ++x) {
@@ -1251,12 +1323,141 @@ TEST_CASE("RDP keeps the low DZ bits in RDRAM hidden bits") {
     CHECK(restored->save_state() == state);
 }
 
+namespace {
+
+// RGBA5551 color image at 0x4000, four pixels per row, with a 4x4 scissor.
+constexpr std::uint64_t kColor16 = 0x3F10000300004000ULL;
+// One cycle, RGB dither off: image read, antialias; coverage destination in bits 9:8.
+constexpr std::uint64_t kCoverageModes = kOneCycle | (1U << 6) | (1U << 3);
+constexpr auto kPrimRgba = set_combine({15, 15, 31, 3, 7, 7, 7, 3}, {15, 15, 31, 3, 7, 7, 7, 3});
+
+// Fill Rectangle with coordinates in quarter pixels (in one-cycle mode it is a flat
+// rectangle whose per-pixel coverage counts the covered subpixel samples).
+constexpr std::uint64_t rdp_fill_quarters(unsigned xh, unsigned yh, unsigned xl, unsigned yl) {
+    return (0x36ULL << 56) | (std::uint64_t{xl} << 44) | (std::uint64_t{yl} << 32) | (std::uint64_t{xh} << 12) | yh;
+}
+
+void run_rdp_list(N64& n64, const std::vector<std::uint64_t>& commands) {
+    auto& bus = n64.bus();
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write64(end, kSyncFull), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 30; ++i) n64.step();
+    CHECK(bus.read32(kDpcCurrent) == end);
+}
+
+unsigned hidden_at(const N64& n64, std::uint32_t address) { return n64.bus().hidden_bits().read(address >> 1); }
+
+}  // namespace
+
+TEST_CASE("RDP 16-bit color writes keep all three coverage bits") {
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 WRITE"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    // Rectangle x 0..1.75, y 0..0.75: three subrows. Pixel 0 covers samples 0,2 / 1,3 in
+    // every subrow: 2 + 2 + 2 = 6. Pixel 1 covers 4,6 / 5 (7 is the excluded edge): 2 + 1 + 2 = 5.
+    // Memory is empty (bit 0 = 0, hidden 0: coverage 0), so clamp stores the sum: 6 and 5.
+    // RGBA5551 keeps c >> 2 in bit 0 and c & 3 in the hidden bits: 6 -> 1 / 2, 5 -> 1 / 1.
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), kCoverageModes, kPrimRgba,
+                        0x3A000000F8F8F8FFULL, rdp_fill_quarters(0, 0, 7, 3)});
+    // Not overflowing, the blender mixes P with P (M is the pixel too): the color stays 0xF8.
+    CHECK(bus.read16(0x4000) == 0xFFFF);
+    CHECK(bus.read16(0x4002) == 0xFFFF);
+    CHECK((bus.read16(0x4002) & 1) == 1);
+    CHECK(hidden_at(*n64, 0x4000) == 2);
+    CHECK(hidden_at(*n64, 0x4002) == 1);
+    CHECK(bus.read16(0x4004) == 0);  // pixel 2 has no coverage
+    CHECK(hidden_at(*n64, 0x4004) == 0);
+}
+
+TEST_CASE("RDP reads 16-bit memory coverage from the hidden bits") {
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 READ"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    constexpr std::uint64_t wrap = kCoverageModes | (1U << 8);
+    // x 1..1.25 over four subrows: pixel 1 covers sample 4 of the even subrows only: 2.
+    // Wrap over empty memory stores (2 + 0) & 7 = 2: bit 0 = 0, hidden 2.
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), wrap, kPrimRgba, 0x3A000000F8F8F8FFULL,
+                        rdp_fill_quarters(4, 0, 5, 4)});
+    CHECK((bus.read16(0x4002) & 1) == 0);
+    CHECK(hidden_at(*n64, 0x4002) == 2);
+    // x 1..1.75 over three subrows: 2 + 1 + 2 = 5. Memory coverage is (0 << 2) | 2 = 2, so wrap
+    // stores (5 + 2) & 7 = 7: bit 0 = 1, hidden 3. Taking the hidden bits as set would read 3
+    // and store (5 + 3) & 7 = 0.
+    run_rdp_list(*n64, {rdp_fill_quarters(4, 0, 7, 3)});
+    CHECK((bus.read16(0x4002) & 1) == 1);
+    CHECK(hidden_at(*n64, 0x4002) == 3);
+}
+
+TEST_CASE("RDP 16-bit fills copy each halfword's low bit into its hidden bits") {
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 FILL"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), kFillMode,
+                        0x37000000FFFFFFFFULL, rdp_rectangle(0x36, 3, 0, 0, 0),    // row 0, x 0..3
+                        0x37000000FFFEFFFEULL, rdp_rectangle(0x36, 1, 0, 0, 0),    // row 0, x 0..1
+                        0x37000000FFFFFFFEULL, rdp_rectangle(0x36, 3, 1, 0, 1)});  // row 1, x 0..3
+    // 0xFFFE has bit 0 clear: hidden 0 over the earlier 3. 0xFFFF keeps 3.
+    for (const std::uint32_t a : {0x4000U, 0x4002U}) {
+        CHECK(bus.read16(a) == 0xFFFE);
+        CHECK(hidden_at(*n64, a) == 0);
+    }
+    for (const std::uint32_t a : {0x4004U, 0x4006U}) {
+        CHECK(bus.read16(a) == 0xFFFF);
+        CHECK(hidden_at(*n64, a) == 3);
+    }
+    // The fill word alternates halfwords: 0xFFFF (hidden 3) then 0xFFFE (hidden 0).
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        const std::uint32_t a = 0x4008 + 2 * x;
+        CHECK(hidden_at(*n64, a) == (x % 2 == 0 ? 3U : 0U));
+    }
+}
+
+TEST_CASE("RDP constant 16-bit rectangles store the coverage of every pixel") {
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 CONSTANT"));
+    REQUIRE(n64);
+    auto& bus = n64->bus();
+    // Aligned x 0..4, y 0..1 without image read: coverage 8 over memory coverage 7 overflows,
+    // so clamp stores 8 - 1 = 7 (bit 0 = 1, hidden 3) in each pixel the fast path replicates.
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), kOneCycle, kPrimRgba, 0x3A000000F8F8F8FFULL,
+                        rdp_rectangle(0x36, 4, 1, 0, 0)});
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read16(0x4000 + 2 * x) == 0xFFFF);
+        CHECK(hidden_at(*n64, 0x4000 + 2 * x) == 3);
+    }
+}
+
+TEST_CASE("RDP draws normally after loading a state without color hidden bits") {
+    const auto fresh = N64::create(counting_rom("RDP CVG 16 STATE"));
+    REQUIRE(fresh);
+    const auto state = fresh->save_state();
+    const auto n64 = N64::create(counting_rom("RDP CVG 16 STATE"));
+    REQUIRE(n64);
+    REQUIRE(n64->load_state(state));
+    auto& bus = n64->bus();
+    constexpr int pixel = 65536;
+    // A one-row triangle over x 0..3 fully covers each pixel: like the rectangle above, clamp
+    // stores 7 (no image read), bit 0 = 1 and hidden 3.
+    run_rdp_list(*n64, {kColor16, rdp_rectangle(0x2D, 0, 0, 4, 4), kOneCycle, kPrimRgba, 0x3A000000F8F8F8FFULL,
+                        rdp_triangle_header(true, 0, 0, 4), rdp_edge(4 * pixel, 0), rdp_edge(0, 0), rdp_edge(0, 0)});
+    for (unsigned x = 0; x < 4; ++x) {
+        CAPTURE(x);
+        CHECK(bus.read16(0x4000 + 2 * x) == 0xFFFF);
+        CHECK(hidden_at(*n64, 0x4000 + 2 * x) == 3);
+    }
+}
+
 TEST_CASE("RDP interpenetrating Z scales coverage where surfaces intersect") {
     const auto n64 = N64::create(counting_rom("RDP INTERPENETRATE"));
     REQUIRE(n64);
-    // Base DZ 0x100 widens to 0x200 (shift 9). The green pixel is 0x400 in front, inside the
-    // range: coverage becomes ((0x4000 >> 9) - (0x3C00 >> 9)) * 8 >> 3 = 2, stored as 1 by clamp.
-    const auto row = draw_depth_pair(*n64, 0x01000000U, 0x2F0000C000000430ULL, 0x4000 - 0x400);
+    // Base DZ 0x100 rounds up to 0x200 and widens to 0x400 (shift 10). The green pixel is 0x800
+    // in front, inside the range: coverage becomes ((0x4000 >> 10) - (0x3800 >> 10)) * 8 >> 3 = 2,
+    // stored as 1 by clamp.
+    const auto row = draw_depth_pair(*n64, 0x01000000U, 0x2F0000C000000430ULL, 0x4000 - 0x800);
     for (unsigned x = 0; x < 4; ++x) {
         CAPTURE(x);
         CHECK(row[x] == 0x00FF0020U);
@@ -1278,7 +1479,7 @@ TEST_CASE("RDP alpha compare keeps the depth buffer for dropped pixels") {
         0x3C00001F000000C0ULL,   // alpha D = primitive alpha
         0x3A000000FF000040ULL,   // primitive alpha 0x40 is below the threshold
         rdp_triangle_header(true, 0, 0, 8) | (0x01ULL << 56), rdp_edge(4 * pixel, 0), rdp_edge(0, 0),
-        rdp_edge(0, 0), std::uint64_t{0x4000U << 10} << 32, 0,
+        rdp_edge(0, 0), std::uint64_t{0x4000U << 13} << 32, 0,
         kSyncFull,
     };
     std::uint32_t end = 0x1000;
@@ -1424,7 +1625,11 @@ TEST_CASE("RDP copies a Load Tile subregion from saved TMEM with RGBA5551 alpha 
                     const auto texel = texels[(y - 1) * 8 + x - 2];
                     if (texel & 1) expected = texel;
                 }
-                CHECK(bus.read16(framebuffer + 2 * (y * 12 + x)) == expected);
+                const std::uint32_t address = framebuffer + 2 * (y * 12 + x);
+                CHECK(bus.read16(address) == expected);
+                // COPY copies each written texel's low bit into its hidden bits (full coverage);
+                // the CPU-written background keeps hidden 0.
+                CHECK(bus.hidden_bits().read(address >> 1) == (expected != background ? 3U : 0U));
             }
         }
     };
@@ -2083,4 +2288,224 @@ TEST_CASE("a truncated state is refused and leaves the machine as it was") {
 TEST_CASE("create refuses a file that isn't an N64 ROM") {
     const std::vector<std::uint8_t> junk(0x2000, 0x55);
     CHECK_FALSE(N64::create(junk));
+}
+
+TEST_CASE("N64 threaded mode preserves state across synchronous restore and rollback") {
+    const auto rom = counting_rom("THREADED STATE");
+    const auto async = N64::create(rom, {}, RdpMode::Threaded);
+    const auto sync = N64::create(rom, {}, RdpMode::Synchronous);
+    REQUIRE(async);
+    REQUIRE(sync);
+    REQUIRE(async->bus().rdp_threaded());
+    auto& bus = async->bus();
+    const std::array<std::uint64_t, 5> commands{
+        0x3F18000300004000ULL, kFillMode, rdp_rectangle(0x2D, 0, 0, 4, 1),
+        0x3700000012345678ULL, rdp_rectangle(0x36, 3, 0, 0, 0),
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 20; ++i) async->step();
+    // No Sync Full: save must drain before serializing RAM and raster state.
+    const auto state = async->save_state();
+    CHECK(bus.read32(0x4000) == 0x12345678);
+    REQUIRE(sync->load_state(state));
+    CHECK(sync->save_state() == state);
+    auto truncated = state;
+    truncated.resize(truncated.size() - 8);
+    CHECK_FALSE(async->load_state(truncated));
+    CHECK(async->save_state() == state);
+    for (unsigned i = 0; i < 100; ++i) { async->step(); sync->step(); }
+    CHECK(async->save_state() == sync->save_state());
+}
+
+TEST_CASE("N64 peripheral observers synchronize pending RDP writes without Sync Full") {
+    const auto n64 = N64::create(counting_rom("RDP OBSERVERS"), {}, RdpMode::Threaded);
+    REQUIRE(n64);
+    REQUIRE(n64->bus().rdp_threaded());
+    auto& bus = n64->bus();
+    const std::array<std::uint64_t, 5> commands{
+        0x3F18000F00004000ULL, kFillMode, rdp_rectangle(0x2D, 0, 0, 16, 1),
+        0x3700000012345600ULL, rdp_rectangle(0x36, 15, 0, 0, 0),
+    };
+    std::uint32_t end = 0x1000;
+    for (const auto command : commands) bus.write64(end, command), end += 8;
+    bus.write32(kDpcStart, 0x1000);
+    bus.write32(kDpcEnd, end);
+    for (unsigned i = 0; i < 20; ++i) n64->step();
+    SUBCASE("SI reads the completed framebuffer") {
+        bus.write32(0x04800000, 0x4000);
+        bus.write32(0x04800010, 0x1FC007C0);
+        CHECK(bus.pif().ram()[0] == 0x12);
+        CHECK(bus.pif().ram()[1] == 0x34);
+    }
+    SUBCASE("SP DMA reads the completed framebuffer") {
+        bus.write32(0x04040000, 0);
+        bus.write32(0x04040004, 0x4000);
+        bus.write32(0x04040008, 63);
+        for (unsigned i = 0; i < 80; ++i) n64->step();
+        CHECK(bus.read32(0x04000000) == 0x12345600);
+    }
+    SUBCASE("AI reads the completed framebuffer as audio samples") {
+        bus.write32(0x04500008, 1);
+        bus.write32(0x04500000, 0x4000);
+        bus.write32(0x04500004, 64);
+        REQUIRE_FALSE(bus.ai().samples().empty());
+        CHECK(bus.ai().samples()[0] == doctest::Approx(0x1234 / 32768.0));
+    }
+    SUBCASE("PI writes occur after the queued draw") {
+        bus.write32(0x04600000, 0x4000);
+        bus.write32(0x04600004, 0x10000000);
+        bus.write32(0x0460000C, 3);
+        CHECK(bus.read32(0x4000) == 0x80371240);
+    }
+    SUBCASE("VI image extraction observes the completed framebuffer") {
+        bus.write32(0x04400000, 3);
+        bus.write32(0x04400004, 0x4000);
+        bus.write32(0x04400008, 16);
+        bus.write32(0x04400024, 16);
+        bus.write32(0x04400028, 480);
+        bus.write32(0x04400030, 1024);
+        bus.write32(0x04400034, 1024);
+        const auto image = n64->image();
+        REQUIRE_FALSE(image.argb.empty());
+        CHECK(image.argb[0] == 0xFF123456);
+    }
+}
+
+TEST_CASE("RSP batched vector execution matches individual steps at every cycle boundary") {
+    const std::array program{
+        mips::addiu(1, 0, 0x200), mips::lui(2, 0x1234), mips::ori(2, 2, 0x5678),
+        mips::sw(2, 1, 0),
+        // LQV v2,0(r1), VXOR v3,v2,v2, SQV v3,16(r1)
+        mips::i(0x32, 1, 2, 4 << 11), vector_op(0x2C, 3, 2, 2),
+        mips::i(0x3A, 1, 3, (4 << 11) | 1),
+        cop2_transfer(0, 4, 2, 0), cop2_transfer(4, 4, 5, 15),
+        cop2_transfer(0, 0, 2, 0), // Writing r0 is still discarded.
+        mips::i(0x32, 0, 6, (4 << 11) | 1), // Base r0.
+        mips::beq(0, 0, 2), vector_op(0x2C, 7, 2, 2), // Vector delay slot.
+        mips::addiu(6, 0, 99), // Skipped by the branch.
+        mips::i(0x3A, 0, 7, (4 << 11) | 2),
+        cop2_transfer(6, 2, 0), cop2_transfer(2, 5, 0),
+        vector_op(0x37, 0, 0, 0), mips::r(0, 0, 0, 0, 0, 0x0D),
+    };
+    for (std::uint64_t bound = 0; bound <= 40; ++bound) {
+        CAPTURE(bound);
+        Scheduler singles, batched;
+        Mi single_mi, batch_mi;
+        Rdp single_rdp, batch_rdp;
+        RspRegs single_rsp, batch_rsp;
+        for (std::size_t i = 0; i < program.size(); ++i) {
+            for (unsigned byte = 0; byte < 4; ++byte) {
+                const auto value = static_cast<std::uint8_t>(program[i] >> (24 - byte * 8));
+                single_rsp.write_memory(static_cast<std::uint32_t>(0x1000 + i * 4 + byte), std::span(&value, 1));
+                batch_rsp.write_memory(static_cast<std::uint32_t>(0x1000 + i * 4 + byte), std::span(&value, 1));
+            }
+        }
+        single_rsp.write_sp(0x10, 0x101, single_mi, singles, 0); // halt clear, interrupt on BREAK
+        batch_rsp.write_sp(0x10, 0x101, batch_mi, batched, 0);
+        singles.schedule(EventType::ViLine, 11);
+        batched.schedule(EventType::ViLine, 11);
+        singles.advance_to(bound);
+        batched.advance_to(bound);
+        while (const auto event = singles.pop_due()) {
+            if (event->type == EventType::RspStep)
+                single_rsp.step(single_mi, single_rdp, singles, event->when);
+        }
+        while (const auto event = batched.pop_due()) {
+            if (event->type == EventType::RspStep)
+                batch_rsp.run(batch_mi, batch_rdp, batched, event->when, false);
+        }
+        ezy::StateWriter reference, actual;
+        // Inactive slots retain an unobservable last timestamp; batching need not
+        // update it on BREAK. Compare scheduling behavior and all live RSP state.
+        CHECK(singles.next_event_time() == batched.next_event_time());
+        for (unsigned type = 0; type < kEventTypeCount; ++type)
+            CHECK(singles.pending(static_cast<EventType>(type)) == batched.pending(static_cast<EventType>(type)));
+        single_mi.serialize(reference);
+        single_rsp.serialize(reference, 11, single_rdp);
+        batch_mi.serialize(actual);
+        batch_rsp.serialize(actual, 11, batch_rdp);
+        CHECK(actual.take() == reference.take());
+    }
+}
+
+#if EZY_N64_RSP_JIT
+TEST_CASE("RSP JIT discards hot code after mirrored writes DMA and state restoration") {
+    const auto n64=N64::create(counting_rom("JIT INVALIDATION"),{},RdpMode::Synchronous,RspMode::Jit);
+    REQUIRE(n64);
+    auto& bus=n64->bus();
+    REQUIRE(bus.rsp().jit_active());
+    const auto program=[&](int value) {
+        write_rsp_program(bus,{mips::addiu(1,0,value),mips::sw(1,0,0x300),mips::r(0,0,0,0,0,13)});
+    };
+    const auto run=[&] {
+        bus.write32(0x04080000,0);
+        bus.write32(0x04040010,5);
+        for(unsigned i=0;i<500 && !(bus.read32(0x04040010)&1);++i) n64->step();
+        REQUIRE((bus.read32(0x04040010)&1)!=0);
+    };
+    program(17); run(); run(); // Warm PC 0 after initial scheduler settlement.
+    REQUIRE(bus.read32(0x04000300)==17);
+    REQUIRE(bus.rsp().jit_stats().native_instructions>0);
+    const auto original=n64->save_state();
+    SUBCASE("CPU writes through a mirrored IMEM address") {
+        bus.write32(0x04021000,mips::addiu(1,0,42));
+        run();
+        CHECK(bus.read32(0x04000300)==42);
+    }
+    SUBCASE("SP DMA replaces an already compiled opcode") {
+        bus.write32(0x5000,mips::addiu(1,0,42));
+        bus.write32(0x5004,mips::sw(1,0,0x300));
+        bus.write32(0x04040000,0x1000);
+        bus.write32(0x04040004,0x5000);
+        bus.write32(0x04040008,7);
+        for(unsigned i=0;i<30;++i) n64->step();
+        run();
+        CHECK(bus.read32(0x04000300)==42);
+    }
+    SUBCASE("Loading old IMEM over hot new code and rejecting a truncated state") {
+        program(42); run(); run();
+        REQUIRE(bus.read32(0x04000300)==42);
+        const auto changed=n64->save_state();
+        REQUIRE(n64->load_state(original));
+        run();
+        CHECK(bus.read32(0x04000300)==17);
+        const auto before=n64->save_state();
+        auto truncated=changed;
+        truncated.resize(truncated.size()-8);
+        CHECK_FALSE(n64->load_state(truncated));
+        CHECK(n64->save_state()==before);
+        run();
+        CHECK(bus.read32(0x04000300)==17);
+    }
+}
+#endif
+
+TEST_CASE("N64 with the CPU JIT loads a state and continues exactly like the interpreter") {
+    // The loop rewrites its own code, so the RAM a state restores holds other code than the
+    // blocks compiled since it was saved.
+    const auto rom = rdram_loop_rom("JIT STATE TEST");
+    const auto run = [&rom](CpuMode mode) {
+        const auto n64 = N64::create(rom);
+        REQUIRE(n64);
+        REQUIRE(n64->set_cpu_mode(mode) == (mode == CpuMode::Interpreter || EZY_JIT_AVAILABLE == 1));
+        for (int i = 0; i < 2; ++i) n64->run_frame();
+        const auto state = n64->save_state();
+        n64->run_frame();
+        REQUIRE(n64->load_state(state));
+        n64->run_frame();
+        // A truncated state is refused: the undo path restores the machine (and flushes the JIT).
+        auto truncated = state;
+        truncated.resize(truncated.size() - 8);
+        CHECK_FALSE(n64->load_state(truncated));
+        for (int i = 0; i < 2; ++i) n64->run_frame();
+        CHECK(n64->cpu().gpr(9) > 1000);  // the loop in RDRAM ran
+        if (n64->cpu_jit() != nullptr) CHECK(n64->cpu_jit()->stats().native > 1000);  // its stores included
+        return n64->save_state();
+    };
+    const auto interpreter_state = run(CpuMode::Interpreter);
+    const auto jit_state = run(CpuMode::Jit);
+    CHECK(jit_state == interpreter_state);
 }

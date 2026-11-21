@@ -1,5 +1,6 @@
 ﻿#include "n64/rsp_vector.hpp"
 
+#include "n64/rsp_vector_simd.hpp"
 #include <algorithm>
 #include <bit>
 #include <utility>
@@ -67,7 +68,10 @@ constexpr auto square_root_rom() {
     return result;
 }
 
-std::uint32_t reciprocal(std::int32_t input, bool square_root) {
+}  // namespace
+
+// The VRCP/VRSQ result for a 32-bit input (the high half comes from VRCPH/VRSQH).
+std::uint32_t rsp_reciprocal(std::int32_t input, bool square_root) {
     if (input == 0) return 0x7FFFFFFF;
     if (input == -32768) return 0xFFFF0000;
     const std::uint32_t sign = input < 0 ? 0xFFFFFFFF : 0;
@@ -81,8 +85,6 @@ std::uint32_t reciprocal(std::int32_t input, bool square_root) {
     const unsigned shift = square_root ? (31 - leading) / 2 : 31 - leading;
     return (((0x10000 | fraction) << 14) >> shift) ^ sign;
 }
-
-}  // namespace
 
 std::uint8_t RspVector::byte(const Vector& vector, unsigned index) {
     return static_cast<std::uint8_t>(vector[(index & 15) / 2] >> ((index & 1) ? 0 : 8));
@@ -175,7 +177,13 @@ constexpr std::array<RspVector::LaneOp, 64> RspVector::lane_ops(std::index_seque
     return {&RspVector::run_lanes<static_cast<unsigned>(ops)>...};
 }
 
-const std::array<RspVector::LaneOp, 64> RspVector::kLaneOps = RspVector::lane_ops(std::make_index_sequence<64>{});
+const std::array<RspVector::LaneOp, 64> RspVector::kLaneOps = [] {
+    auto ops=lane_ops(std::make_index_sequence<64>{});
+#if EZY_N64_VECTOR_AVX2
+    if(detail::vmadn_avx2_available()) ops[VMADN]=&RspVector::run_vmadn_avx2;
+#endif
+    return ops;
+}();
 
 template <unsigned op>
 std::uint16_t RspVector::multiply(unsigned source, unsigned lane, std::uint16_t lhs, std::uint16_t rhs) {
@@ -324,7 +332,7 @@ void RspVector::divide(unsigned op, Vector& dest, unsigned lane, std::uint16_t i
     if (div_high_pending_ && (op == VRCPL || op == VRSQL)) {
         operand = static_cast<std::int32_t>((std::uint32_t{div_input_} << 16) | input);
     }
-    const auto result = reciprocal(operand, op == VRSQ || op == VRSQL);
+    const auto result = rsp_reciprocal(operand, op == VRSQ || op == VRSQL);
     div_high_pending_ = false;
     div_output_ = static_cast<std::uint16_t>(result >> 16);
     dest[lane] = static_cast<std::uint16_t>(result);
