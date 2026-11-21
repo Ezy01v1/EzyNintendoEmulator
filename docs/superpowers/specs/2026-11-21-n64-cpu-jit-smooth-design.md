@@ -13,8 +13,8 @@ núcleo `ezy_jit` servirá a GameCube/Wii, que tienen mucho más código y neces
 
 ## Lo que se midió (2026-11-21, i7-4790, MK64, `--audio-hle --rdp-threaded --gfx-hle --cpu-jit`)
 
-- En los 400 campos de la carrera (1500–1900) el JIT **sigue compilando**: los bloques vivos
-  pasan de 11 742 a 35 145 y el tiempo de compilación de 2,5 s a 6,5 s, es decir ~4 s en 400
+- En los 400 campos de la carrera (1500–1900) el JIT **sigue compilando**: los bloques
+  compilados (total acumulado) pasan de 11 742 a 35 145 y el tiempo de compilación de 2,5 s a 6,5 s, es decir ~4 s en 400
   campos (**~10 ms por campo de media**, el presupuesto entero de un campo a 60 Hz es 16,7 ms).
 - El perfil de la carrera (`docs/performance/2026-11-18-n64-cpu-jit.md`) da 47 % del hilo
   principal a AsmJit; ~30 % es su asignador de registros (`x86::Compiler`), ~10 % emisión.
@@ -23,6 +23,8 @@ núcleo `ezy_jit` servirá a GameCube/Wii, que tienen mucho más código y neces
   `Vr4300Jit::execute`: cuando un bloque no cabe antes del próximo evento, el intérprete avanza
   instrucción a instrucción hasta el evento, y la siguiente entrada al JIT cae en un PC
   arbitrario, donde `execute` compila un bloque nuevo (casi copia de la cola de otro).
+  El contador también incluye destinos de salto legítimos dentro de otro bloque (la cabeza de
+  un bucle), así que 2/3 es un techo; la medición del paso 2 da la cifra real.
 - Sospecha (sin confirmar): el tirón del puente es una ráfaga de compilación al entrar código
   nuevo. El usuario confirmará luego si se repite en la segunda vuelta (si no se repite, casi
   seguro es compilación). El diseño no depende de esa respuesta.
@@ -101,9 +103,13 @@ El usuario eligió **A** (2026-11-21), con la medición primero.
 
 ### 2. No compilar en PCs arbitrarios
 
-Regla: cuando `execute` no encuentra bloque para el PC y **el PC cae dentro de un bloque ya
-compilado** (entre su primera palabra y su última, con la misma clave de modo), no compila: sale
-y el intérprete da ese paso. El intérprete sigue paso a paso hasta salir de ese bloque (su final
+Regla: cuando `execute` no encuentra bloque para el PC, **el PC cae dentro de un bloque ya
+compilado** (después de su primera palabra y hasta su última) **y no se llegó a él por un salto**
+(la instrucción anterior no fue la ranura de retardo de un salto: `in_delay_slot_` falso), no
+compila: sale y el intérprete da ese paso. Un destino de salto se compila siempre, aunque esté
+dentro de otro bloque: es la cabeza de un bucle o una función, y debe correr nativo. Lo que la
+regla evita son las reanudaciones arbitrarias (tras un evento que no dejó caber un bloque, o el
+regreso de una interrupción con `ERET`). El intérprete sigue paso a paso hasta salir de ese bloque (su final
 es un salto con su ranura, o el límite de instrucciones), y ahí el JIT encuentra o compila el
 bloque siguiente, que es un inicio "natural".
 
