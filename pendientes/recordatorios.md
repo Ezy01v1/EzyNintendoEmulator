@@ -318,8 +318,10 @@ eferenciares-v148` (fuera del repo).
       (`--vi-raw` = framebuffer crudo), runner con `--vi-output`. Más parecido a ares en 6/6 pares.
       Coste de `output()`: 11,3 → **1,7 ms** por cuadro (meta del plan: < 2 ms, cumplida en un hilo).
       Ver `docs/performance/2026-11-19-n64-vi-output.md`. Revisión final del branch hecha.
-    - [ ] Que el usuario pruebe MK64 en ezyemu (ahora con filtro por defecto) y opine de la imagen;
-      luego abrir los PR de `n64/gfx-hle-port`, `n64/cpu-jit` y `n64/vi-output`.
+    - [x] El usuario probó MK64 en ezyemu con filtro: "se ve bien". PRs abiertos y apilados (2026-11-21):
+      #16 `n64/gfx-hle-port` → main, #17 `n64/cpu-jit` → `n64/gfx-hle-port`, #18 `n64/vi-output` → `n64/cpu-jit`.
+      Fusionar en ese orden (al borrar la rama fusionada GitHub cambia la base del siguiente a main).
+    - [ ] El usuario dice que faltan "unos detallitos gráficos" en MK64: preguntar cuáles y revisarlos.
     - [x] Fila de basura en la última línea: solo está en el framebuffer crudo (`--vi-raw`); la salida
       del VI sigue V_VIDEO y la deja negra, como ares.
     - Menor (para después): en juegos entrelazados, si ezyemu dibuja un campo de cada dos, el campo
@@ -886,3 +888,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   exacto), `output(..., Image&)` que reutiliza el buffer en ezyemu y runner, decodificación de 16 bits de 8 en 8.
   `output()` 3,0 → 1,7 ms. Imágenes idénticas, prueba de hashes intacta (ahora reutiliza la imagen),
   Debug 11/11, Release 183/183, estado de MK64 en 1900 idéntico (4a4c07...). Fila de basura: solo en `--vi-raw`.
+- 2026-11-21 (3) — PRs #16, #17 y #18 abiertos (apilados, sin CI en el repo). Siguiente: detalles gráficos de MK64.
