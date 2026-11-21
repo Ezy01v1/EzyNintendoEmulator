@@ -312,7 +312,8 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
     Comparado contra ares v148 (paraLLEl-RDP) en el mismo instante de la demo. Commit 73bc414.
   - [ ] Siguiente en lo visual: filtro del VI (antialias + suavizado, lo que hace que el N64 real se vea
     suave; ezyemu muestra el framebuffer crudo) y la fila de basura en la última línea de la imagen.
-    Referencia: ares en `E:\ProyectosProgramDisc4\ezynintendoeferenciares-v148` (fuera del repo).
+    Referencia: ares en `E:\ProyectosProgramDisc4\ezynintendo
+eferenciares-v148` (fuera del repo).
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -850,3 +851,20 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   angrylion, más el ajuste por la primera submuestra cubierta y el recorte de bits 17/18). También DZ de
   triángulos como `normalize_dzpix` (parte entera, redondeo hacia arriba). Tests de Z pasados a z << 13.
   11/11 suites, 183 pruebas Release (PeterLemon + systemtest, con y sin JIT). Runner: `--load-state`.
+- 2026-11-20 — PAUSA por límite de uso, a mitad del plan del filtro VI. Para retomar en otra sesión:
+  - Rama `n64/vi-output` (subida). Plan `docs/superpowers/plans/2026-11-19-n64-vi-filters.md`, diseño
+    `docs/superpowers/specs/2026-11-19-n64-vi-filters-design.md`. Registro de la ejecución con subagentes
+    (fuera de git): `.superpowers/sdd/2026-11-19-n64-vi-filters/progress.md` y `task-4-report.md`.
+  - Hecho y revisado: Tarea 1 (cobertura de 16 bits en el RDP, bb2f1a2), Tarea 2 (etapas del filtro,
+    12789dd..5341255), Tarea 3 (`Vi::output()`, 15f9d44) y los menores de la Tarea 3 (a2b3723).
+  - Tarea 4 a medias, en el commit "WIP N64 VI": `--vi-raw` en ezyemu, `--vi-output` en el runner y una
+    optimización de `Vi::output()` en un solo hilo SIN validar. Antes costaba 11 ms por cuadro (la
+    carrera de MK64 bajaba de ~50 a ~26 campos/s); meta < 2 ms. Contra ares la salida filtrada ya se
+    parece más en los 6 pares (p. ej. 13,64 → 10,37).
+  - Falta: compilar y pasar las pruebas del WIP, medir `output()` en Release (media/máx) y el par de
+    campos/s, repetir la comparación con ares, 183 pruebas Release, estado de MK64 idéntico, doc
+    `docs/performance/2026-11-19-n64-vi-output.md`, revisión de la Tarea 4 y revisión final del branch.
+    Si no baja de 2 ms en un hilo, decidir con el usuario (hilo aparte = diseño nuevo).
+  - Pendientes anteriores siguen: probar `ezyemu --gfx-hle --cpu-jit` y PRs de `n64/gfx-hle-port`,
+    `n64/cpu-jit` (incluye la corrección del Z, 73bc414) y `n64/vi-output`; Fase 4 del JIT.
+
