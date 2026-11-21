@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 #include "jit/code_buffer_impl.hpp"
@@ -525,7 +526,11 @@ Compiled compile(const IrBlock& block, CodeBuffer& buffer) {
     }
     code.set_error_handler(&errors);
     asmjit::x86::Assembler assembler(&code);
-    if (!Emitter(code, assembler, block).emit() || errors.failed) return {nullptr, CompileError::Unsupported};
+    try {
+        if (!Emitter(code, assembler, block).emit() || errors.failed) return {nullptr, CompileError::Unsupported};
+    } catch (const std::logic_error&) {  // the allocator rejected the block: the caller falls back
+        return {nullptr, CompileError::Unsupported};
+    }
     const auto size = code.code_size();
     if (size > impl.budget - impl.used) return {nullptr, CompileError::OutOfSpace};
     BlockFn fn = nullptr;

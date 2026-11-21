@@ -310,6 +310,11 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
       3495 → 303 ms (-91 %), compile por bloque 0,165 → 0,036 ms, AsmJit 2,95 % del perfil. Objetivos 2 y 3
       cumplidos; el 1 NO (quedan ~5 campos de compilación > 16,7 ms por ejecución, casi todos en los campos
       1510-1512, la carga inicial; max 85-94 ms). Ver `docs/performance/2026-11-21-n64-cpu-jit-smooth.md`.
+      Nota de diseño para GC/Wii: con la regla de reanudación, tras una salida a mitad de bloque por MMIO
+      (exit-before) o un ERET el resto del bloque corre en el intérprete; en GameCube (p. ej. escrituras al
+      write-gather pipe) sería caro, así que la política futura debe permitir compilar en reanudaciones
+      deterministas justo después de un kExitBefore; y el asignador necesitará clases de registros (GP/XMM)
+      y slots de 16 bytes para la FPU.
       Siguiente:
       - [ ] El usuario prueba DK's Jungle Parkway (el puente) y responde si el tirón se repite en la
         segunda vuelta. Si guarda un estado con F2 ahí, el runner lo mide con

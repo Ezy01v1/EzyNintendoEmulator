@@ -124,6 +124,10 @@ Tiempo de compilación por bloque (compile ms total / bloques compilados, ambos 
 
 (4,6x más barato por bloque; el resto de la mejora viene de compilar 2,6x menos bloques, Tarea 2.)
 
+Máximo por bloque y tamaño de código (línea `CPU JIT:` nueva, mismo comando; `compile max ms` y `code bytes`
+al final de la línea): bloque más lento **1,28 ms**, **13 828 337 bytes** de código en uso al final,
+13445 bloques = **~1028 bytes por bloque**.
+
 ### Perfil (`--profile build/vo/p4.csv`, un recorrido)
 
 Una ejecución con `--profile` del runner nuevo (120,8 campos/s con el perfilador). Las filas `asmjit::*`
@@ -137,9 +141,12 @@ principal al RDP), `Vr4300Jit::execute` 10,6 %, `execute_cop1` 4,1 % (y `fesetro
 
 1. **Ningún campo de carrera sobre 16,7 ms: NO cumplido.** En los 5 pares nuevos quedan 20-53 campos
    > 16,7 ms (max 85-94 ms; base 133-166, max ~370 ms). De ellos, los que tienen compile_ms >= 2 ms (cuentan):
-   8, 4, 5, 5 y 5 por ejecución; el resto (26, 36, 15, 23, 48) tienen compile_ms < 2 ms, picos que no son
-   de CPU/JIT (documentados como tales; máximo 22 ms, ruido de ejecución y del hilo del RDP). En la base
-   los 133-166 campos lentos tenían todos compile_ms >= 2 ms. Los campos con compilación son casi siempre
+   8, 4, 5, 5 y 5 por ejecución; el resto (26, 36, 15, 23, 48) tienen compile_ms < 2 ms. **Corrección
+   (revisión final):** no son "ruido": recalculado desde `build/vo/ft_new_1..5.csv`, su máximo (sin
+   compilación) es 22,3 / 26,2 / 22,2 / 25,6 / 32,5 ms, y todos esos campos son impares (1545-1893, sobre
+   todo 1551-1879): el trabajo por cuadro de un juego a 30 fps, repetible entre ejecuciones. En la base no
+   había ninguno con compile_ms < 2. Su causa **no está verificada** (candidatos: el hilo del RDP, CPU
+   interpretada tras saltos de reanudación, FPU). Los campos con compilación son casi siempre
    los mismos: **1510-1512** (carga inicial de código de la carrera: 45 + 10 + 78 ms de compilación, el
    peor 85-94 ms), 1549 (~16 ms de compilación, 31 ms el campo), y 1713, 1759, 1771, 1853, 1891
    (compilaciones de 2-4 ms que empujan un campo a 17-22 ms). Solo 2 campos superan 33 ms (antes 42-43).
@@ -170,8 +177,10 @@ Propuesta para la ronda siguiente (sin implementar):
 - **Alternativa más pequeña**: compilar con presupuesto por campo (p. ej. máx 2 ms de compilación por
   campo; el resto de las entradas nuevas siguen en el intérprete y se compilan en campos siguientes). Reparte los
   ~130 ms en varios campos sin hilos, a costa de ejecutar más tiempo en el intérprete justo tras la carga.
-- Los ~15-48 campos por ejecución que pasan de 16,7 ms con compile_ms < 2 ms (16,7-22 ms) no vienen del JIT:
-  mirar el hilo del RDP (`ZwYieldExecution` 10,9 %) y el RSP en una ronda aparte.
+- Los 15-48 campos impares por ejecución que pasan de 16,7 ms con compile_ms < 2 ms (máximo 22-33 ms) son
+  repetibles y su causa no está verificada (RDP, CPU interpretada tras reanudaciones, FPU). **Primero
+  medirlos** (perfil restringido a esos campos o un contador de pasos interpretados por campo) antes de
+  decidir la compilación en segundo plano.
 - FPU nativa (`execute_cop1` ~4 % más ~10 % de `fesetround`/`fdclass`/`fdtest`/`fegetenv` en el perfil).
 
 Comprobación tras borrar el Compiler (Release recompilado, mismo código de emisión): MK64 en 1900 campos

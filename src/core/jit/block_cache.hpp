@@ -68,6 +68,7 @@ public:
     void flush();  // everything, including the code buffer
 
     [[nodiscard]] CodeBuffer& code() { return code_; }
+    [[nodiscard]] const CodeBuffer& code() const { return code_; }
     // Bytes the inserted blocks use in the arena (Block, exits, code words) until flush().
     [[nodiscard]] std::size_t arena_bytes() const { return arena_bytes_; }
     [[nodiscard]] const CodePages& pages() const { return pages_; }

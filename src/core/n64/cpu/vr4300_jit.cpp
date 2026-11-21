@@ -240,6 +240,7 @@ Vr4300Jit::Stats Vr4300Jit::stats() const {
     Stats s = stats_;
     s.invalidations = cache_.stats().invalidations;
     s.flushes = cache_.stats().flushes;
+    s.code_bytes = cache_.code().used();
     return s;
 }
 
@@ -354,7 +355,9 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
         const std::uint32_t first = word(0);
         block.words = 1;
         const jit::Block& stored = cache_.insert(block, {}, std::span<const std::uint32_t>(&first, 1));
-        stats_.compile_ns += elapsed_ns(started);
+        const std::uint64_t took = elapsed_ns(started);
+        stats_.compile_ns += took;
+        stats_.compile_max_ns = std::max(stats_.compile_max_ns, took);
         return &stored;
     }
 
@@ -418,7 +421,9 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     block.min_cycles = static_cycles;
     const jit::Block& stored = cache_.insert(block, builder.exits(), words);
     if (block.fn != nullptr) ++stats_.compiled;
-    stats_.compile_ns += elapsed_ns(started);
+    const std::uint64_t took = elapsed_ns(started);
+    stats_.compile_ns += took;
+    stats_.compile_max_ns = std::max(stats_.compile_max_ns, took);
     return &stored;
 }
 

@@ -158,7 +158,8 @@ void print_cpu_jit_stats(const N64& n64) {
     std::cout << "CPU JIT: blocks: " << s.compiled << ", in place: " << s.in_place << ", native: " << s.native
               << ", out of block: " << s.out_of_block << ", exits before: " << s.exits_before
               << ", compile ms: " << s.compile_ns / 1e6 << ", invalidations: " << s.invalidations
-              << ", flushes: " << s.flushes << ", resume skips: " << s.resume_skips << '\n';
+              << ", flushes: " << s.flushes << ", resume skips: " << s.resume_skips
+              << ", compile max ms: " << s.compile_max_ns / 1e6 << ", code bytes: " << s.code_bytes << '\n';
 }
 
 // Selects the CPU mode; false (after printing why) when the JIT was asked for and is missing.
