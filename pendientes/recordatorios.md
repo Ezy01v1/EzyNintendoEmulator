@@ -4,7 +4,7 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-18_
+_Última actualización: 2026-11-21_
 
 > **Perfil actualizado y SHADE (2026-11-15): nuevo atajo descartado.**
 > Con rectángulos constantes ya activos: 8258 muestras, 0 errores de captura;
@@ -310,10 +310,18 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
   - [x] Imagen de MK64 "cortada" (letreros tapados por la colina, valla sobre el letrero): el Z por píxel
     del RDP usaba z >> 10 en vez de z >> 13 y saturaba todo lo lejano; DZ ahora redondea hacia arriba.
     Comparado contra ares v148 (paraLLEl-RDP) en el mismo instante de la demo. Commit 73bc414.
-  - [ ] Siguiente en lo visual: filtro del VI (antialias + suavizado, lo que hace que el N64 real se vea
+  - [x] Filtro del VI (antialias + suavizado, lo que hace que el N64 real se vea
     suave; ezyemu muestra el framebuffer crudo) y la fila de basura en la última línea de la imagen.
     Referencia: ares en `E:\ProyectosProgramDisc4\ezynintendo
 eferenciares-v148` (fuera del repo).
+    - Hecho en la rama `n64/vi-output` (2026-11-21): ezyemu muestra `Vi::output()` por defecto
+      (`--vi-raw` = framebuffer crudo), runner con `--vi-output`. Más parecido a ares en 6/6 pares.
+      Coste de `output()`: 11,3 → **3,0 ms** por cuadro (meta del plan: 2 ms, NO alcanzada en un hilo).
+      Ver `docs/performance/2026-11-19-n64-vi-output.md`.
+    - [ ] Decidir con el usuario: aceptar ~3 ms, seguir (reusar el buffer ~0,3 ms, gamma con SIMD)
+      o `output()` en un hilo aparte (diseño nuevo). Que el usuario pruebe MK64 en ezyemu y opine
+      de la imagen. Falta la revisión final del branch y abrir el PR.
+    - [ ] Fila de basura en la última línea de la imagen: revisar si sigue con la salida del VI.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -867,4 +875,8 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
     Si no baja de 2 ms en un hilo, decidir con el usuario (hilo aparte = diseño nuevo).
   - Pendientes anteriores siguen: probar `ezyemu --gfx-hle --cpu-jit` y PRs de `n64/gfx-hle-port`,
     `n64/cpu-jit` (incluye la corrección del Z, 73bc414) y `n64/vi-output`; Fase 4 del JIT.
-
+- 2026-11-21 — Tarea 4 del filtro VI terminada en `n64/vi-output`: quitada la instrumentación que rompía la
+  compilación del WIP; dither filter con SSE2, divot solo con cobertura parcial, lerp vertical una vez por
+  columna y gamma por plantilla: `output()` 4,96 → 3,0 ms (de 11,3 al inicio), imágenes idénticas byte a byte
+  (24 MK64 + 13 Spider-Man), estado de MK64 en 1900 idéntico, Debug 11/11, Release 183/183, contra ares
+  6/6 pares mejor que el crudo. Meta de 2 ms no alcanzada: decisión pendiente con el usuario.

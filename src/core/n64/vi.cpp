@@ -3,11 +3,15 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
-#include <intrin.h>
-#include <cstdio>
-unsigned long long g_t[8];
 
 #include "n64/vi_filter.hpp"
+
+#if defined(_M_X64) || defined(__SSE2__)
+#include <emmintrin.h>
+#define EZY_VI_SSE2 1
+#else
+#define EZY_VI_SSE2 0
+#endif
 
 namespace ezy::n64 {
 
@@ -221,26 +225,69 @@ private:
         }
     }
 
+    // fetch_filtered for `count` columns: the dither filter on every pixel (four at a time
+    // with SSE2), then antialias over the pixels with partial coverage, as the hardware
+    // picks one or the other per pixel.
+    void filter_row(vi::Color* dst, const vi::Color* above, const vi::Color* mid, const vi::Color* below,
+                    int count) const {
+        if (!neighbours_) {  // without antialias or dither filter a pixel is its own filtered value
+            std::copy(mid, mid + count, dst);
+            return;
+        }
+        int i = 0;
+        if (dither_filter_) {
+#if EZY_VI_SSE2
+            static_assert(sizeof(vi::Color) == 4);
+            const __m128i top5 = _mm_set1_epi8(static_cast<char>(0xF8));
+            const __m128i ones = _mm_set1_epi8(-1);
+            const __m128i rgb = _mm_set1_epi32(0x00FFFFFF);  // coverage is the fourth byte
+            const auto load = [](const vi::Color* p) { return _mm_loadu_si128(reinterpret_cast<const __m128i*>(p)); };
+            for (; i + 4 <= count; i += 4) {
+                const __m128i centre = load(mid + i);
+                const __m128i c5 = _mm_and_si128(centre, top5);
+                __m128i delta = _mm_setzero_si128();
+                const auto add = [&](__m128i neighbour) {
+                    const __m128i n5 = _mm_and_si128(neighbour, top5);
+                    const __m128i ge = _mm_cmpeq_epi8(_mm_max_epu8(n5, c5), n5);        // n >= c
+                    const __m128i gt = _mm_andnot_si128(_mm_cmpeq_epi8(n5, c5), ge);    // n > c: -1
+                    const __m128i lt = _mm_xor_si128(ge, ones);                         // n < c: -1
+                    delta = _mm_add_epi8(_mm_sub_epi8(delta, gt), lt);
+                };
+                add(load(above + i - 1)), add(load(above + i)), add(load(above + i + 1));
+                add(load(mid + i - 1)), add(load(mid + i + 1));
+                add(load(below + i - 1)), add(load(below + i)), add(load(below + i + 1));
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), _mm_add_epi8(centre, _mm_and_si128(delta, rgb)));
+            }
+#endif
+            for (; i < count; ++i) dst[i] = vi::detail::dither_pixel(above + i, mid + i, below + i);
+        } else {
+            std::copy(mid, mid + count, dst);
+        }
+        if (!fb_.use_coverage) return;
+        for (i = 0; i < count; ++i)
+            if (mid[i].coverage < 7) dst[i] = vi::detail::antialias_pixel(above + i, mid + i, below + i);
+    }
+
     void fill(Slot& slot, int row) {
         slot.row = row;
         slot.valid = true;
         const vi::Color* mid = decoded(row, row) + kPad;
         const vi::Color* above = neighbours_ ? decoded(row - 1, row) + kPad : nullptr;
         const vi::Color* below = neighbours_ ? decoded(row + 1, row) + kPad : nullptr;
-        // Without antialias or dither filter a pixel is its own filtered value.
-        const auto filtered = [&](int i) {
-            if (!neighbours_) return mid[i];
-            if (mid[i].coverage < 7) return vi::detail::antialias_pixel(above + i, mid + i, below + i);
-            return dither_filter_ ? vi::detail::dither_pixel(above + i, mid + i, below + i) : mid[i];
-        };
         if (!divot_) {
-            for (int i = 0; i < size_; ++i) slot.colors[static_cast<std::size_t>(i)] = filtered(i);
+            filter_row(slot.colors.data(), above, mid, below, size_);
             return;
         }
         // Divot looks at the filtered neighbours on the left and right: one more column each side.
-        for (int i = 0; i < size_ + 2; ++i) filtered_[static_cast<std::size_t>(i)] = filtered(i);
-        for (std::size_t i = 0; i < static_cast<std::size_t>(size_); ++i)
-            slot.colors[i] = vi::divot(filtered_[i + 1], filtered_[i], filtered_[i + 2]);
+        filter_row(filtered_.data(), above, mid, below, size_ + 2);
+        for (std::size_t i = 0; i < static_cast<std::size_t>(size_); ++i) {
+            const vi::Color& left = filtered_[i];
+            const vi::Color& centre = filtered_[i + 1];
+            const vi::Color& right = filtered_[i + 2];
+            slot.colors[i] = (left.coverage & centre.coverage & right.coverage) == 7
+                                 ? centre
+                                 : vi::divot(centre, left, right);
+        }
     }
 
     const vi::Framebuffer& fb_;
@@ -253,10 +300,37 @@ private:
     std::vector<vi::Color> filtered_;
 };
 
+// One screen line: each column's colour (interpolated with the next column by its fraction),
+// then gamma. Local copies keep the uint8_t source reads from aliasing the stores.
+template <bool kGamma, bool kGammaDither>
+void emit_row(std::uint32_t* out, const vi::Color* source, const std::uint32_t* columns, int count,
+              std::uint32_t& noise_state) {
+    std::uint32_t noise = noise_state;
+    for (int x = 0; x < count; ++x) {
+        const std::uint32_t column = columns[x];
+        const std::uint32_t i = column >> 5, xfrac = column & 31;
+        vi::Color c = source[i];
+        if (xfrac != 0) c = vi::lerp(c, source[i + 1], xfrac);
+        if constexpr (kGamma) {  // vi::gamma on plain integers, straight into ARGB
+            const std::uint32_t n = next_noise(noise);
+            const std::uint32_t dr = kGammaDither ? n & 0x3Fu : 0u;
+            const std::uint32_t dg = kGammaDither ? (n >> 6) & 0x3Fu : 0u;
+            const std::uint32_t db = kGammaDither ? ((n >> 9) & 0x38u) | (n & 7u) : 0u;
+            const std::uint8_t* table = vi::kGammaTable.data();
+            out[x] = kBlack | (std::uint32_t{table[(std::uint32_t{c.r} << 6) | dr]} << 16) |
+                     (std::uint32_t{table[(std::uint32_t{c.g} << 6) | dg]} << 8) | table[(std::uint32_t{c.b} << 6) | db];
+        } else {
+            if constexpr (kGammaDither) c = vi::gamma(c, false, true, next_noise(noise));
+            out[x] = to_argb(c);
+        }
+    }
+    noise_state = noise;
+}
+using EmitRow = void (*)(std::uint32_t*, const vi::Color*, const std::uint32_t*, int, std::uint32_t&);
+
 }  // namespace
 
 Vi::Image Vi::output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* hidden) const {
-    const auto t0 = __rdtsc();
     const bool pal = region_ == Region::Pal;
     Image img;
     img.width = kScreenWidth;
@@ -307,7 +381,6 @@ Vi::Image Vi::output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* h
     } else {
         img.argb.assign(size, kBlack);
     }
-    const auto t1 = __rdtsc(); g_t[0] += t1 - t0;
 
     const std::uint32_t aa_mode = (ctrl >> 8) & 3;
     vi::Framebuffer fb;
@@ -325,34 +398,34 @@ Vi::Image Vi::output(std::span<const std::uint8_t> rdram, const RdpHiddenBits* h
     const auto last_col = static_cast<int>((x_start + static_cast<std::uint32_t>(hres - 1) * x_add) >> 10) + 1;
     RowCache rows(fb, first_col, last_col - first_col + 1, (ctrl & (1U << 16)) != 0, (ctrl & (1U << 4)) != 0);
     std::uint32_t noise = kNoiseSeed;
+    // Per screen column: the row buffer index (<< 5) and the horizontal fraction.
+    std::vector<std::uint32_t> columns(static_cast<std::size_t>(hres));
+    for (int x = 0; x < hres; ++x) {
+        const std::uint32_t xoffs = x_start + static_cast<std::uint32_t>(x) * x_add;
+        columns[static_cast<std::size_t>(x)] =
+            (static_cast<std::uint32_t>(static_cast<int>(xoffs >> 10) - first_col) << 5) | (resample ? (xoffs >> 5) & 31 : 0);
+    }
+    std::vector<vi::Color> blended(static_cast<std::size_t>(last_col - first_col + 1));
+    const EmitRow emit = gamma ? (gamma_dither ? &emit_row<true, true> : &emit_row<true, false>)
+                               : (gamma_dither ? &emit_row<false, true> : &emit_row<false, false>);
 
     for (int y = 0; y < vres; ++y) {
         const std::uint32_t curry = y_start + static_cast<std::uint32_t>(y) * y_add;
         const auto fb_row = static_cast<int>(curry >> 10);
         const unsigned yfrac = (curry >> 5) & 31;
-        const auto ta = __rdtsc();
         const vi::Color* top = rows.get(fb_row, fb_row + 1);
-        const vi::Color* bottom = resample && yfrac != 0 ? rows.get(fb_row + 1, fb_row) : top;
-        g_t[1] += __rdtsc() - ta;
+        const vi::Color* source = top;
+        if (resample && yfrac != 0) {  // interpolate the two rows once per column, not per screen pixel
+            const vi::Color* bottom = rows.get(fb_row + 1, fb_row);
+            for (std::size_t i = 0; i < blended.size(); ++i) blended[i] = vi::lerp(top[i], bottom[i], yfrac);
+            source = blended.data();
+        }
         const int screen_line = line + y;
         auto* out = img.argb.data() + static_cast<std::size_t>(2 * screen_line + (interlaced ? field : 0)) * kScreenWidth + column;
-        for (int x = 0; x < hres; ++x) {
-            const std::uint32_t xoffs = x_start + static_cast<std::uint32_t>(x) * x_add;
-            const auto i = static_cast<std::size_t>(static_cast<int>(xoffs >> 10) - first_col);
-            const unsigned xfrac = (xoffs >> 5) & 31;
-            vi::Color c = top[i];
-            if (resample && (xfrac != 0 || yfrac != 0)) {
-                const vi::Color left = vi::lerp(top[i], bottom[i], yfrac);
-                const vi::Color right = vi::lerp(top[i + 1], bottom[i + 1], yfrac);
-                c = vi::lerp(left, right, xfrac);
-            }
-            out[x] = to_argb(gamma || gamma_dither ? vi::gamma(c, gamma, gamma_dither, next_noise(noise)) : c);
-        }
+        emit(out, source, columns.data(), hres, noise);
         if (!interlaced) std::copy(out, out + hres, out + kScreenWidth);
     }
 
-    const auto t2 = __rdtsc(); g_t[2] += t2 - t1; if (++g_t[7] % 100 == 0) std::printf("assign %llu fill %llu loop+fill %llu
-", g_t[0]/g_t[7], g_t[1]/g_t[7], g_t[2]/g_t[7]);
     if (interlaced) {
         weave_ = img.argb;
         weave_key_ = key;
