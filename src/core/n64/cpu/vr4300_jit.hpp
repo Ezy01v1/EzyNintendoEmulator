@@ -84,7 +84,7 @@ public:
     // code. exits_before: blocks left before an instruction the interpreter must run.
     struct Stats {
         std::uint64_t compiled = 0, in_place = 0, native = 0, out_of_block = 0, exits_before = 0, compile_ns = 0,
-                      invalidations = 0, flushes = 0;
+                      invalidations = 0, flushes = 0, resume_skips = 0, compile_max_ns = 0, code_bytes = 0;
     };
     [[nodiscard]] Stats stats() const;
 

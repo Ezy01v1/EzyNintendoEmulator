@@ -1,9 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
+#include <vector>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -24,13 +27,13 @@ constexpr std::uint32_t slot(unsigned index) { return index * 8; }
 
 // A Context over local arrays; one CodeBuffer per machine.
 struct Machine {
-    std::array<std::uint64_t, 8> guest{};
+    std::array<std::uint64_t, 64> guest{};
     std::array<std::uint8_t, 8192> ram{};
     std::array<std::uint8_t, 2> code_pages{};
     Context ctx{};
-    CodeBuffer buffer{1U << 20};
+    CodeBuffer buffer;
 
-    Machine() {
+    explicit Machine(std::size_t code_bytes = 1U << 20) : buffer(code_bytes) {
         ctx.guest = reinterpret_cast<std::uint8_t*>(guest.data());
         ctx.ram = ram.data();
         ctx.ram_size = static_cast<std::uint32_t>(ram.size());
@@ -38,12 +41,14 @@ struct Machine {
         ctx.user = this;
     }
 
-    BlockFn build(IrBuilder& builder) {
-        const auto compiled = compile(builder.finish(), buffer);
+    BlockFn build(const IrBlock& block) {
+        const auto compiled = compile(block, buffer);
         REQUIRE(compiled.error == CompileError::None);
         REQUIRE(compiled.fn != nullptr);
         return compiled.fn;
     }
+
+    BlockFn build(IrBuilder& builder) { return build(builder.finish()); }
 
     std::uint32_t run(IrBuilder& builder) { return build(builder)(&ctx); }
 };
@@ -608,4 +613,560 @@ TEST_CASE("compile reports Unsupported without native code" * doctest::skip(kNat
     const auto compiled = compile(b.finish(), buffer);
     CHECK(compiled.error == CompileError::Unsupported);
     CHECK(compiled.fn == nullptr);
+}
+
+namespace {
+
+// Pairs of operands that keep every value live until the last pairs: value i meets value i+stride.
+template <typename T>
+std::uint64_t combine(unsigned which, T x, T y) {
+    switch (which % 5) {
+        case 0: return static_cast<std::uint64_t>(static_cast<T>(x + y));
+        case 1: return static_cast<std::uint64_t>(static_cast<T>(x - y));
+        case 2: return static_cast<std::uint64_t>(static_cast<T>(x ^ y));
+        case 3: return static_cast<std::uint64_t>(static_cast<T>(x * y));
+        default: return static_cast<std::uint64_t>(static_cast<T>(x << (y & (sizeof(T) * 8 - 1))));
+    }
+}
+
+constexpr std::array<Op, 5> kCombineOps{Op::Add, Op::Sub, Op::Xor, Op::Mul, Op::Shl};
+
+std::uint64_t sum_helper(Context*, std::uint64_t a, std::uint64_t b, std::uint64_t c) noexcept {
+    return a + 3 * b + 5 * c;
+}
+
+}  // namespace
+
+TEST_CASE("spills under pressure" * doctest::skip(!kNative)) {
+    constexpr unsigned kWide = 24, kNarrow = 8;
+    Machine m;
+    for (unsigned i = 0; i < 32; ++i) m.guest[i] = 0x9E37'79B9'7F4A'7C15ULL * (i + 1) + (i << 3);
+    IrBuilder b;
+    std::array<Value, kWide> wide{};
+    std::array<Value, kNarrow> narrow{};
+    for (unsigned i = 0; i < kWide; ++i) wide[i] = b.load_guest(Type::I64, slot(i));
+    for (unsigned i = 0; i < kNarrow; ++i) narrow[i] = b.load_guest(Type::I32, slot(kWide + i));
+    // Every value is read by two pairs, the second 7 (or 3) pairs later, so all 32 stay
+    // live until the late pairs.
+    for (unsigned i = 0; i < kWide; ++i) {
+        b.store_guest(slot(32 + i), b.binary(kCombineOps[i % 5], wide[i], wide[(i + 7) % kWide]));
+    }
+    for (unsigned i = 0; i < kNarrow; ++i) {
+        const auto r = b.binary(kCombineOps[i % 5], narrow[i], narrow[(i + 3) % kNarrow]);
+        b.store_guest(slot(56 + i), b.convert(Op::Sext32, Type::I64, r));
+    }
+    b.exit(b.add_exit());
+    const auto input = m.guest;
+    m.run(b);
+    for (unsigned i = 0; i < kWide; ++i) {
+        CAPTURE(i);
+        CHECK(m.guest[32 + i] == combine<std::uint64_t>(i, input[i], input[(i + 7) % kWide]));
+    }
+    for (unsigned i = 0; i < kNarrow; ++i) {
+        CAPTURE(i);
+        const auto x = static_cast<std::uint32_t>(input[kWide + i]);
+        const auto y = static_cast<std::uint32_t>(input[kWide + (i + 3) % kNarrow]);
+        const auto r = static_cast<std::uint32_t>(combine<std::uint32_t>(i, x, y));
+        CHECK(m.guest[56 + i] == static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(r))));
+    }
+    for (unsigned i = 0; i < 32; ++i) CHECK(m.guest[i] == input[i]);  // inputs untouched
+}
+
+TEST_CASE("a frame larger than a page" * doctest::skip(!kNative)) {
+    // 600 live values need more than 4 KiB of spill slots.
+    constexpr unsigned kValues = 600;
+    Machine m;
+    for (unsigned i = 0; i < 16; ++i) m.guest[i] = i * 0x1111ULL + 1;
+    IrBuilder b;
+    std::vector<Value> values;
+    for (unsigned i = 0; i < kValues; ++i) {
+        values.push_back(b.binary(Op::Add, b.load_guest(Type::I64, slot(i % 16)), b.constant(Type::I64, i)));
+    }
+    auto sum = b.constant(Type::I64, 0);
+    for (unsigned i = kValues; i-- > 0;) {
+        sum = b.binary(Op::Xor, b.binary(Op::Mul, sum, b.constant(Type::I64, 3)), values[i]);
+    }
+    b.store_guest(slot(20), sum);
+    b.exit(b.add_exit());
+    m.run(b);
+    std::uint64_t expected = 0;
+    for (unsigned i = kValues; i-- > 0;) expected = (expected * 3) ^ (m.guest[i % 16] + i);
+    CHECK(m.guest[20] == expected);
+}
+
+TEST_CASE("values survive a helper call" * doctest::skip(!kNative)) {
+    constexpr unsigned kLive = 12;  // more than the callee-saved registers
+    Machine m;
+    for (unsigned i = 0; i < kLive; ++i) m.guest[i] = 0x0101'0101'0101'0101ULL * (i + 1);
+    IrBuilder b;
+    std::array<Value, kLive> live{};
+    for (unsigned i = 0; i < kLive; ++i) live[i] = b.load_guest(Type::I64, slot(i));
+    const auto narrow = b.convert(Op::Trunc, Type::I32, live[0]);
+    const auto r = b.call(&sum_helper, live[1], live[2], live[3]);
+    for (unsigned i = 0; i < kLive; ++i) b.store_guest(slot(16 + i), b.binary(Op::Add, live[i], r));
+    b.store_guest(slot(30), b.convert(Op::Zext32, Type::I64, narrow));
+    b.store_guest(slot(31), b.call(&sum_helper, live[kLive - 1], r, live[0]));
+    for (unsigned i = 0; i < kLive; ++i) b.store_guest(slot(32 + i), live[i]);
+    b.exit(b.add_exit());
+    const auto input = m.guest;
+    m.run(b);
+    const auto expected_r = input[1] + 3 * input[2] + 5 * input[3];
+    for (unsigned i = 0; i < kLive; ++i) {
+        CAPTURE(i);
+        CHECK(m.guest[16 + i] == input[i] + expected_r);
+        CHECK(m.guest[32 + i] == input[i]);
+    }
+    CHECK(m.guest[30] == (input[0] & 0xFFFF'FFFFULL));
+    CHECK(m.guest[31] == input[kLive - 1] + 3 * expected_r + 5 * input[0]);
+}
+
+TEST_CASE("an exit taken from two sites" * doctest::skip(!kNative)) {
+    constexpr unsigned kCrowd = 14;
+    Machine m;
+    IrBuilder b;
+    const auto done = b.add_exit();
+    const auto side = b.add_exit();
+    const auto v = b.load_guest(Type::I64, slot(0));
+    const auto first = b.convert(Op::Trunc, Type::I32, b.load_guest(Type::I64, slot(1)));
+    b.begin_exit(side);
+    b.store_guest(slot(2), v);
+    b.store_guest(slot(3), b.binary(Op::Add, v, b.constant(Type::I64, 1)));
+    b.end_exit();
+    b.exit_if(first, side);  // v sits in a register here: few values are live
+    // The crowd is read (stored) before the second site, so every crowd value is nearer than
+    // v's next read, the second site itself: eviction takes v first and it sits in a spill
+    // slot there, where the exit's copy has to read it from.
+    std::array<Value, kCrowd> crowd{};
+    for (unsigned i = 0; i < kCrowd; ++i) {
+        crowd[i] = b.binary(Op::Add, b.load_guest(Type::I64, slot(8 + i)), b.constant(Type::I64, i));
+    }
+    for (unsigned i = 0; i < kCrowd; ++i) b.store_guest(slot(32 + i), crowd[i]);
+    const auto second = b.convert(Op::Trunc, Type::I32, b.load_guest(Type::I64, slot(4)));
+    b.exit_if(second, side);
+    b.exit(done);
+    const auto fn = m.build(b);
+
+    for (unsigned path = 0; path < 3; ++path) {
+        CAPTURE(path);
+        m.guest.fill(0);
+        m.guest[0] = 0x1234'5678'9ABC'DEF0ULL;
+        m.guest[1] = path == 0 ? 1 : 0;
+        m.guest[4] = path == 1 ? 1 : 0;
+        for (unsigned i = 0; i < kCrowd; ++i) m.guest[8 + i] = 100 * i;
+        const auto tag = fn(&m.ctx);
+        CHECK(tag == (path < 2 ? side : done));
+        if (path < 2) {
+            CHECK(m.guest[2] == 0x1234'5678'9ABC'DEF0ULL);
+            CHECK(m.guest[3] == 0x1234'5678'9ABC'DEF1ULL);
+        } else {
+            CHECK(m.guest[2] == 0);
+        }
+        // The first site leaves before the crowd's stores; the other two run them.
+        for (unsigned i = 0; i < kCrowd; ++i) CHECK(m.guest[32 + i] == (path == 0 ? 0 : 100 * i + i));
+    }
+}
+
+namespace {
+
+// A small deterministic generator (Knuth's MMIX LCG).
+struct Lcg {
+    std::uint64_t state;
+    std::uint64_t next() {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return state;
+    }
+    std::uint32_t below(std::size_t n) { return static_cast<std::uint32_t>((next() >> 33) % n); }
+    bool chance(unsigned percent) { return below(100) < percent; }
+};
+
+std::uint64_t mix_helper(Context* ctx, std::uint64_t a, std::uint64_t b, std::uint64_t c) noexcept {
+    ctx->extra_cycles += 1;
+    return (a * 0x9E37'79B9'7F4A'7C15ULL) ^ (b + 0x632B'E59B'D9B4'E019ULL) ^ (c << 7) ^ (c >> 3);
+}
+
+std::uint32_t parity_write(Context*, std::uint32_t paddr, std::uint32_t bytes) noexcept {
+    return (paddr ^ bytes) & 1U;
+}
+
+// Guest slots 0-15 are inputs, 16-47 outputs; RAM is 8 KiB (two pages).
+class RandomBlock {
+public:
+    explicit RandomBlock(Lcg& rng) : rng_(rng) {}
+
+    IrBlock build() {
+        const ExitId done = b_.add_exit();
+        for (unsigned k = 0; k < 3; ++k) {
+            i64_.push_back(b_.load_guest(Type::I64, slot(rng_.below(16))));
+            i32_.push_back(b_.load_guest(Type::I32, slot(rng_.below(16)) + 4 * rng_.below(2)));
+        }
+        const unsigned ops = 20 + rng_.below(80);
+        for (unsigned n = 0; n < ops; ++n) step();
+        region(done);
+        b_.exit(done);
+        return b_.finish();
+    }
+
+private:
+    Value pick(Type type) {
+        const auto& pool = type == Type::I64 ? i64_ : i32_;
+        return pool[rng_.below(pool.size())];
+    }
+    Type any_type() { return rng_.chance(50) ? Type::I64 : Type::I32; }
+    void keep(Value v, Type type) { (type == Type::I64 ? i64_ : i32_).push_back(v); }
+
+    Value constant(Type type) {
+        switch (rng_.below(4)) {
+            case 0: return b_.constant(type, 0);
+            case 1: return b_.constant(type, rng_.below(64));
+            case 2: return b_.constant(type, ~std::uint64_t{0} - rng_.below(4));
+            default: return b_.constant(type, rng_.next());
+        }
+    }
+
+    unsigned bytes(Type type) {
+        constexpr std::array<unsigned, 4> sizes{1, 2, 4, 8};
+        return sizes[rng_.below(type == Type::I64 ? 4 : 3)];
+    }
+
+    // An 8-byte aligned physical address within RAM: no access crosses a page.
+    Value paddr() { return b_.binary(Op::And, pick(Type::I32), b_.constant(Type::I32, 0x1FF8)); }
+
+    void store() {
+        constexpr std::array<unsigned, 4> sizes{0, 1, 2, 4};
+        b_.store_guest(slot(16 + rng_.below(32)), pick(any_type()), sizes[rng_.below(4)]);
+    }
+
+    // An exit's ops: stores of body values, some computed in the region.
+    void region(ExitId exit) {
+        b_.begin_exit(exit);
+        const unsigned stores = 1 + rng_.below(4);
+        for (unsigned k = 0; k < stores; ++k) store();
+        if (rng_.chance(50)) {
+            const auto type = any_type();
+            b_.store_guest(slot(16 + rng_.below(32)), b_.binary(Op::Xor, pick(type), constant(type)));
+        }
+        if (rng_.chance(20)) {
+            b_.store_guest(slot(16 + rng_.below(32)),
+                           b_.call(&mix_helper, pick(Type::I64), pick(Type::I64), pick(Type::I64)));
+        }
+        b_.end_exit();
+    }
+
+    ExitId side_exit() {
+        if (!side_.empty() && rng_.chance(40)) return side_[rng_.below(side_.size())];
+        const ExitId exit = b_.add_exit();
+        region(exit);
+        side_.push_back(exit);
+        return exit;
+    }
+
+    void convert() {
+        const auto from = pick(any_type());
+        switch (rng_.below(4)) {
+            case 0: {
+                const auto to = any_type();
+                keep(b_.convert(rng_.chance(50) ? Op::Sext8 : Op::Sext16, to, from), to);
+                break;
+            }
+            case 1: keep(b_.convert(Op::Sext32, Type::I64, from), Type::I64); break;
+            case 2: keep(b_.convert(Op::Zext32, Type::I64, from), Type::I64); break;
+            default: keep(b_.convert(Op::Trunc, Type::I32, from), Type::I32); break;
+        }
+    }
+
+    void step() {
+        const auto type = any_type();
+        switch (rng_.below(17)) {
+            case 0: keep(constant(type), type); break;
+            case 1: {
+                const auto offset = slot(rng_.below(16)) + (type == Type::I32 ? 4 * rng_.below(2) : 0);
+                keep(b_.load_guest(type, offset), type);
+                break;
+            }
+            case 2: case 3: case 4: {
+                const auto op = static_cast<Op>(static_cast<unsigned>(Op::Add) + rng_.below(12));
+                keep(b_.binary(op, pick(type), pick(type)), type);
+                break;
+            }
+            case 5: convert(); break;
+            case 6: keep(b_.compare(static_cast<Cond>(rng_.below(8)), pick(type), pick(type)), Type::I32); break;
+            case 7: keep(b_.select(pick(Type::I32), pick(type), pick(type)), type); break;
+            case 8: {
+                const auto which = rng_.below(3);
+                const auto v = which == 2 ? b_.carry_add(pick(type), pick(type))
+                                          : b_.overflow(which == 0 ? Op::Add : Op::Sub, pick(type), pick(type));
+                keep(v, Type::I32);
+                break;
+            }
+            case 9: case 10: store(); break;
+            case 11:
+                keep(b_.call(&mix_helper, pick(Type::I64), pick(Type::I64), pick(Type::I64)), Type::I64);
+                break;
+            case 12: {
+                // About one in eight is taken.
+                const auto low = b_.binary(Op::And, pick(Type::I32), b_.constant(Type::I32, 7));
+                const auto cond = b_.compare(Cond::Eq, low, b_.constant(Type::I32, rng_.below(8)));
+                b_.exit_if(cond, side_exit());
+                break;
+            }
+            case 13: {
+                const auto at = paddr();
+                if (rng_.chance(50)) keep(b_.load_ram(type, at, bytes(type)), type);
+                else b_.store_ram(at, pick(type), bytes(type));
+                break;
+            }
+            case 14: {
+                const auto at = paddr();
+                b_.barrier(at, bytes(Type::I64), rng_.chance(50), side_exit());
+                break;
+            }
+            case 15: keep(b_.note_ram_write(paddr(), bytes(Type::I64)), Type::I32); break;
+            default:
+                if (rng_.chance(50)) keep(b_.load_context(ContextField::ExtraCycles), Type::I64);
+                else b_.store_context(ContextField::Budget, pick(Type::I64));
+                break;
+        }
+    }
+
+    Lcg& rng_;
+    IrBuilder b_;
+    std::vector<Value> i32_, i64_;
+    std::vector<ExitId> side_;
+};
+
+}  // namespace
+
+namespace {
+
+// A reference for the random blocks: runs the IR directly, op by op, on a Context. It is the
+// oracle for the native code, so it is written for clarity.
+class IrInterpreter {
+public:
+    IrInterpreter(const IrBlock& block, Context& ctx) : block_(block), ctx_(ctx), values_(block.value_count()) {}
+
+    // The id of the exit the block leaves through (a body always ends in one).
+    std::uint32_t run() {
+        std::uint32_t exit = 0;
+        execute(block_.body(), exit);
+        return exit;
+    }
+
+private:
+    static std::uint64_t mask(Type type) { return type == Type::I64 ? ~0ULL : 0xFFFF'FFFFULL; }
+    static unsigned width(Type type) { return type == Type::I64 ? 64 : 32; }
+
+    static std::uint64_t sign_extend(std::uint64_t value, unsigned bits) {
+        const auto shift = 64 - bits;
+        return static_cast<std::uint64_t>(static_cast<std::int64_t>(value << shift) >> shift);
+    }
+
+    static std::uint64_t mul_high_unsigned(std::uint64_t x, std::uint64_t y) {
+        const std::uint64_t xl = x & 0xFFFF'FFFFULL, xh = x >> 32, yl = y & 0xFFFF'FFFFULL, yh = y >> 32;
+        const std::uint64_t ll = xl * yl, lh = xl * yh, hl = xh * yl, hh = xh * yh;
+        const std::uint64_t mid = (ll >> 32) + (lh & 0xFFFF'FFFFULL) + (hl & 0xFFFF'FFFFULL);
+        return hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+    }
+
+    std::uint64_t& v(std::uint32_t id) { return values_[id]; }
+
+    static std::uint64_t load_bytes(const std::uint8_t* at, unsigned bytes) {
+        std::uint64_t value = 0;
+        std::memcpy(&value, at, bytes);
+        return value;
+    }
+
+    static std::uint64_t big_endian(const std::uint8_t* at, unsigned bytes) {
+        std::uint64_t value = 0;
+        for (unsigned i = 0; i < bytes; ++i) value = (value << 8) | at[i];
+        return value;
+    }
+
+    std::uint8_t* field(ContextField which) { return reinterpret_cast<std::uint8_t*>(&ctx_) + context_offset(which); }
+
+    std::uint64_t binary(const Inst& inst) {
+        const auto type = inst.type;
+        const auto a = v(inst.a) & mask(type), b = v(inst.b) & mask(type);
+        const auto count = static_cast<unsigned>(v(inst.b)) & (width(type) - 1);
+        switch (inst.op) {
+            case Op::Add: return a + b;
+            case Op::Sub: return a - b;
+            case Op::And: return a & b;
+            case Op::Or: return a | b;
+            case Op::Xor: return a ^ b;
+            case Op::Nor: return ~(a | b);
+            case Op::Shl: return a << count;
+            case Op::Shr: return a >> count;
+            case Op::Sar:
+                return static_cast<std::uint64_t>(static_cast<std::int64_t>(sign_extend(a, width(type))) >> count);
+            case Op::Mul: return a * b;
+            case Op::MulHiU: return type == Type::I64 ? mul_high_unsigned(a, b) : (a * b) >> 32;
+            default: {  // MulHiS
+                if (type == Type::I32) {
+                    const auto product = static_cast<std::int64_t>(sign_extend(a, 32)) *
+                                         static_cast<std::int64_t>(sign_extend(b, 32));
+                    return static_cast<std::uint64_t>(product >> 32);
+                }
+                auto high = mul_high_unsigned(a, b);
+                if (static_cast<std::int64_t>(a) < 0) high -= b;
+                if (static_cast<std::int64_t>(b) < 0) high -= a;
+                return high;
+            }
+        }
+    }
+
+    static bool compare(Cond cond, std::uint64_t a, std::uint64_t b, Type type) {
+        const auto x = a & mask(type), y = b & mask(type);
+        const auto sx = static_cast<std::int64_t>(sign_extend(x, width(type)));
+        const auto sy = static_cast<std::int64_t>(sign_extend(y, width(type)));
+        switch (cond) {
+            case Cond::Eq: return x == y;
+            case Cond::Ne: return x != y;
+            case Cond::LtS: return sx < sy;
+            case Cond::LtU: return x < y;
+            case Cond::LeS: return sx <= sy;
+            case Cond::GtS: return sx > sy;
+            case Cond::GeS: return sx >= sy;
+            case Cond::GeU: return x >= y;
+        }
+        return false;
+    }
+
+    static bool flag(const Inst& inst, std::uint64_t x, std::uint64_t y, Type type) {
+        const auto a = x & mask(type), b = y & mask(type);
+        const auto sum = (a + b) & mask(type), diff = (a - b) & mask(type);
+        const auto sign = 1ULL << (width(type) - 1);
+        if (inst.op == Op::CarryAdd) return sum < a;
+        if (inst.op == Op::OverflowAdd) return ((a ^ sum) & (b ^ sum) & sign) != 0;
+        return ((a ^ b) & (a ^ diff) & sign) != 0;
+    }
+
+    // The renderer's barrier: the access must wait for a newer packet, or the renderer failed.
+    bool barrier_waits(const Inst& inst) {
+        const auto* view = ctx_.barrier;
+        if (view == nullptr) return false;
+        const auto page = static_cast<std::uint32_t>(v(inst.a)) >> 12;
+        auto sequence = view->slot_sequence[view->writers[page]];
+        if ((inst.imm & 1) != 0) sequence = std::max(sequence, view->slot_sequence[view->readers[page]]);
+        return sequence > *view->completed_seen || view->failed->load();
+    }
+
+    // Runs an exit's ops and records which exit the block returns.
+    bool leave(ExitId target, std::uint32_t& exit) {
+        execute(block_.exit_ops(target), exit);
+        exit = target;
+        return true;
+    }
+
+    // true: the block left through an exit.
+    bool execute(const std::vector<Inst>& ops, std::uint32_t& exit) {
+        for (const auto& inst : ops) {
+            const auto type = inst.type;
+            switch (inst.op) {
+                case Op::Const: v(inst.result) = inst.imm & mask(type); break;
+                case Op::LoadGuest: v(inst.result) = load_bytes(ctx_.guest + inst.imm, type == Type::I64 ? 8 : 4); break;
+                case Op::StoreGuest: {
+                    const auto bytes = inst.aux != 0 ? inst.aux : (block_.type_of(inst.a) == Type::I64 ? 8U : 4U);
+                    std::memcpy(ctx_.guest + inst.imm, &v(inst.a), bytes);
+                    break;
+                }
+                case Op::LoadContext:
+                    v(inst.result) = load_bytes(field(static_cast<ContextField>(inst.aux)), 8) & mask(type);
+                    break;
+                case Op::StoreContext: std::memcpy(field(static_cast<ContextField>(inst.aux)), &v(inst.a), 8); break;
+                case Op::Add: case Op::Sub: case Op::And: case Op::Or: case Op::Xor: case Op::Nor:
+                case Op::Shl: case Op::Shr: case Op::Sar: case Op::Mul: case Op::MulHiS: case Op::MulHiU:
+                    v(inst.result) = binary(inst) & mask(type);
+                    break;
+                case Op::Sext8: v(inst.result) = sign_extend(v(inst.a), 8) & mask(type); break;
+                case Op::Sext16: v(inst.result) = sign_extend(v(inst.a), 16) & mask(type); break;
+                case Op::Sext32: v(inst.result) = sign_extend(v(inst.a), 32) & mask(type); break;
+                case Op::Zext32: case Op::Trunc: v(inst.result) = v(inst.a) & 0xFFFF'FFFFULL; break;
+                case Op::Compare:
+                    v(inst.result) = compare(static_cast<Cond>(inst.aux), v(inst.a), v(inst.b), block_.type_of(inst.a));
+                    break;
+                case Op::Select:
+                    v(inst.result) = ((v(inst.a) & 0xFFFF'FFFFULL) != 0 ? v(inst.b) : v(inst.c)) & mask(type);
+                    break;
+                case Op::OverflowAdd: case Op::OverflowSub: case Op::CarryAdd:
+                    v(inst.result) = flag(inst, v(inst.a), v(inst.b), block_.type_of(inst.a));
+                    break;
+                case Op::LoadRam:
+                    v(inst.result) = big_endian(ctx_.ram + static_cast<std::uint32_t>(v(inst.a)), inst.aux) & mask(type);
+                    break;
+                case Op::StoreRam: {
+                    const auto at = static_cast<std::uint32_t>(v(inst.a));
+                    for (unsigned i = 0; i < inst.aux; ++i) {
+                        ctx_.ram[at + i] = static_cast<std::uint8_t>(v(inst.b) >> (8 * (inst.aux - 1 - i)));
+                    }
+                    break;
+                }
+                case Op::Barrier:
+                    if (barrier_waits(inst)) return leave(static_cast<ExitId>(inst.imm >> Inst::kBarrierExitShift), exit);
+                    break;
+                case Op::NoteRamWrite: {
+                    const auto at = static_cast<std::uint32_t>(v(inst.a));
+                    v(inst.result) = ctx_.code_pages[at >> 12] != 0 ? ctx_.code_write(&ctx_, at, inst.aux) : 0;
+                    break;
+                }
+                case Op::Call:
+                    v(inst.result) = reinterpret_cast<Helper>(inst.imm)(&ctx_, v(inst.a), v(inst.b), v(inst.c));
+                    break;
+                case Op::ExitIf:
+                    if ((v(inst.a) & mask(block_.type_of(inst.a))) != 0) {
+                        return leave(static_cast<ExitId>(inst.imm), exit);
+                    }
+                    break;
+                case Op::Exit: return leave(static_cast<ExitId>(inst.imm), exit);
+            }
+        }
+        return false;
+    }
+
+    const IrBlock& block_;
+    Context& ctx_;
+    std::vector<std::uint64_t> values_;
+};
+
+}  // namespace
+
+TEST_CASE("random IR blocks match the reference interpreter" * doctest::skip(!kNative)) {
+    Lcg rng{0x5EED'2026'1121ULL};
+    Machine fast{32U << 20};
+    Machine reference;
+    // Page 1 holds compiled code and has a renderer packet newer than completed_seen.
+    BarrierProbe probe;
+    probe.writers[1] = 1;
+    probe.slot_sequence[1] = 5;
+    probe.completed_seen = 4;
+    for (auto* m : {&fast, &reference}) {
+        m->code_pages[1] = 1;
+        m->ctx.code_write = &parity_write;
+        m->ctx.barrier = &probe.view;
+    }
+    unsigned at_end = 0;
+    for (unsigned n = 0; n < 500; ++n) {
+        CAPTURE(n);
+        const auto block = RandomBlock(rng).build();
+        std::array<std::uint64_t, 64> guest{};
+        for (auto& g : guest) g = rng.next();
+        std::array<std::uint8_t, 8192> ram{};
+        for (auto& r : ram) r = static_cast<std::uint8_t>(rng.next() >> 56);
+        for (auto* m : {&fast, &reference}) {
+            m->guest = guest;
+            m->ram = ram;
+            m->ctx.budget = 1000;
+            m->ctx.extra_cycles = 0;
+        }
+        const auto tag = fast.build(block)(&fast.ctx);
+        const auto expected = IrInterpreter(block, reference.ctx).run();
+        CHECK(tag == expected);
+        CHECK(fast.guest == reference.guest);
+        CHECK(fast.ram == reference.ram);
+        CHECK(fast.ctx.budget == reference.ctx.budget);
+        CHECK(fast.ctx.extra_cycles == reference.ctx.extra_cycles);
+        if (tag == 0) ++at_end;
+    }
+    // The blocks leave through the body's end and through side exits.
+    CHECK(at_end > 0);
+    CHECK(at_end < 500);
 }

@@ -4,7 +4,7 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-18_
+_Última actualización: 2026-11-21_
 
 > **Perfil actualizado y SHADE (2026-11-15): nuevo atajo descartado.**
 > Con rectángulos constantes ya activos: 8258 muestras, 0 errores de captura;
@@ -304,15 +304,45 @@ Medir con MK64 después de cada cambio y mantener n64-systemtest en 2984/3721.
       más barato (Assembler con registros fijos, salidas compartidas), FPU nativa, enlace de bloques,
       caché de registros entre instrucciones. Al hacer FPU nativa: volver a meter CU1/FR en la clave
       con varias claves por dirección (Ruling R5).
+      **Hecho en `n64/jit-smooth` (2026-11-21), sin sumar aún**: regla de entrada (sin compilar en PCs de
+      reanudación dentro de bloques) + `x86::Assembler` con asignador lineal propio; Compiler borrado.
+      MK64 carrera 1500-1900, mediana de 5 pares: **63,9 → 117,9 campos/s**, compilación de la carrera
+      3495 → 303 ms (-91 %), compile por bloque 0,165 → 0,036 ms, AsmJit 2,95 % del perfil. Objetivos 2 y 3
+      cumplidos; el 1 NO (quedan ~5 campos de compilación > 16,7 ms por ejecución, casi todos en los campos
+      1510-1512, la carga inicial; max 85-94 ms). Ver `docs/performance/2026-11-21-n64-cpu-jit-smooth.md`.
+      Nota de diseño para GC/Wii: con la regla de reanudación, tras una salida a mitad de bloque por MMIO
+      (exit-before) o un ERET el resto del bloque corre en el intérprete; en GameCube (p. ej. escrituras al
+      write-gather pipe) sería caro, así que la política futura debe permitir compilar en reanudaciones
+      deterministas justo después de un kExitBefore; y el asignador necesitará clases de registros (GP/XMM)
+      y slots de 16 bytes para la FPU.
+      Siguiente:
+      - [ ] El usuario prueba DK's Jungle Parkway (el puente) y responde si el tirón se repite en la
+        segunda vuelta. Si guarda un estado con F2 ahí, el runner lo mide con
+        `--load-state "E:/Rom nintendo/Mario Kart 64 (USA).ss1" --hold A` (antes/después, 600 campos).
+      - [ ] PR de `n64/jit-smooth` (apilado sobre el PR #18 `n64/vi-output`).
+      - [ ] Si hace falta, ronda siguiente: compilar en segundo plano o con presupuesto por campo (ver doc),
+        luego FPU nativa.
     - Menores pendientes de la revisión: ver la lista en el mensaje final de la sesión 2026-11-19
       (SC sin LLbit, prueba RDP solo de fill, IR muerta tras likely nunca tomado, doble salida lenta).
     - Archivo suelto `E:\scratch_t10.txt` (fuera del repo) creado por un subagente: borrarlo a mano.
   - [x] Imagen de MK64 "cortada" (letreros tapados por la colina, valla sobre el letrero): el Z por píxel
     del RDP usaba z >> 10 en vez de z >> 13 y saturaba todo lo lejano; DZ ahora redondea hacia arriba.
     Comparado contra ares v148 (paraLLEl-RDP) en el mismo instante de la demo. Commit 73bc414.
-  - [ ] Siguiente en lo visual: filtro del VI (antialias + suavizado, lo que hace que el N64 real se vea
+  - [x] Filtro del VI (antialias + suavizado, lo que hace que el N64 real se vea
     suave; ezyemu muestra el framebuffer crudo) y la fila de basura en la última línea de la imagen.
-    Referencia: ares en `E:\ProyectosProgramDisc4\ezynintendoeferenciares-v148` (fuera del repo).
+    Referencia: ares en `E:\ProyectosProgramDisc4\ezynintendo
+eferenciares-v148` (fuera del repo).
+    - Hecho en la rama `n64/vi-output` (2026-11-21): ezyemu muestra `Vi::output()` por defecto
+      (`--vi-raw` = framebuffer crudo), runner con `--vi-output`. Más parecido a ares en 6/6 pares.
+      Coste de `output()`: 11,3 → **1,7 ms** por cuadro (meta del plan: < 2 ms, cumplida en un hilo).
+      Ver `docs/performance/2026-11-19-n64-vi-output.md`. Revisión final del branch hecha.
+    - [x] El usuario probó MK64 en ezyemu con filtro: "se ve bien". PRs abiertos y apilados (2026-11-21):
+      #16 `n64/gfx-hle-port` → main, #17 `n64/cpu-jit` → `n64/gfx-hle-port`, #18 `n64/vi-output` → `n64/cpu-jit`.
+      Fusionar en ese orden (al borrar la rama fusionada GitHub cambia la base del siguiente a main).
+    - [x] Fila de basura en la última línea: solo está en el framebuffer crudo (`--vi-raw`); la salida
+      del VI sigue V_VIDEO y la deja negra, como ares.
+    - Menor (para después): en juegos entrelazados, si ezyemu dibuja un campo de cada dos, el campo
+      tejido es viejo (mismo campo dos veces). MK64 no es entrelazado.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
 
@@ -850,3 +880,35 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   angrylion, más el ajuste por la primera submuestra cubierta y el recorte de bits 17/18). También DZ de
   triángulos como `normalize_dzpix` (parte entera, redondeo hacia arriba). Tests de Z pasados a z << 13.
   11/11 suites, 183 pruebas Release (PeterLemon + systemtest, con y sin JIT). Runner: `--load-state`.
+- 2026-11-20 — PAUSA por límite de uso, a mitad del plan del filtro VI. Para retomar en otra sesión:
+  - Rama `n64/vi-output` (subida). Plan `docs/superpowers/plans/2026-11-19-n64-vi-filters.md`, diseño
+    `docs/superpowers/specs/2026-11-19-n64-vi-filters-design.md`. Registro de la ejecución con subagentes
+    (fuera de git): `.superpowers/sdd/2026-11-19-n64-vi-filters/progress.md` y `task-4-report.md`.
+  - Hecho y revisado: Tarea 1 (cobertura de 16 bits en el RDP, bb2f1a2), Tarea 2 (etapas del filtro,
+    12789dd..5341255), Tarea 3 (`Vi::output()`, 15f9d44) y los menores de la Tarea 3 (a2b3723).
+  - Tarea 4 a medias, en el commit "WIP N64 VI": `--vi-raw` en ezyemu, `--vi-output` en el runner y una
+    optimización de `Vi::output()` en un solo hilo SIN validar. Antes costaba 11 ms por cuadro (la
+    carrera de MK64 bajaba de ~50 a ~26 campos/s); meta < 2 ms. Contra ares la salida filtrada ya se
+    parece más en los 6 pares (p. ej. 13,64 → 10,37).
+  - Falta: compilar y pasar las pruebas del WIP, medir `output()` en Release (media/máx) y el par de
+    campos/s, repetir la comparación con ares, 183 pruebas Release, estado de MK64 idéntico, doc
+    `docs/performance/2026-11-19-n64-vi-output.md`, revisión de la Tarea 4 y revisión final del branch.
+    Si no baja de 2 ms en un hilo, decidir con el usuario (hilo aparte = diseño nuevo).
+  - Pendientes anteriores siguen: probar `ezyemu --gfx-hle --cpu-jit` y PRs de `n64/gfx-hle-port`,
+    `n64/cpu-jit` (incluye la corrección del Z, 73bc414) y `n64/vi-output`; Fase 4 del JIT.
+- 2026-11-21 — Tarea 4 del filtro VI terminada en `n64/vi-output`: quitada la instrumentación que rompía la
+  compilación del WIP; dither filter con SSE2, divot solo con cobertura parcial, lerp vertical una vez por
+  columna y gamma por plantilla: `output()` 4,96 → 3,0 ms (de 11,3 al inicio), imágenes idénticas byte a byte
+  (24 MK64 + 13 Spider-Man), estado de MK64 en 1900 idéntico, Debug 11/11, Release 183/183, contra ares
+  6/6 pares mejor que el crudo. Meta de 2 ms no alcanzada: decisión pendiente con el usuario.
+- 2026-11-21 (2) — Filtro VI por debajo de 2 ms: píxeles de pantalla de 4 en 4 con SSE2 (gamma con sqrtps,
+  exacto), `output(..., Image&)` que reutiliza el buffer en ezyemu y runner, decodificación de 16 bits de 8 en 8.
+  `output()` 3,0 → 1,7 ms. Imágenes idénticas, prueba de hashes intacta (ahora reutiliza la imagen),
+  Debug 11/11, Release 183/183, estado de MK64 en 1900 idéntico (4a4c07...). Fila de basura: solo en `--vi-raw`.
+- 2026-11-21 (3) — PRs #16, #17 y #18 abiertos (apilados, sin CI en el repo). Siguiente: detalles gráficos de MK64.
+- 2026-11-21 (4) — Fase 4 del JIT de CPU (rama `n64/jit-smooth`, sin push): medido y cerrado. Regla de entrada +
+  Assembler con asignador lineal; Compiler y `Backend` borrados; prueba aleatoria ahora contra un intérprete de IR.
+  MK64 1500-1900: 63,9 → 117,9 campos/s (5/5 pares), compilación de la carrera 3495 → 303 ms; quedan campos
+  lentos de compilación en 1510-1512 (objetivo 1 no cumplido). Debug 11/11, Release 183/183, SHA-1 de MK64 igual.
+  Pendiente del usuario: probar el puente de DK's Jungle Parkway; luego el PR.
+- 2026-11-21 (4) — PR #19 abierto: `n64/jit-smooth` → `n64/vi-output` (apilado sobre #16-#18). Fusionar en orden #16, #17, #18, #19.

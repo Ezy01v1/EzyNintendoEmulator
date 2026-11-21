@@ -183,15 +183,22 @@ TEST_CASE("CPU JIT native accesses call the RDP barrier exactly when the interpr
     // page 0x42 nothing: a read waits on 0x40 only, a write on both. A wait completes the
     // packet, so later accesses to its page no longer wait.
     constexpr std::uint32_t kGuardEnd = kData + 0x3000;
-    const std::vector<std::uint32_t> w = with_data_base({
-        lw(8, 28, 0x1000),   // 0x41 read: no wait
-        lw(9, 28, 0),        // 0x40 read: waits for 1
-        sw(9, 28, 4),        // 0x40 write: 1 is done
-        sh(8, 28, 0x1002),   // 0x41 write: waits for 2
-        sb(8, 28, 0x2000),   // 0x42: no wait
-        ld(10, 28, 8),       // 0x40: no wait
-        lbu(11, 28, 0x1003), // 0x41: no wait
-    });
+    // Every access follows a taken branch (beq 0,0 skipping nothing but its slot), so it is a
+    // jump target: after the interpreter ran a waiting access, the next one compiles and runs
+    // natively again (a mid-block resume would be left to the interpreter).
+    std::vector<std::uint32_t> body;
+    for (const std::uint32_t access : {
+             lw(8, 28, 0x1000),    // 0x41 read: no wait
+             lw(9, 28, 0),         // 0x40 read: waits for 1
+             sw(9, 28, 4),         // 0x40 write: 1 is done
+             sh(8, 28, 0x1002),    // 0x41 write: waits for 2
+             sb(8, 28, 0x2000),    // 0x42: no wait
+             ld(10, 28, 8),        // 0x40: no wait
+             lbu(11, 28, 0x1003),  // 0x41: no wait
+         }) {
+        body.insert(body.end(), {beq(0, 0, 1), nop(), access});
+    }
+    const std::vector<std::uint32_t> w = with_data_base(body);
     constexpr unsigned kAccesses = 7, kWaits = 2;
     const auto prepare = [](Twin& t) {
         for (TwinBus* bus : {&t.ref_bus, &t.jit_bus}) {

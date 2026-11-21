@@ -304,6 +304,7 @@ bool RdpRasterizer::try_constant_rectangle(unsigned left, unsigned top, unsigned
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t base = color_address_ & ~(bytes - 1);
     std::array<std::uint8_t, 4> pattern{};
+    unsigned pattern_hidden = 0;
     bool ready = false;
     for (unsigned y = top >> 2; y < (bottom >> 2); ++y) {
         if (!field_matches(y)) continue;
@@ -314,6 +315,7 @@ bool RdpRasterizer::try_constant_rectangle(unsigned left, unsigned top, unsigned
         if (!ready) {
             if (!write_opaque_pixel(left >> 2, y, color, Rgba{}, 8, rdram)) return true;
             std::copy_n(rdram.begin() + static_cast<std::ptrdiff_t>(address), bytes, pattern.begin());
+            pattern_hidden = hidden_bits(address);  // RGBA5551's two low coverage bits
             ready = true;
         }
         EZY_RDP_ADD(constant_rectangle, 1, count);
@@ -323,6 +325,8 @@ bool RdpRasterizer::try_constant_rectangle(unsigned left, unsigned top, unsigned
             if (bytes == 4) {
                 rdram[at + 2] = pattern[2];
                 rdram[at + 3] = pattern[3];
+            } else {
+                set_hidden_bits(at, pattern_hidden);
             }
         }
     }
@@ -557,10 +561,20 @@ void RdpRasterizer::fill_span(unsigned y, unsigned left, unsigned right, std::sp
         // The fill register is repeated as a packed big-endian word on the memory bus.
         rdram[addr] = static_cast<std::uint8_t>(fill_color_ >> ((3 - (addr & 3)) * 8));
     }
-    // Fills clear the hidden bits they cover. Hardware copies each halfword's low bit into them;
-    // only depth reads use them here, and depth clears (0xFFFC) have that bit clear.
+    // Fills copy each halfword's low bit into its hidden bits (3 or 0), like the hardware: a
+    // 16-bit color clear with the alpha bit set reads back as full coverage, and depth clears
+    // (0xFFFC) leave them clear. The packed word repeats, so even halfwords take bit 16 and odd
+    // ones bit 0.
     if (first < end) {
-        hidden_->clear(first >> 1, (end + 1) >> 1);
+        const unsigned even = (fill_color_ & 0x10000U) ? 3 : 0, odd = (fill_color_ & 1U) ? 3 : 0;
+        const std::size_t first_halfword = first >> 1, end_halfword = (end + 1) >> 1;
+        if ((even | odd) == 0) {
+            hidden_->clear(first_halfword, end_halfword);
+        } else {
+            for (std::size_t halfword = first_halfword; halfword < end_halfword; ++halfword) {
+                hidden_->write(halfword, (halfword & 1) ? odd : even);
+            }
+        }
     }
 }
 
@@ -744,14 +758,14 @@ RdpRasterizer::Rgba RdpRasterizer::combine(const Rgba& texel0, const Rgba& texel
     return result;
 }
 unsigned RdpRasterizer::memory_coverage(unsigned x, unsigned y, std::span<const std::uint8_t> rdram) const {
-    // Without image reads, memory coverage reads as full (7). RGBA5551 keeps only the top
-    // coverage bit; the two hidden low bits are taken as set.
+    // Without image reads, memory coverage reads as full (7). RGBA5551 keeps the top coverage
+    // bit in bit 0 and the two low bits in the halfword's hidden bits.
     if (!(solid_.modes & (1U << 6))) return 7;
     const unsigned bytes = pixel_size_ == 2 ? 2 : 4;
     const std::size_t address = (color_address_ & ~(bytes - 1)) +
         (static_cast<std::size_t>(y) * color_width_ + x) * bytes;
     if (address + bytes > rdram.size()) return 7;
-    if (bytes == 2) return ((rdram[address + 1] & 1U) << 2) | 3;
+    if (bytes == 2) return ((rdram[address + 1] & 1U) << 2) | hidden_bits(address);
     return rdram[address + 3] >> 5;
 }
 
@@ -852,14 +866,14 @@ bool RdpRasterizer::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combi
     EZY_RDP_OBSERVE(true, coverage);
 
     // Memory color and coverage. Without image reads, memory coverage reads as full (7).
-    // RGBA5551 keeps only the top coverage bit; the two hidden low bits are taken as set.
+    // RGBA5551 keeps the top coverage bit in bit 0 and the two low bits in the hidden bits.
     std::array<unsigned, 3> memory{};
     unsigned memory_coverage = 7;
     if (solid_.modes & (1U << 6)) {
         if (bytes == 2) {
             const unsigned value = (unsigned{rdram[address]} << 8) | rdram[address + 1];
             memory = {((value >> 11) & 31) << 3, ((value >> 6) & 31) << 3, ((value >> 1) & 31) << 3};
-            memory_coverage = ((value & 1) << 2) | 3;
+            memory_coverage = ((value & 1) << 2) | hidden_bits(address);
         } else {
             memory = {rdram[address], rdram[address + 1], rdram[address + 2]};
             memory_coverage = rdram[address + 3] >> 5;
@@ -949,9 +963,11 @@ bool RdpRasterizer::write_opaque_pixel(unsigned x, unsigned y, const Rgba& combi
         }
     }();
     if (bytes == 2) {
+        // RGBA5551 stores the coverage's top bit in bit 0 and its two low bits in the hidden bits.
         const unsigned packed = ((r & 0xF8) << 8) | ((g & 0xF8) << 3) | ((b & 0xF8) >> 2) | (stored >> 2);
         rdram[address] = static_cast<std::uint8_t>(packed >> 8);
         rdram[address + 1] = static_cast<std::uint8_t>(packed);
+        set_hidden_bits(address, stored & 3);
     } else {
         rdram[address] = static_cast<std::uint8_t>(r);
         rdram[address + 1] = static_cast<std::uint8_t>(g);

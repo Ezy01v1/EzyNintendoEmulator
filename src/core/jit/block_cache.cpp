@@ -9,7 +9,8 @@
 namespace ezy::jit {
 
 BlockCache::BlockCache(std::uint32_t ram_size, std::size_t code_budget)
-    : ram_size_(ram_size), code_(code_budget), pages_(ram_size), top_((ram_size + 0xFFFU) >> CodePages::kPageShift) {}
+    : ram_size_(ram_size), code_(code_budget), pages_(ram_size), top_((ram_size + 0xFFFU) >> CodePages::kPageShift),
+      covered_(top_.size()) {}
 
 BlockCache::~BlockCache() = default;
 
@@ -59,6 +60,10 @@ const Block& BlockCache::insert(const Block& block, std::span<const BlockExit> e
     const Block*& slot = top_[page][(block.paddr >> 2) & (kSlots - 1)];
     if (slot == nullptr) ++stats_.blocks;
     slot = stored;
+    if (!covered_[page]) covered_[page] = std::make_unique<std::uint8_t[]>(kSlots);  // zero-initialised
+    std::uint8_t* marks = covered_[page].get();
+    const std::uint32_t first = (block.paddr >> 2) & (kSlots - 1);
+    for (std::uint32_t w = 1; w < block.words; ++w) marks[first + w] = 1;
     pages_.mark(page);
     return *stored;
 }
@@ -79,6 +84,7 @@ bool BlockCache::invalidate(std::uint32_t begin, std::uint32_t end) {
                 }
             }
         }
+        if (covered_[p]) std::memset(covered_[p].get(), 0, kSlots);
         pages_.clear(p);
     }
     if (dropped) ++stats_.invalidations;
@@ -87,6 +93,7 @@ bool BlockCache::invalidate(std::uint32_t begin, std::uint32_t end) {
 
 void BlockCache::flush() {
     for (auto& page : top_) page.reset();
+    for (auto& marks : covered_) marks.reset();
     chunks_.clear();
     chunk_used_ = chunk_size_ = arena_bytes_ = 0;
     pages_.clear_all();

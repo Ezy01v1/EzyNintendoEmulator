@@ -240,6 +240,7 @@ Vr4300Jit::Stats Vr4300Jit::stats() const {
     Stats s = stats_;
     s.invalidations = cache_.stats().invalidations;
     s.flushes = cache_.stats().flushes;
+    s.code_bytes = cache_.code().used();
     return s;
 }
 
@@ -354,7 +355,9 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
         const std::uint32_t first = word(0);
         block.words = 1;
         const jit::Block& stored = cache_.insert(block, {}, std::span<const std::uint32_t>(&first, 1));
-        stats_.compile_ns += elapsed_ns(started);
+        const std::uint64_t took = elapsed_ns(started);
+        stats_.compile_ns += took;
+        stats_.compile_max_ns = std::max(stats_.compile_max_ns, took);
         return &stored;
     }
 
@@ -418,7 +421,9 @@ const jit::Block* Vr4300Jit::compile(std::uint32_t paddr, std::uint32_t key) {
     block.min_cycles = static_cycles;
     const jit::Block& stored = cache_.insert(block, builder.exits(), words);
     if (block.fn != nullptr) ++stats_.compiled;
-    stats_.compile_ns += elapsed_ns(started);
+    const std::uint64_t took = elapsed_ns(started);
+    stats_.compile_ns += took;
+    stats_.compile_max_ns = std::max(stats_.compile_max_ns, took);
     return &stored;
 }
 
@@ -457,6 +462,13 @@ Vr4300Jit::Result Vr4300Jit::execute(std::uint64_t event_budget) {
             const auto paddr = static_cast<std::uint32_t>(pc & 0x1FFFFFFF);
             if (std::uint64_t{paddr} + 4 > bus_.direct_ram_size()) break;
             const jit::Block* block = cache_.find(paddr, key);
+            // An arbitrary resume (after a stop for the budget or an event) inside a compiled
+            // block: compiling here would build a near-duplicate; the interpreter steps on until
+            // a jump lands somewhere. A jump (in_delay_slot_ still set) may be a loop head.
+            if (block == nullptr && !cpu_.in_delay_slot_ && cache_.covered(paddr)) {
+                ++stats_.resume_skips;
+                break;
+            }
             if (block == nullptr) block = compile(paddr, key);
             if (check_) verify(*block);
             if (block->fn == nullptr) {
