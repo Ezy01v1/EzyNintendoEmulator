@@ -40,72 +40,129 @@ TEST_CASE("PI raises the CPU interrupt when an enabled cause is set and clears i
     std::vector<bool> levels;
     pi.set_line_sink([&](bool l) { levels.push_back(l); });
 
+    // Dolphin's Init(): the reset switch released (bit 16) and the VI cause set.
+    CHECK(pi.read32(0x00) == ((1u << 16) | (1u << Pi::kVi)));
+    pi.write32(0x00, 1u << Pi::kVi);  // any cause clears when the CPU writes a 1
+    CHECK(pi.read32(0x00) == (1u << 16));
+
     pi.set_cause(Pi::kDi, true);  // masked: no line
     CHECK_FALSE(pi.line());
     CHECK(levels.empty());
     pi.write32(0x04, 1u << Pi::kDi);  // enabling it raises the line
     CHECK(pi.line());
-    CHECK(pi.read32(0x00) == ((1u << Pi::kDi) | (1u << 16)));  // cause plus the reset-switch state
+    CHECK(pi.read32(0x00) == ((1u << Pi::kDi) | (1u << 16)));
     pi.set_cause(Pi::kDi, false);  // the peripheral acknowledges
     CHECK_FALSE(pi.line());
     CHECK(levels == std::vector<bool>{true, false});
 
-    // The latched causes clear when the CPU writes a 1 to them; a live one ignores the write.
-    pi.write32(0x04, (1u << Pi::kGpuError) | (1u << Pi::kVi));
-    pi.set_cause(Pi::kGpuError, true);
-    pi.set_cause(Pi::kVi, true);
+    // The CPU acknowledges by writing a 1 to the bit (a live cause comes back at the
+    // peripheral's next set_cause).
+    pi.set_cause(Pi::kDi, true);
     CHECK(pi.line());
-    pi.write32(0x00, 1u << Pi::kGpuError);
-    CHECK((pi.read32(0x00) & 1u) == 0);
-    CHECK(pi.line());  // still the VI
-    pi.write32(0x00, 1u << Pi::kVi);
-    CHECK(pi.line());
-    CHECK(pi.interrupts(Pi::kVi) == 1);
-    pi.set_cause(Pi::kVi, false);
+    pi.write32(0x00, 1u << Pi::kDi);
+    CHECK_FALSE(pi.line());
+    CHECK(pi.interrupts(Pi::kDi) == 2);
+
+    // The mask only holds bits 0-13; the reset switch state is not an interrupt.
+    pi.write32(0x04, 0xFFFFFFFF);
+    CHECK(pi.read32(0x04) == 0x3FFF);
     CHECK_FALSE(pi.line());
 
-    // 16-bit halves, the revision, the reset code, and a register nobody models.
-    pi.write16(0x24, 0x1234);
-    pi.write16(0x26, 0x5678);
+    // The revision is the literal Flipper rev C, the reset code is stored, the FIFO
+    // pointers are physical and 32-byte aligned, a 16-bit write is invalid, as is an
+    // unmodeled register.
+    CHECK(pi.read32(0x2C) == 0x246500B1u);
+    pi.write32(0x24, 0x12345678);
     CHECK(pi.read32(0x24) == 0x12345678);
-    CHECK(pi.read32(0x2C) == Pi::kRevision);
-    pi.write32(0x14, 0x80010020);
-    CHECK(pi.fifo_write_pointer() == 0x80010020);
+    CHECK(pi.read16(0x26) == 0x5678);
+    pi.write32(0x14, 0x80010029);
+    CHECK(pi.fifo_write_pointer() == 0x00010020);
+    pi.write32(0x0C, 0xFFFFFFFF);
+    CHECK(pi.fifo_base() == 0x1FFFFFE0);
+    CHECK_THROWS_AS(pi.write16(0x24, 1), ezy::gc::BusError);
     CHECK_THROWS_AS(pi.read32(0x40), ezy::gc::BusError);
     CHECK_THROWS_AS(pi.write32(0x2C, 0), ezy::gc::BusError);
 }
 
-TEST_CASE("VI display interrupt fires at its line and clears when written") {
+TEST_CASE("VI starts as Dolphin's Preset() and checks line 1 at the start of the first field") {
     Scheduler sched;
     Pi pi;
     Vi vi(sched, pi);
+    CHECK(vi.read16(0x00) == 6);  // VTR: EQU
+    CHECK(vi.read16(0x02) == 1);  // DCR: ENB
+    CHECK(vi.read32(0x30) == (((0x1000u | 263u) << 16) | 430u));  // DI0: line 263, HCT 430, enabled
+    // DI1 = line 1, HCT 1 (the first half-line): pending from the very first half-line.
+    CHECK(vi.read32(0x34) == (((0x8000u | 0x1000u | 1u) << 16) | 1u));
+    CHECK(vi.read16(0x48) == ((40 << 8) | 40));  // STD = WPL = 40
+}
+
+TEST_CASE("VI display interrupt fires at its line, once per frame, and clears when written") {
+    Scheduler sched;
+    Pi pi;
+    Vi vi(sched, pi);
+    vi.write32(0x34, 0);  // DI1 off (it starts pending); DI0's preset line 263 is overwritten below
+    pi.write32(0x00, 1u << Pi::kVi);
     pi.write32(0x04, 1u << Pi::kVi);
-    vi.write32(0x30, 0x10000000 | (100u << 16));  // DI0: enable, VCT = 100
+    CHECK_FALSE(pi.line());
+    vi.write32(0x30, 0x10000000 | (100u << 16));  // DI0: enabled, VCT = 100, HCT = 0
     CHECK(vi.read32(0x30) == (0x10000000u | (100u << 16)));
 
     constexpr std::uint64_t kLine = 30888;  // 858 samples * 36 CPU cycles
-    run_to(sched, vi, 99 * kLine - 1);  // line 100 starts 99 lines in (lines count from 1)
+    run_to(sched, vi, 99 * kLine - 1);      // line 100 starts 99 lines in (lines count from 1)
     CHECK_FALSE(pi.line());
     run_to(sched, vi, 99 * kLine);
     CHECK(pi.line());
     CHECK((vi.read32(0x30) & 0x80000000u) != 0);
     CHECK(vi.read16(0x2C) == 100);  // DPV: the line being scanned
 
-    // Writing the status bit as 0 acknowledges it (the SDK clears it by writing the register
-    // back without bit 31); it stays clear until the next field reaches the line.
+    // The SDK acknowledges by writing the register back with bit 31 clear. The register is
+    // per frame: line 100 comes once every two fields, not every field.
     vi.write32(0x30, 0x10000000 | (100u << 16));
     CHECK((vi.read32(0x30) & 0x80000000u) == 0);
     CHECK_FALSE(pi.line());
-    run_to(sched, vi, kField - 1);
+    run_to(sched, vi, kField + 99 * kLine + 1);  // the second field's 100th line is line 363
     CHECK_FALSE(pi.line());
-    run_to(sched, vi, kField + 99 * kLine + 1);
+    run_to(sched, vi, 2 * kField + 99 * kLine);  // the next frame
+    CHECK(pi.line());
+    vi.write32(0x30, 0);  // acknowledge and disable DI0 for the rest of the test
+    CHECK_FALSE(pi.line());
+
+    // Lines past 263 exist (the frame has 525): DI2 at line 300, and DPV reaches 525.
+    const std::uint64_t frame2 = 2 * kField;
+    vi.write32(0x38, 0x10000000 | (300u << 16));
+    run_to(sched, vi, frame2 + 299 * kLine - 1);
+    CHECK_FALSE(pi.line());
+    run_to(sched, vi, frame2 + 299 * kLine);
+    CHECK(pi.line());
+    CHECK(vi.read16(0x2C) == 300);
+    vi.write32(0x38, 0);
+    CHECK_FALSE(pi.line());
+    run_to(sched, vi, frame2 + 524 * kLine);
+    CHECK(vi.read16(0x2C) == 525);
+
+    // HCT above the half-line width selects the second half-line of the line.
+    const std::uint64_t frame3 = 2 * frame2;
+    vi.write32(0x3C, ((0x1000u | 200u) << 16) | 430u);  // DI3: enabled, line 200, HCT 430 > HLW 429
+    run_to(sched, vi, frame3 + 199 * kLine + Vi::kCyclesPerHalfLine - 1);
+    CHECK_FALSE(pi.line());
+    run_to(sched, vi, frame3 + 199 * kLine + Vi::kCyclesPerHalfLine);
+    CHECK(pi.line());
+    vi.write32(0x3C, 0);
+
+    // The status sets even when the interrupt is not enabled; it only gates the PI line.
+    vi.write32(0x30, 150u << 16);
+    run_to(sched, vi, 2 * frame3 + 149 * kLine);
+    CHECK((vi.read32(0x30) & 0x80000000u) != 0);
+    CHECK_FALSE(pi.line());
+    vi.write32(0x30, 0x80000000u | 0x10000000u | (150u << 16));  // the high half is stored as written
     CHECK(pi.line());
 
-    // A disabled one never sets its status.
-    vi.write32(0x30, 100u << 16);
+    // DCR.RST clears the four DI registers (INT included) and is not stored.
+    vi.write16(0x02, 0x0003);
+    CHECK(vi.read16(0x02) == 0x0001);
+    CHECK(vi.read32(0x30) == 0);
+    CHECK(vi.read32(0x38) == 0);
     CHECK_FALSE(pi.line());
-    run_to(sched, vi, 2 * kField + 200 * kLine);
-    CHECK((vi.read32(0x30) & 0x80000000u) == 0);
 
     // A register the VI does not model throws; so does a write to the read-only beam position.
     CHECK_THROWS_AS(vi.read32(0x80), ezy::gc::BusError);
@@ -117,12 +174,15 @@ TEST_CASE("VI field timing gives 59.94 fields per second of CPU cycles") {
     const auto image = builder.write("vi_timing");
     auto gc = GameCube::create(image);
     REQUIRE(gc != nullptr);
+    const std::uint64_t tb_before = gc->cpu().state().tb;
     for (int i = 0; i < 60; ++i) gc->run_field();
     CHECK(gc->cycles() == 60 * kField);
     CHECK(gc->stats().fields == 60);
-    const double fields_per_second = 486e6 / static_cast<double>(kField);
-    CHECK(fields_per_second == doctest::Approx(59.94).epsilon(0.0002));
-    // The time base ran at one tick per 12 cycles.
+    // 60 fields of the machine's own clock, in seconds at 486 MHz: 59.94 fields per second.
+    const double seconds = static_cast<double>(gc->cycles()) / 486e6;
+    CHECK(60.0 / seconds == doctest::Approx(59.94).epsilon(0.0002));
+    // The time base ticked once per 12 CPU cycles, remainder carried.
+    CHECK(gc->cpu().state().tb - tb_before == 60 * kField / 12);
     CHECK(gc->stats().instructions == 60 * kField);  // the synthetic program spins at 1 cycle each
 }
 
@@ -132,14 +192,19 @@ TEST_CASE("the machine delivers the VI interrupt to the CPU through the PI") {
     auto gc = GameCube::create(image);
     REQUIRE(gc != nullptr);
     auto& mem = gc->memory();
+    mem.write32(kVi + 0x34, 0);  // DI1 starts pending
+    mem.write32(kPi + 0x00, 1u << Pi::kVi);
     mem.write32(kPi + 0x04, 1u << Pi::kVi);
+    CHECK_FALSE(gc->cpu().state().external_interrupt);
     mem.write32(kVi + 0x30, 0x10000000 | (1u << 16));  // DI0: enable, line 1
     gc->run_field();
     gc->run_field();
     CHECK((mem.read32(kPi + 0x00) & (1u << Pi::kVi)) != 0);
+    CHECK(gc->cpu().state().external_interrupt);  // the line reached the Gekko
     CHECK(gc->stats().interrupts[Pi::kVi] >= 1);
     mem.write32(kVi + 0x30, 0x10000000 | (1u << 16));  // acknowledge
     CHECK((mem.read32(kPi + 0x00) & (1u << Pi::kVi)) == 0);
+    CHECK_FALSE(gc->cpu().state().external_interrupt);
 }
 
 TEST_CASE("XFB YUV to ARGB matches BT.601 for black, white and a color bar") {
@@ -189,6 +254,40 @@ TEST_CASE("the XFB picture interleaves the two fields and doubles 240p lines") {
     CHECK(picture.argb[0] == 0xFFFFFFFFu);
     CHECK(picture.argb[640] == 0xFFFFFFFFu);
     CHECK(picture.argb[640 * 479] == 0xFFFFFFFFu);
+
+    // CLRPOFF clears the shift; the bottom register uses the top register's POFF.
+    mem.write32(kVi + 0x1C, (1u << 28) | (1u << 29) | (bottom >> 5));
+    CHECK(gc->vi().xfb_top() == (bottom >> 5));
+    mem.write32(kVi + 0x1C, (1u << 28) | (top >> 5));
+    mem.write32(kVi + 0x24, bottom >> 5);  // no POFF of its own
+    CHECK(gc->vi().xfb_top() == top);
+    CHECK(gc->vi().xfb_bottom() == bottom);
+}
+
+TEST_CASE("the XFB picture takes its line stride from STD (one interleaved double-field buffer)") {
+    DiscBuilder builder;
+    const auto image = builder.write("xfb_stride");
+    auto gc = GameCube::create(image);
+    REQUIRE(gc != nullptr);
+    auto& mem = gc->memory();
+    auto ram = mem.mem1();
+    constexpr std::uint32_t fb = 0x00100000;
+    // The SDK's 480i double-field XFB: both fields in one 640x480 buffer, 1280 bytes per
+    // picture line, so a field line is 2560 bytes apart (STD = 2 * WPL); bottom = top + 1280.
+    for (std::uint32_t row = 0; row < 480; ++row) {
+        const std::uint8_t red[4] = {81, 90, 81, 240}, white[4] = {235, 128, 235, 128};
+        const std::uint8_t* c = (row & 1) ? white : red;
+        for (std::uint32_t i = 0; i < 1280; i += 4) std::copy(c, c + 4, ram.begin() + fb + row * 1280 + i);
+    }
+    mem.write16(kVi + 0x00, 240 << 4);
+    mem.write16(kVi + 0x02, 0x0001);
+    mem.write16(kVi + 0x48, (40 << 8) | 80);  // WPL = 40, STD = 80
+    mem.write32(kVi + 0x1C, fb);
+    mem.write32(kVi + 0x24, fb + 1280);
+    const auto picture = gc->xfb();
+    REQUIRE(picture.height == 480);
+    for (int row : {0, 2, 100, 478}) CHECK(picture.argb[static_cast<std::size_t>(row) * 640 + 5] == 0xFFFF0000u);
+    for (int row : {1, 3, 101, 479}) CHECK(picture.argb[static_cast<std::size_t>(row) * 640 + 634] == 0xFFFFFFFFu);
 }
 
 TEST_CASE("a store to a hardware register does not touch RAM") {
@@ -202,10 +301,10 @@ TEST_CASE("a store to a hardware register does not touch RAM") {
     mem.write32(kPi + 0x24, 0xDEADBEEF);
     mem.write32(kPi + 0x04, 0);
     mem.write16(kVi + 0x70, 0x1234);
-    mem.write32(0x0C004010, 0xFFFF);  // MI protection type
+    mem.write16(0x0C004010, 0xFFFF);  // MI protection type
     CHECK(mem.read32(kPi + 0x24) == 0xDEADBEEF);
     CHECK(mem.read16(kVi + 0x70) == 0x1234);
-    CHECK(mem.read32(kPi + 0x2C) == Pi::kRevision);
+    CHECK(mem.read32(kPi + 0x2C) == 0x246500B1u);
     CHECK(std::equal(before.begin(), before.end(), mem.mem1().begin()));
     // The same offsets in RAM stay what they were (0x3024 is not a mirror of the register).
     CHECK(mem.read32(0x3024) == (std::uint32_t{before[0x3024]} << 24 | std::uint32_t{before[0x3025]} << 16 |
@@ -233,7 +332,10 @@ TEST_CASE("MI accepts its protection registers and masks its interrupt") {
     CHECK(mi.read16(0x1E) == 0x12);
     mi.write16(0x1E, 0x12);
     CHECK_FALSE(irq);
-    CHECK(mi.read32(0x24) == 0);
+    mi.write16(0x24, 0xBEEF);  // PROT_ADDR_HI is writable
+    CHECK(mi.read16(0x24) == 0xBEEF);
+    CHECK_THROWS_AS(mi.read16(0x26), ezy::gc::BusError);
+    CHECK_THROWS_AS(mi.read16(0x12), ezy::gc::BusError);
     CHECK_THROWS_AS(mi.read16(0x32), ezy::gc::BusError);
 }
 

@@ -54,7 +54,7 @@ void GameCube::run_field() {
     stats_.fields = vi_.fields();
 }
 
-Image GameCube::xfb() const { return vi_.xfb_image(const_cast<Memory&>(memory_).mem1()); }
+Image GameCube::xfb() const { return vi_.xfb_image(memory_.mem1()); }
 
 Stats GameCube::stats() const {
     Stats s = stats_;

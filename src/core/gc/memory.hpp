@@ -50,6 +50,7 @@ public:
 
     // MEM1 as bytes in guest (big-endian) order, for bulk copies (the HLE boot, DMA).
     [[nodiscard]] std::span<std::uint8_t> mem1() { return mem1_; }
+    [[nodiscard]] std::span<const std::uint8_t> mem1() const { return mem1_; }
 
     std::uint8_t read8(std::uint32_t paddr) override;
     std::uint16_t read16(std::uint32_t paddr) override;

@@ -11,7 +11,6 @@ namespace ezy::gc {
 
 namespace {
 constexpr std::uint32_t kBase = Memory::mmio_block_base(MmioBlock::Pi);
-constexpr std::uint32_t kLatched = (1u << Pi::kGpuError) | (1u << Pi::kRsw);
 
 [[noreturn]] void unmodeled(const char* what, std::uint32_t offset) {
     char b[16];
@@ -53,16 +52,16 @@ std::uint32_t Pi::read32(std::uint32_t offset) {
 void Pi::write32(std::uint32_t offset, std::uint32_t value) {
     switch (offset) {
         case 0x00:
-            cause_ &= ~(value & kLatched);
+            cause_ &= ~value;
             update_line();
             return;
         case 0x04:
             mask_ = value & kMaskableBits;
             update_line();
             return;
-        case 0x0C: fifo_base_ = value; return;
-        case 0x10: fifo_end_ = value; return;
-        case 0x14: fifo_wptr_ = value; return;
+        case 0x0C: fifo_base_ = value & kFifoMask; return;
+        case 0x10: fifo_end_ = value & kFifoMask; return;
+        case 0x14: fifo_wptr_ = value & kFifoMask; return;
         case 0x18: return;  // FIFO reset: accepted, no effect
         case 0x24: reset_code_ = value; return;
         default: unmodeled("write", offset);  // includes the read-only revision at 0x2C
@@ -74,15 +73,8 @@ std::uint16_t Pi::read16(std::uint32_t offset) {
     return static_cast<std::uint16_t>((offset & 2) ? v : v >> 16);
 }
 
-void Pi::write16(std::uint32_t offset, std::uint16_t value) {
-    const std::uint32_t base = offset & ~3u;
-    const bool low = (offset & 2) != 0;
-    if (base == 0x00) {  // write-1-to-clear: the other half clears nothing
-        write32(base, low ? value : static_cast<std::uint32_t>(value) << 16);
-        return;
-    }
-    const std::uint32_t cur = read32(base);  // throws for an unmodeled register
-    write32(base, low ? (cur & 0xFFFF0000u) | value : (cur & 0xFFFFu) | (static_cast<std::uint32_t>(value) << 16));
+void Pi::write16(std::uint32_t offset, std::uint16_t) {
+    unmodeled("16-bit write (invalid on the hardware)", offset);
 }
 
 }  // namespace ezy::gc

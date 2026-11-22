@@ -18,7 +18,7 @@ constexpr std::uint16_t kMaskBits = 0x1F;
     throw BusError(std::string(what) + " of the unmodeled memory interface register at offset 0x" + b,
                    kBase + offset);
 }
-bool store_only(std::uint32_t offset) { return offset < 0x1C || offset == 0x20 || offset == 0x22; }
+bool store_only(std::uint32_t offset) { return offset <= 0x10 || offset == 0x20 || offset == 0x22 || offset == 0x24; }
 }  // namespace
 
 void Mi::raise(unsigned region) {
@@ -37,7 +37,6 @@ std::uint16_t Mi::read16(std::uint32_t offset) {
     if (offset & 1) unmodeled("misaligned read", offset);
     if (store_only(offset) || offset == 0x1C) return regs_[offset / 2];
     if (offset == 0x1E) return cause_;
-    if (offset == 0x24 || offset == 0x26) return 0;  // no violation ever happens
     unmodeled("read", offset);
 }
 
