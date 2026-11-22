@@ -215,7 +215,8 @@ double dequantize(u32 raw, u32 type, float factor) {
 // A lane to a memory value: the float type narrows like stfs but flushes values below the
 // normal range to zero; the integer types convert to single, scale, saturate to the type's
 // range and truncate toward zero; NaN stores as 0 (Dolphin's ScaleAndClamp, whose x86
-// conversion gives 0 there).
+// conversion gives 0 there). The caller holds a HostRounding: the conversion to single
+// rounds in FPSCR[RN]'s mode, as in Dolphin, which runs the host in the guest's mode.
 u32 quantize(double value, u32 type, float factor) {
     if (type == kQuantFloat) return double_to_single_ftz(bits(value));
     const float scaled = static_cast<float>(value) * factor;
@@ -273,6 +274,7 @@ void store_quantized(Gekko& cpu, u32 w, u32 ea, bool one, u32 gqr_index) {
     const u32 size = quantized_size(cpu, w, type);
     const float factor = scale_factor((gqr >> 8) & 63, false);
     const PairedSingle& source = fpr(cpu, rd(w));
+    const HostRounding rounding(cpu.state().fpscr);  // the conversion to single follows RN
     const u64 mask = size == 4 ? 0xFFFFFFFF : (u64{1} << (8 * size)) - 1;
     const u64 first = quantize(source.ps0, type, factor) & mask;
     if (one) return write_sized(cpu, ea, size, first);

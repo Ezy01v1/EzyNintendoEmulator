@@ -266,9 +266,9 @@ TEST_CASE("sc, rfi, mtmsr, mfspr and mtspr of HID, SPRG, BAT, DEC, TB") {
     CHECK(cpu.gpr(4) == cpu.msr());
     cpu.set_msr(0);
 
-    // Every stored SPR reads back what mtspr wrote.
+    // Every stored SPR reads back what mtspr wrote (HID0's self-clearing bits: own test).
     const int stored[] = {spr::kLr,    spr::kCtr,   spr::kDsisr, spr::kDar,  spr::kSrr0, spr::kSrr1,
-                          spr::kSprg0, spr::kSprg0 + 1, spr::kSprg0 + 2, spr::kSprg0 + 3, spr::kHid0, spr::kHid1,
+                          spr::kSprg0, spr::kSprg0 + 1, spr::kSprg0 + 2, spr::kSprg0 + 3, spr::kHid1,
                           spr::kHid2,  spr::kHid4,  spr::kWpar,  spr::kDmaU, spr::kDmaL, spr::kL2cr};
     std::uint32_t value = 0x10203040;
     for (const int n : stored) {
@@ -413,6 +413,21 @@ TEST_CASE("dcbz_l needs the locked cache enabled in HID2") {
     cpu.set_spr(spr::kHid2, 0);
     f.exec(dcbz_l(0, 4));
     CHECK(cpu.pc() == 0x700);
+}
+
+TEST_CASE("HID0 flash-invalidate bits clear themselves after a write") {
+    GekkoFixture f;
+    auto& cpu = f.cpu;
+    // The SDK's ICFlashInvalidate sets ICFI in a read-modify-write of HID0; the bit (and
+    // DCFI) reads back as 0, so a later read-modify-write does not invalidate again.
+    cpu.set_gpr(3, 0x0011C464 | Gekko::kHid0Icfi | Gekko::kHid0Dcfi);
+    f.load({mtspr(spr::kHid0, 3), mfspr(4, spr::kHid0)});
+    f.run(2);
+    CHECK(cpu.gpr(4) == (0x0011C464u & ~(Gekko::kHid0Icfi | Gekko::kHid0Dcfi)));
+    CHECK(cpu.spr(spr::kHid0) == cpu.gpr(4));
+    CHECK((cpu.spr(spr::kHid0) & Gekko::kHid0Dce) != 0);
+    cpu.set_spr(spr::kHid0, Gekko::kHid0Ice | Gekko::kHid0Icfi);
+    CHECK(cpu.spr(spr::kHid0) == Gekko::kHid0Ice);
 }
 
 TEST_CASE("dcbz raises alignment while the data cache is off") {

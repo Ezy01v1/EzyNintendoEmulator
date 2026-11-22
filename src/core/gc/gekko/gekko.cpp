@@ -305,11 +305,14 @@ bool Gekko::try_write_spr(int number, std::uint32_t value) {
     case spr::kSrr1: s_.srr1 = value; return true;
     case spr::kTblWrite: s_.tb = (s_.tb & 0xFFFFFFFF00000000ULL) | value; return true;
     case spr::kTbuWrite: s_.tb = (s_.tb & 0xFFFFFFFFULL) | (static_cast<std::uint64_t>(value) << 32); return true;
-    // HID0: only DCE is read (dcbz/dcbz_l); every other bit (ICE, the cache locks and
-    // flash-invalidates, branch prediction, power modes...) is accepted, no effect, since no
-    // cache or pipeline is modeled. HID0[ICFI] (flash-invalidate the instruction cache) needs
-    // nothing here, but a JIT must treat a write that sets it as "drop all compiled code".
-    case spr::kHid0: s_.hid0 = value; return true;
+    // HID0: only DCE is read (dcbz/dcbz_l); every other bit (ICE, the cache locks, branch
+    // prediction, power modes...) is accepted, no effect, since no cache or pipeline is
+    // modeled. ICFI and DCFI (flash-invalidate the instruction / data cache) clear themselves
+    // once the invalidation starts (750 manual, HID0 table; Dolphin's mtspr clears ICFI), so
+    // they are not stored and read back as 0. A JIT must treat each write with ICFI set as
+    // "drop all compiled code"; since the bit never stays set, a later read-modify-write of
+    // HID0 does not repeat it.
+    case spr::kHid0: s_.hid0 = value & ~(kHid0Icfi | kHid0Dcfi); return true;
     // HID1 (the PLL configuration, read-only on hardware): accepted, no effect.
     case spr::kHid1: s_.hid1 = value; return true;
     // HID2: LCE (dcbz_l) and LSQE (psq_l/psq_st) are read. PSE (paired singles enabled) is

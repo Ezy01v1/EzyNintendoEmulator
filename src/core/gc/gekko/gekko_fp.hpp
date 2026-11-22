@@ -102,9 +102,12 @@ inline double force_double(u32 fpscr, double value) {
 // The Gekko's single-precision multiplies (fmuls, fmadds and family, ps_mul, ps_madd...)
 // first round frC's mantissa to 24 bits, to nearest with ties away from zero, whatever RN
 // says; a denormal is rounded as if normalized. (Dolphin's Force25Bit, matched against
-// hardware.)
+// hardware.) Infinities and NaNs pass unchanged, so a NaN frC propagates with its payload
+// in every instruction (rounding a NaN's mantissa can carry out of the exponent: Dolphin
+// rounds it in fmuls but not in fmadds; here both keep it).
 inline double round_frc(double c) {
     u64 b = bits(c);
+    if ((b & kExp) == kExp) return c;
     u64 keep = 0xFFFFFFFFF8000000;
     u64 round = 0x8000000;
     if ((b & kExp) == 0 && (b & kFrac) != 0) {

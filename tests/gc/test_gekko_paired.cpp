@@ -225,6 +225,21 @@ TEST_CASE("psq_l and psq_st quantize u8, s8, u16, s16 with scale, saturating on 
     cpu.set_ps(1, std::bit_cast<double>(0x7FF8000000000000ull), 1.0);
     f.exec(psq_st(1, 0, 4, 0, 1));
     CHECK(bus.read32(0x1000) == 0x00000001);
+
+    // The conversion to single before scaling follows FPSCR[RN] (Dolphin runs it in the
+    // guest's mode): 2 - 2^-30 is 2.0f to nearest but just below 2 toward zero, so it
+    // truncates to 1.
+    cpu.set_gqr(1, gqr(0, 0, kS16, 0));
+    cpu.set_ps(1, 2.0 - 1.0 / 1073741824.0, -(2.0 - 1.0 / 1073741824.0));
+    f.exec(psq_st(1, 0, 4, 0, 1));
+    CHECK(bus.read32(0x1000) == 0x0002FFFE);
+    cpu.set_fpscr(1);  // toward zero
+    f.exec(psq_st(1, 0, 4, 0, 1));
+    CHECK(bus.read32(0x1000) == 0x0001FFFF);
+    cpu.set_fpscr(3);  // toward -infinity: 1.99.. and -2
+    f.exec(psq_st(1, 0, 4, 0, 1));
+    CHECK(bus.read32(0x1000) == 0x0001FFFE);
+    cpu.set_fpscr(0);
 }
 
 TEST_CASE("psq_l with W=1 sets ps1 to 1.0") {

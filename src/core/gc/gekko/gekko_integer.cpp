@@ -454,10 +454,12 @@ void op_lwarx(Gekko& cpu, u32 w) {
 }
 // Stores only while the reservation lwarx made still holds and the EA is the one lwarx
 // used; CR0 = EQ if it stored, + SO. A store clears the reservation; a different address
-// stores nothing and keeps it. The PEM leaves a different address undefined; this is
-// Dolphin's stwcxd, which compares the exact EA (the 750's reservation granule is a 32-byte
-// block, but nothing observed relies on the difference). The Rc = 0 form (invalid) shares
-// the table slot and behaves the same, setting CR0, as in Dolphin.
+// stores nothing and keeps it. This is a Dolphin-parity choice (its stwcxd compares the
+// exact EA) that differs from the PEM: there the reservation is cleared either way, and
+// only whether the store happens to a different address is undefined. (The 750's
+// reservation granule is also a 32-byte block, not the exact EA.) Nothing observed relies on
+// the difference. The Rc = 0 form (invalid) shares the table slot and behaves the same,
+// setting CR0, as in Dolphin.
 void op_stwcx_rc(Gekko& cpu, u32 w) {
     const u32 ea = ea_x(cpu, w);
     if ((ea & 3) != 0) GekkoOps::raise_alignment(cpu, ea, w);

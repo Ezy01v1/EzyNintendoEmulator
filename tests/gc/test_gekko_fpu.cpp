@@ -145,6 +145,21 @@ TEST_CASE("single-precision multiplies round frC to 25 bits first") {
     CHECK(cpu.ps0(3) == 3.0 + 1.0 / 4194304.0);
     f.exec(fmul(4, 1, 2));
     CHECK(cpu.ps0(4) == 3.0 * (1.0 + 1.0 / 33554432.0));
+
+    // A NaN frC is not rounded: it propagates (quieted) through fmuls and fmadds alike.
+    // Rounding this one's mantissa would carry out of the exponent and turn it into -0.
+    const std::uint64_t nan_c = 0x7FFFFFFFFFFFFFFF;
+    cpu.set_ps(1, 1.0, 0.0);
+    cpu.set_ps(2, from_bits(nan_c), 0.0);
+    cpu.set_ps(5, 0.0, 0.0);
+    f.exec(fmuls(3, 1, 2));
+    CHECK(bits(cpu.ps0(3)) == 0x7FFFFFFFE0000000ull);  // the NaN as a single, widened
+    f.exec(fmadds(3, 1, 2, 5));
+    CHECK(bits(cpu.ps0(3)) == 0x7FFFFFFFE0000000ull);
+    cpu.set_ps(2, from_bits(nan_c), from_bits(nan_c));
+    cpu.set_ps(1, 1.0, 1.0);
+    f.exec(ps_mul(3, 1, 2));
+    CHECK(bits(cpu.ps1(3)) == 0x7FFFFFFFE0000000ull);
 }
 
 TEST_CASE("frsp, fctiw and fctiwz follow the FPSCR rounding mode") {

@@ -94,6 +94,9 @@ public:
     // HID0[ICE]/[DCE]: instruction and data caches enabled. No cache is modeled, but dcbz and
     // dcbz_l raise alignment while DCE = 0, as on the 750.
     static constexpr std::uint32_t kHid0Ice = 0x00008000, kHid0Dce = 0x00004000;
+    // HID0[ICFI]/[DCFI]: flash-invalidate the instruction / data cache. They clear themselves
+    // once the invalidation starts, so they always read as 0.
+    static constexpr std::uint32_t kHid0Icfi = 0x00000800, kHid0Dcfi = 0x00000400;
     // HID2: LSQE (psq_l[u]/psq_st[u] legal), WPE (write-gather pipe), PSE (paired singles), LCE
     // (the locked cache is enabled: dcbz_l is legal).
     static constexpr std::uint32_t kHid2Lsqe = 0x80000000, kHid2Wpe = 0x40000000, kHid2Pse = 0x20000000,
