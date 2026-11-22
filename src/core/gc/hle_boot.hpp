@@ -18,8 +18,9 @@ struct HleBootOptions {
 // game (design, "Arranque HLE"): the disc header and the low-memory globals, BI2 and the FST
 // at the top of MEM1, the DOL loaded (BSS cleared), and the CPU with the boot BATs, MSR, HID0,
 // HID2, GQRs, r1 and pc = the DOL's entry. The CPU is reset first; `memory` should be fresh
-// (nothing else is cleared). Throws std::runtime_error when the disc's DOL cannot be read or
-// parsed, and BusError if the DOL loads outside MEM1.
+// (nothing else is cleared). Throws std::runtime_error when the disc's FST (with BI2) does
+// not fit in MEM1 above the low globals, or its DOL cannot be read or parsed, or would load
+// outside MEM1 or over the FST/BI2 area; nothing of the DOL is written then.
 //
 // Unlike Dolphin's HLE boot (Boot_BS2Emu.cpp, EmulatedBS2_GC), which runs the disc's
 // apploader on the emulated CPU to load the DOL and the FST, this loads them directly and

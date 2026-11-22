@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "gc/disc.hpp"
@@ -35,17 +36,23 @@ std::uint32_t be32(std::span<const std::uint8_t> bytes, std::size_t at) {
 constexpr std::uint32_t kMem1Top = 0x81800000;
 constexpr std::uint32_t kRfi = 0x4C000064;
 
-// Reads, parses and loads the disc's DOL; returns its entry point.
-std::uint32_t load_dol(Memory& memory, Disc& disc) {
+// The low globals and exception vectors end here; the DOL's text usually starts at it. The
+// FST and BI2 placed at the top of MEM1 must stay above it.
+constexpr std::uint32_t kLowMemoryEnd = 0x80003100;
+
+// Reads, parses and loads the disc's DOL below `memory_end` (physical); returns its entry.
+std::uint32_t load_dol(Memory& memory, Disc& disc, std::uint32_t memory_end) {
     std::vector<std::uint8_t> bytes(Dol::kHeaderSize);
     if (!disc.read(disc.dol_offset(), bytes)) throw std::runtime_error("hle_boot: cannot read the DOL header");
     const auto size = Dol::file_size(bytes);
     if (!size) throw std::runtime_error("hle_boot: bad DOL header");
+    if (std::uint64_t{disc.dol_offset()} + *size > disc.size())
+        throw std::runtime_error("hle_boot: the DOL runs past the end of the disc");
     bytes.resize(*size);
     if (!disc.read(disc.dol_offset(), bytes)) throw std::runtime_error("hle_boot: the DOL runs past the end of the disc");
     const auto dol = Dol::parse(bytes);
     if (!dol) throw std::runtime_error("hle_boot: bad DOL");
-    dol->load(bytes, memory);
+    dol->load(bytes, memory, memory_end);
     return dol->entry;
 }
 
@@ -88,7 +95,12 @@ void hle_boot(Gekko& cpu, Memory& memory, Disc& disc, const HleBootOptions& opti
     memory.write32(phys(0x80000024), 1);  // version (WiiBrew: "set by the apploader", 1)
     // The FST goes at the top of MEM1, 32-byte aligned, with room for its maximum size (the
     // size of the largest disc's FST in a multi-disc game); BI2 (0x2000 bytes) right below it.
+    // The header's sizes are only known to fit in the file (Disc::open), so check they fit
+    // in MEM1 above the low globals, with BI2, before computing any address from them.
     const std::uint32_t fst_room = std::max(disc.fst_size(), disc.fst_max_size());
+    if (std::uint64_t{fst_room} + 0x1F + Disc::kBi2Size > kMem1Top - kLowMemoryEnd)
+        throw std::runtime_error("hle_boot: the disc's FST size (" + std::to_string(fst_room) +
+                                 " bytes) does not fit in MEM1");
     const std::uint32_t fst = (kMem1Top - fst_room) & ~0x1Fu;
     const std::uint32_t bi2_copy = fst - Disc::kBi2Size;
     if (!disc.read(disc.fst_offset(), mem1.subspan(phys(fst), disc.fst_size())))
@@ -112,7 +124,8 @@ void hle_boot(Gekko& cpu, Memory& memory, Disc& disc, const HleBootOptions& opti
     memory.write32(phys(0x80000030), 0);
     memory.write32(phys(0x80000034), bi2_copy);
 
-    const std::uint32_t entry = load_dol(memory, disc);
+    // The DOL must stay below BI2 and the FST (and inside MEM1).
+    const std::uint32_t entry = load_dol(memory, disc, phys(bi2_copy));
 
     // --- CPU registers as the IPL leaves them (Dolphin's SetupMSR/SetupHID/SetupBAT) ---
     // MSR = 0x00002032: FP, IR, DR, RI (exception vectors at 0: IP clear).

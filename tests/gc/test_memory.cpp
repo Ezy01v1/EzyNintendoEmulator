@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "gc/gekko/gekko.hpp"
@@ -128,19 +129,56 @@ TEST_CASE("the write-gather pipe takes writes of every size in big-endian order"
     CHECK_THROWS_AS(memory.read32(0x0C008000), BusError);  // write-only
 }
 
-TEST_CASE("the locked cache is 16 KiB at physical 0xE0000000") {
+TEST_CASE("the locked cache is 16 KiB at physical 0xE0000000 while HID2[LCE] is set") {
     Memory memory;
+    CHECK_FALSE(memory.locked_cache_enabled());
+    CHECK_THROWS_AS(memory.read32(0xE0000000), BusError);  // off at power-on
+    CHECK_THROWS_AS(memory.write8(0xE0003FFF, 1), BusError);
+
+    memory.set_locked_cache_enabled(true);
     memory.write32(0xE0000000, 0xCAFEBABE);
     memory.write64(0xE0003FF8, 0x1122334455667788ull);
     CHECK(memory.read32(0xE0000000) == 0xCAFEBABE);
     CHECK(memory.read8(0xE0003FFF) == 0x88);
     CHECK(memory.read32(0x00000000) == 0);  // separate from MEM1
+    CHECK_THROWS_AS(memory.read32(0xE0004000), BusError);
+
+    // Disabled again: unmapped like any address (the contents stay for the next enable).
+    memory.set_locked_cache_enabled(false);
+    try {
+        (void)memory.read32(0xE0000000);
+        FAIL("expected BusError");
+    } catch (const BusError& e) {
+        CHECK(e.word_or_address == 0xE0000000);
+        CHECK(std::string(e.what()).find("LCE") != std::string::npos);
+    }
+    memory.set_locked_cache_enabled(true);
+    CHECK(memory.read32(0xE0000000) == 0xCAFEBABE);
+}
+
+TEST_CASE("HID2 writes and reset tell the bus whether the locked cache exists") {
+    Memory memory;
+    Gekko cpu(memory);
+    CHECK_FALSE(memory.locked_cache_enabled());
+    cpu.set_msr(0);
+    cpu.set_gpr(3, Gekko::kHid2Lce | Gekko::kHid2Lsqe);
+    memory.write32(0x3000, ppc::mtspr(ezy::gc::spr::kHid2, 3));
+    cpu.set_pc(0x3000);
+    cpu.step();
+    CHECK(memory.locked_cache_enabled());
+    cpu.set_spr(ezy::gc::spr::kHid2, 0xE0000000);  // the boot value: LCE clear
+    CHECK_FALSE(memory.locked_cache_enabled());
+    cpu.set_spr(ezy::gc::spr::kHid2, Gekko::kHid2Lce);
+    CHECK(memory.locked_cache_enabled());
+    cpu.reset();
+    CHECK_FALSE(memory.locked_cache_enabled());
 }
 
 TEST_CASE("mtspr DMAL moves locked-cache lines to and from MEM1") {
     Memory memory;
     Gekko cpu(memory);
     cpu.set_msr(0);
+    cpu.set_spr(ezy::gc::spr::kHid2, Gekko::kHid2Lce);
     using namespace ppc;
     for (std::uint32_t i = 0; i < 0x40; i += 4) memory.write32(0x10000 + i, 0xA0000000 | i);
 
@@ -159,7 +197,7 @@ TEST_CASE("mtspr DMAL moves locked-cache lines to and from MEM1") {
     cpu.step();
     for (std::uint32_t i = 0; i < 0x40; i += 4) CHECK(memory.read32(0xE0000100 + i) == (0xA0000000 | i));
     CHECK(memory.read32(0xE0000140) == 0);  // only 2 lines
-    CHECK((cpu.spr(ezy::gc::spr::kDmaL) & 3) == 0);  // T and F read back clear
+    CHECK((cpu.spr(ezy::gc::spr::kDmaL) & 2) == 0);  // T reads back clear
 
     // Store 1 line back to MEM1 0x20000 (LD = 0), through set_spr.
     cpu.set_spr(ezy::gc::spr::kDmaU, 0x00020000);
@@ -176,6 +214,53 @@ TEST_CASE("mtspr DMAL moves locked-cache lines to and from MEM1") {
     CHECK(memory.read32(0xE0001000) == 1);
     CHECK(memory.read32(0xE0001FFC) == 0xFFD);
     CHECK(memory.read32(0xE0002000) == 0);
+
+    // F (flush the queue) is stored; only T clears, as in Dolphin.
+    cpu.set_spr(ezy::gc::spr::kDmaL, 0xE0000100 | (1 << 2) | 0x10 | 0x3);
+    CHECK((cpu.spr(ezy::gc::spr::kDmaL) & 3) == 1);
+
+    // The last line of the cache is in range; two lines from there are not, and nothing moves.
+    memory.write32(0x40000, 0x5A5A5A5A);
+    cpu.set_spr(ezy::gc::spr::kDmaU, 0x00040000);
+    cpu.set_spr(ezy::gc::spr::kDmaL, 0xE0003FE0 | (1 << 2) | 0x10 | 0x2);
+    CHECK(memory.read32(0xE0003FE0) == 0x5A5A5A5A);
+    memory.write32(0xE0003FE0, 0);
+    try {
+        cpu.set_spr(ezy::gc::spr::kDmaL, 0xE0003FE0 | (2 << 2) | 0x10 | 0x2);
+        FAIL("expected BusError");
+    } catch (const BusError& e) {
+        CHECK(e.word_or_address == 0xE0003FE0);
+    }
+    CHECK(memory.read32(0xE0003FE0) == 0);
+    CHECK_THROWS_AS(cpu.set_spr(ezy::gc::spr::kDmaL, 0xD0000000 | (1 << 2) | 0x10 | 0x2), BusError);
+}
+
+TEST_CASE("a locked-cache DMA with HID2[LCE] clear stops like an unmapped access") {
+    Memory memory;
+    Gekko cpu(memory);
+    cpu.set_msr(0);
+    cpu.set_spr(ezy::gc::spr::kHid2, Gekko::kHid2Lce);
+    memory.write32(0xE0000000, 0x11111111);
+    memory.write32(0x10000, 0x22222222);
+    cpu.set_spr(ezy::gc::spr::kHid2, 0);  // LCE clear
+    cpu.set_spr(ezy::gc::spr::kDmaU, 0x00010000);
+    // Memory to cache, from executing code: BusError with the mtspr's pc and the cache address.
+    cpu.set_gpr(4, 0xE0000000 | (1 << 2) | 0x10 | 0x2);
+    memory.write32(0x3000, ppc::mtspr(ezy::gc::spr::kDmaL, 4));
+    cpu.set_pc(0x3000);
+    try {
+        cpu.step();
+        FAIL("expected BusError");
+    } catch (const BusError& e) {
+        CHECK(e.pc_known);
+        CHECK(e.pc == 0x3000);
+        CHECK(e.word_or_address == 0xE0000000);
+    }
+    // Cache to memory: nothing is written to MEM1.
+    CHECK_THROWS_AS(cpu.set_spr(ezy::gc::spr::kDmaL, 0xE0000000 | (1 << 2) | 0x2), BusError);
+    CHECK(memory.read32(0x10000) == 0x22222222);
+    memory.set_locked_cache_enabled(true);
+    CHECK(memory.read32(0xE0000000) == 0x11111111);  // nor to the cache
 }
 
 TEST_CASE("a bus error from executing code reports that instruction's pc") {

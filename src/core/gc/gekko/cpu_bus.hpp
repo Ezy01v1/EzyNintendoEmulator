@@ -21,6 +21,11 @@ public:
     virtual void write16(std::uint32_t paddr, std::uint16_t value) = 0;
     virtual void write32(std::uint32_t paddr, std::uint32_t value) = 0;
     virtual void write64(std::uint32_t paddr, std::uint64_t value) = 0;
+
+    // HID2[LCE] changed: the 16 KiB locked cache at physical 0xE0000000 exists only while it is
+    // set (750CL manual; design, "Memoria y bus"). The Gekko calls this on every HID2 write
+    // and on reset. A bus without a locked cache ignores it.
+    virtual void set_locked_cache_enabled(bool /*enabled*/) {}
 };
 
 }  // namespace ezy::gc

@@ -94,6 +94,7 @@ void Gekko::reset() {
     // so the HLE boot (Task 3) must set them like the IPL does: Dolphin's Boot_BS2Emu.cpp
     // SetupHID uses HID0 = 0x0011C464 (ICE and DCE on) and HID2 = 0xE0000000 (LSQE, WPE, PSE).
     set_pc(0xFFF00000 | static_cast<std::uint32_t>(Exception::SystemReset));
+    bus_.set_locked_cache_enabled(false);  // HID2[LCE] = 0: no locked cache
 }
 
 int Gekko::step() {
@@ -331,10 +332,14 @@ bool Gekko::try_write_spr(int number, std::uint32_t value) {
     case spr::kHid0: s_.hid0 = value & ~(kHid0Icfi | kHid0Dcfi); return true;
     // HID1 (the PLL configuration, read-only on hardware): accepted, no effect.
     case spr::kHid1: s_.hid1 = value; return true;
-    // HID2: LCE (dcbz_l) and LSQE (psq_l/psq_st) are read. PSE (paired singles enabled) is
-    // accepted, no effect, like Dolphin, which runs paired singles whatever it says; WPE and
-    // the locked-cache DMA bits belong to the memory map (write-gather pipe, DMA).
-    case spr::kHid2: s_.hid2 = value; return true;
+    // HID2: LCE (dcbz_l; and the bus maps the locked cache only while it is set, so every
+    // write tells it) and LSQE (psq_l/psq_st) are read. PSE (paired singles enabled) is
+    // accepted, no effect, like Dolphin, which runs paired singles whatever it says. WPE (the
+    // write-gather pipe) and the DMA queue/error bits are stored only.
+    case spr::kHid2:
+        s_.hid2 = value;
+        bus_.set_locked_cache_enabled((value & kHid2Lce) != 0);
+        return true;
     case spr::kHid4: s_.hid4 = value; return true;  // accepted, no effect
     case spr::kWpar: s_.wpar = value; return true;  // the write-gather pipe address: stored only
     case spr::kDmaU: s_.dmau = value; return true;
@@ -358,20 +363,31 @@ bool Gekko::try_write_spr(int number, std::uint32_t value) {
 // Dolphin). DMAU: MEM_ADDR (bits 5-31, a physical address, as the SDK's LCLoadBlocks masks it)
 // | LEN_U (bits 0-4). DMAL: LC_ADDR (bits 5-31, in the locked cache at 0xE0000000) | LD
 // (bit 4: 1 = memory to cache) | LEN_L (bits 2-3) | T (bit 1: trigger) | F (bit 0: flush).
-// Lines = LEN_U << 2 | LEN_L, 0 meaning 128. T and F read back as 0 afterwards. Both
-// addresses are physical bus addresses (Memory maps the cache at 0xE0000000), so an address
-// outside MEM1 or the cache throws BusError.
+// Lines = LEN_U << 2 | LEN_L, 0 meaning 128. T reads back as 0 afterwards (Dolphin clears
+// only T; F, which would cancel queued DMAs, has nothing to cancel here and is stored).
+//
+// The cache side must lie inside the 16 KiB cache (0xE0000000-0xE0003FFF), checked before
+// anything moves: BusError otherwise (Dolphin masks the index instead; stopping says more).
+// Both sides go through the bus, so a memory address with nothing behind it, or HID2[LCE]
+// clear (the bus then has no cache), throws the same BusError as any unmapped access. The
+// whole source is read before the first write, so a failing DMA moves nothing.
 void Gekko::locked_cache_dma() {
     if ((s_.dmal & 2) == 0) return;
+    constexpr std::uint32_t kCacheBase = 0xE0000000, kCacheSize = 0x4000;
     const std::uint32_t memory = s_.dmau & ~0x1Fu, cache = s_.dmal & ~0x1Fu;
     std::uint32_t lines = ((s_.dmau & 0x1F) << 2) | ((s_.dmal >> 2) & 3);
     if (lines == 0) lines = 128;
+    const std::uint32_t bytes = lines * 32;
+    if (cache < kCacheBase || cache - kCacheBase > kCacheSize - bytes)
+        throw BusError("locked-cache DMA of " + std::to_string(bytes) + " bytes at " + hex32(cache) +
+                           " runs outside the locked cache",
+                       cache);
     const bool to_cache = (s_.dmal & 0x10) != 0;
-    for (std::uint32_t i = 0; i < lines * 32; i += 8) {
-        if (to_cache) bus_.write64(cache + i, bus_.read64(memory + i));
-        else bus_.write64(memory + i, bus_.read64(cache + i));
-    }
-    s_.dmal &= ~3u;
+    const std::uint32_t from = to_cache ? memory : cache, to = to_cache ? cache : memory;
+    std::array<std::uint64_t, 128 * 32 / 8> buffer{};
+    for (std::uint32_t i = 0; i < bytes / 8; ++i) buffer[i] = bus_.read64(from + i * 8);
+    for (std::uint32_t i = 0; i < bytes / 8; ++i) bus_.write64(to + i * 8, buffer[i]);
+    s_.dmal &= ~2u;
 }
 
 std::uint32_t Gekko::spr(int number) const {

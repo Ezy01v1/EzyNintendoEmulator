@@ -5,6 +5,7 @@
 #include <string>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <vector>
 
 #include "disc_builder.hpp"
@@ -40,7 +41,8 @@ std::vector<std::uint8_t> read_all(Disc& disc, std::uint64_t offset, std::uint32
 
 TEST_CASE("Disc reads the header, game id, DOL and FST offsets") {
     DiscBuilder builder;
-    const auto disc = Disc::open(builder.write("header"));
+    const auto image = builder.write("header");
+    const auto disc = Disc::open(image);
     REQUIRE(disc != nullptr);
     CHECK(disc->game_id() == "GTST01");
     CHECK(disc->dol_offset() == DiscBuilder::kDolOffset);
@@ -77,8 +79,7 @@ TEST_CASE("Disc rejects a file without the GameCube magic") {
     CHECK(Disc::open(bad_fst.write("badfst")) == nullptr);
 
     // Too short to hold a header, and a missing file.
-    const auto tiny = std::filesystem::temp_directory_path() / "ezy_gc_tiny.iso";
-    { std::ofstream(tiny, std::ios::binary) << "GTST01"; }
+    const TempImage tiny("tiny", {'G', 'T', 'S', 'T', '0', '1'});
     CHECK(Disc::open(tiny) == nullptr);
     CHECK(Disc::open(std::filesystem::temp_directory_path() / "ezy_gc_does_not_exist.iso") == nullptr);
 }
@@ -105,7 +106,7 @@ TEST_CASE("Dol loads text and data sections and clears BSS") {
     Memory memory;
     // Garbage where the BSS and the sections go.
     for (std::uint32_t a = 0x3000; a < 0x5200; a += 4) memory.write32(a, 0xCCCCCCCC);
-    dol->load(bytes, memory);
+    dol->load(bytes, memory, Memory::kMem1Size);
     const auto program = DiscBuilder::program();
     for (std::size_t i = 0; i < program.size(); ++i)
         CHECK(memory.read32(phys(DiscBuilder::kTextAddress) + static_cast<std::uint32_t>(i * 4)) == program[i]);
@@ -121,9 +122,31 @@ TEST_CASE("Dol loads text and data sections and clears BSS") {
     Dol overlapping = *dol;
     overlapping.bss_address = DiscBuilder::kDataAddress;
     overlapping.bss_size = 0x100;
-    overlapping.load(bytes, memory);
+    overlapping.load(bytes, memory, Memory::kMem1Size);
     CHECK(memory.read32(phys(DiscBuilder::kDataAddress)) == DiscBuilder::kDataWord);
     CHECK(memory.read32(phys(DiscBuilder::kDataAddress) + 0x20) == 0);
+
+    // Targets outside memory are refused before anything is written: a section at the
+    // write-gather pipe's address, one ending past memory_end, a physical (not 0x8...) address,
+    // a BSS past MEM1. The BSS garbage below stays.
+    for (std::uint32_t a = 0; a < DiscBuilder::kBssSize; a += 4)
+        memory.write32(phys(DiscBuilder::kBssAddress) + a, 0xCCCCCCCC);
+    const auto refused = [&](const Dol& changed, std::uint32_t memory_end) {
+        CHECK_THROWS_AS(changed.load(bytes, memory, memory_end), std::runtime_error);
+        CHECK(memory.read32(phys(DiscBuilder::kBssAddress)) == 0xCCCCCCCC);
+    };
+    Dol wild = *dol;
+    wild.sections[1].address = 0x8C008000;
+    refused(wild, Memory::kMem1Size);
+    refused(*dol, phys(DiscBuilder::kBssAddress) + DiscBuilder::kBssSize - 1);  // BSS 1 byte past the end
+    wild = *dol;
+    wild.sections[0].address = 0x00003100;
+    refused(wild, Memory::kMem1Size);
+    wild = *dol;
+    wild.bss_address = 0x817FFF80;
+    refused(wild, Memory::kMem1Size);
+    dol->load(bytes, memory, phys(DiscBuilder::kBssAddress) + DiscBuilder::kBssSize);  // exactly at the end
+    CHECK(memory.read32(phys(DiscBuilder::kBssAddress)) == 0);
 
     // Malformed DOLs.
     CHECK_FALSE(Dol::parse(std::span<const std::uint8_t>(bytes.data(), 0xFF)).has_value());  // short header
@@ -136,7 +159,8 @@ TEST_CASE("Dol loads text and data sections and clears BSS") {
 
 TEST_CASE("hle_boot sets the low-memory globals, BATs, MSR, r1 and pc") {
     DiscBuilder builder;
-    auto disc = Disc::open(builder.write("boot"));
+    const auto image = builder.write("boot");
+    auto disc = Disc::open(image);
     REQUIRE(disc != nullptr);
     Memory memory;
     Gekko cpu(memory);
@@ -197,10 +221,53 @@ TEST_CASE("hle_boot sets the low-memory globals, BATs, MSR, r1 and pc") {
     CHECK(cpu.translate(0xCC002000, false, true) == 0x0C002000u);
 }
 
+TEST_CASE("hle_boot refuses an FST or a DOL that does not fit in MEM1") {
+    const auto boot_throws = [](const DiscBuilder& builder) {
+        const auto image = builder.write("refused");
+        auto disc = Disc::open(image);
+        REQUIRE(disc != nullptr);  // the file itself is fine
+        Memory memory;
+        Gekko cpu(memory);
+        CHECK_THROWS_AS(ezy::gc::hle_boot(cpu, memory, *disc), std::runtime_error);
+    };
+    // An FST maximum size in the header that cannot fit in MEM1 above the low globals with BI2.
+    for (const std::uint32_t max_size : {0xFFFFFFFFu, 0x01800001u, 0x01800000u - 0x3100u - 0x2000u}) {
+        CAPTURE(max_size);
+        DiscBuilder builder;
+        builder.put32(0x42C, max_size);
+        boot_throws(builder);
+    }
+    // The largest that fits: BI2 lands at or above the end of the low globals.
+    {
+        DiscBuilder builder;
+        builder.put32(0x42C, 0x01800000u - 0x3100u - 0x2000u - 0x20u);
+        const auto image = builder.write("maxfst");
+        auto disc = Disc::open(image);
+        REQUIRE(disc != nullptr);
+        Memory memory;
+        Gekko cpu(memory);
+        CHECK_THROWS_AS(ezy::gc::hle_boot(cpu, memory, *disc), std::runtime_error);  // the DOL is under it now
+        CHECK(memory.read32(phys(0x800000F4)) >= 0x80003100u);
+    }
+    // A DOL section over the FST/BI2 area at the top of MEM1.
+    {
+        DiscBuilder builder;
+        builder.put32(DiscBuilder::kDolOffset + 0x64, 0x817FE000);  // data0 address
+        boot_throws(builder);
+    }
+    // A DOL whose sections run past the end of the disc.
+    {
+        DiscBuilder builder;
+        builder.put32(DiscBuilder::kDolOffset + 0xAC, DiscBuilder::kImageSize);  // data0 size
+        boot_throws(builder);
+    }
+}
+
 TEST_CASE("hle_boot writes the boot time and the PAL video mode") {
     DiscBuilder builder;
     builder.put32(0x458, 2);  // BI2 region: PAL
-    auto disc = Disc::open(builder.write("pal"));
+    const auto image = builder.write("pal");
+    auto disc = Disc::open(image);
     REQUIRE(disc != nullptr);
     Memory memory;
     Gekko cpu(memory);
@@ -211,7 +278,8 @@ TEST_CASE("hle_boot writes the boot time and the PAL video mode") {
 
 TEST_CASE("a boot of the synthetic disc runs its DOL to a known result") {
     DiscBuilder builder;
-    auto disc = Disc::open(builder.write("run"));
+    const auto image = builder.write("run");
+    auto disc = Disc::open(image);
     REQUIRE(disc != nullptr);
     Memory memory;
     Gekko cpu(memory);
@@ -238,9 +306,11 @@ TEST_CASE("an access to an unmapped physical address throws with the address") {
         CHECK_THROWS_AS(memory.read16(address), BusError);
         CHECK_THROWS_AS(memory.write64(address, 0), BusError);
     }
-    // The last bytes of MEM1 and of the locked cache are mapped.
+    // The last bytes of MEM1 and of the locked cache (once HID2[LCE] enables it) are mapped.
     memory.write32(0x017FFFFC, 1);
     CHECK(memory.read32(0x017FFFFC) == 1);
+    CHECK_THROWS_AS(memory.write32(0xE0003FFC, 2), BusError);
+    memory.set_locked_cache_enabled(true);
     memory.write32(0xE0003FFC, 2);
     CHECK(memory.read32(0xE0003FFC) == 2);
 }

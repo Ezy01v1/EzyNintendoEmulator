@@ -36,7 +36,8 @@ Memory::Memory() : mem1_(kMem1Size, 0), locked_cache_(kLockedCacheSize, 0) {}
 
 std::uint8_t* Memory::ram(std::uint32_t paddr, std::uint32_t bytes) {
     if (paddr < kMem1Size && kMem1Size - paddr >= bytes) return mem1_.data() + paddr;
-    if (paddr - kLockedCacheBase < kLockedCacheSize && kLockedCacheBase + kLockedCacheSize - paddr >= bytes)
+    if (locked_cache_enabled_ && paddr - kLockedCacheBase < kLockedCacheSize &&
+        kLockedCacheBase + kLockedCacheSize - paddr >= bytes)
         return locked_cache_.data() + (paddr - kLockedCacheBase);
     return nullptr;
 }
@@ -63,6 +64,8 @@ std::uint64_t Memory::read_io(std::uint32_t paddr, int bytes) {
         throw BusError(std::to_string(bytes * 8) + "-bit read of the hardware register at " + hex32(paddr), paddr);
     }
     if (paddr - kPipeBase < kPipeSize) throw BusError("read of the write-gather pipe at " + hex32(paddr), paddr);
+    if (!locked_cache_enabled_ && paddr - kLockedCacheBase < kLockedCacheSize)
+        throw BusError("access to the locked cache at " + hex32(paddr) + " while HID2[LCE] is clear", paddr);
     throw BusError(std::to_string(bytes * 8) + "-bit read of the unmapped physical address " + hex32(paddr), paddr);
 }
 
@@ -84,6 +87,8 @@ void Memory::write_io(std::uint32_t paddr, std::uint64_t value, int bytes) {
         pipe_->write(std::span<const std::uint8_t>(data, static_cast<std::size_t>(bytes)));
         return;
     }
+    if (!locked_cache_enabled_ && paddr - kLockedCacheBase < kLockedCacheSize)
+        throw BusError("access to the locked cache at " + hex32(paddr) + " while HID2[LCE] is clear", paddr);
     throw BusError(std::to_string(bytes * 8) + "-bit write of the unmapped physical address " + hex32(paddr), paddr);
 }
 

@@ -10,9 +10,29 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "ppc_asm.hpp"
+
+// A file in the temp directory holding `bytes`, removed on destruction (the tests leave
+// nothing behind). Declare it before the Disc that opens it, so the Disc closes it first.
+struct TempImage {
+    std::filesystem::path path;
+
+    TempImage(std::string_view name, const std::vector<std::uint8_t>& bytes)
+        : path(std::filesystem::temp_directory_path() / (std::string("ezy_gc_") + std::string(name) + ".iso")) {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    TempImage(const TempImage&) = delete;
+    TempImage& operator=(const TempImage&) = delete;
+    ~TempImage() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+    operator const std::filesystem::path&() const { return path; }
+};
 
 struct DiscBuilder {
     // Where the pieces go in the image.
@@ -98,11 +118,7 @@ struct DiscBuilder {
 
     static constexpr std::uint32_t fst_size() { return 0x18 + 10; }
 
-    // Writes the image to a temp file and returns its path.
-    std::filesystem::path write(std::string_view name) const {
-        const auto path = std::filesystem::temp_directory_path() / (std::string("ezy_gc_") + std::string(name) + ".iso");
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        out.write(reinterpret_cast<const char*>(image.data()), static_cast<std::streamsize>(image.size()));
-        return path;
-    }
+    // Writes the image to a temp file, deleted when the returned object goes away. Keep it
+    // alive (named) for as long as a Disc has the file open.
+    [[nodiscard]] TempImage write(std::string_view name) const { return TempImage(name, image); }
 };

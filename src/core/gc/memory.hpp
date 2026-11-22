@@ -16,13 +16,15 @@ namespace ezy::gc {
 //                          0xC0000000 uncached)
 //   0x0C000000-0x0C006FFF  the hardware registers, one MmioHandler per block (MmioBlock)
 //   0x0C008000-0x0C008FFF  the write-gather pipe (writes only)
-//   0xE0000000-0xE0003FFF  the locked cache, 16 KiB
+//   0xE0000000-0xE0003FFF  the locked cache, 16 KiB, only while HID2[LCE] is set
 // Anything else throws BusError with the address (as does an MMIO block nobody registered),
 // so an access the emulator does not model stops it instead of reading 0. Not mapped yet:
 // the EFB (0x08000000) and the IPL ROM (0xFFF00000), which the HLE boot does not need.
 //
-// The locked cache is always reachable here, whatever HID2[LCE] says (Dolphin maps it the
-// same way); the SDK only touches it after enabling it. MEM1 is not mirrored.
+// The locked cache follows HID2[LCE] (design: "cuando HID2 la activa"): the Gekko reports
+// every change through set_locked_cache_enabled(), and while LCE is clear the range is
+// unmapped like any other address. Its contents survive a disable. (Dolphin maps it always;
+// stopping on a disabled access says more.) MEM1 is not mirrored.
 class Memory final : public CpuBus {
 public:
     static constexpr std::uint32_t kMem1Size = 0x01800000;
@@ -57,6 +59,8 @@ public:
     void write16(std::uint32_t paddr, std::uint16_t value) override;
     void write32(std::uint32_t paddr, std::uint32_t value) override;
     void write64(std::uint32_t paddr, std::uint64_t value) override;
+    void set_locked_cache_enabled(bool enabled) override { locked_cache_enabled_ = enabled; }
+    [[nodiscard]] bool locked_cache_enabled() const { return locked_cache_enabled_; }
 
 private:
     // The RAM a physical range of `bytes` falls in (MEM1 or the locked cache), or nullptr.
@@ -72,6 +76,7 @@ private:
     std::vector<std::uint8_t> locked_cache_;
     std::array<MmioHandler*, kMmioBlockCount> mmio_{};
     WriteGatherPipe* pipe_ = nullptr;
+    bool locked_cache_enabled_ = false;  // HID2[LCE], as the Gekko last reported it
 };
 
 }  // namespace ezy::gc

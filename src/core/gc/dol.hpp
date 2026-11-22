@@ -34,11 +34,15 @@ struct Dol {
 
     // Clears the BSS range, then copies every section, into `bus` at physical address =
     // virtual & 0x3FFFFFFF (the boot BATs' view: 0x80000000 cached and 0xC0000000 uncached
-    // both map physical 0; MEM1 is never past 0x3FFFFFFF). The BSS goes first because
-    // linkers put small-data sections (.sdata, .sdata2) inside the BSS range, as MKDD's DOL
-    // does; the crt0 clears only the real BSS parts itself. A target outside the bus's memory
-    // throws BusError. `bytes` is the image parse() was given.
-    void load(std::span<const std::uint8_t> bytes, CpuBus& bus) const;
+    // both map physical 0). The BSS goes first because linkers put small-data sections
+    // (.sdata, .sdata2) inside the BSS range, as MKDD's DOL does; the crt0 clears only the
+    // real BSS parts itself. `bytes` is the image parse() was given.
+    //
+    // Every target (each section and the BSS) must be a 0x8xxxxxxx/0xCxxxxxxx address whose
+    // physical range ends at or below `memory_end` (MEM1's size, or less when the caller keeps
+    // the top for something else: the HLE boot's FST and BI2). This is checked for all of them
+    // before anything is written; std::runtime_error otherwise, with nothing changed.
+    void load(std::span<const std::uint8_t> bytes, CpuBus& bus, std::uint32_t memory_end) const;
 
     std::uint32_t entry = 0;
     std::vector<DolSection> sections;

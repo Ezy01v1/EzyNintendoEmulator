@@ -1,5 +1,8 @@
 #include "gc/dol.hpp"
 
+#include <cstdio>
+#include <stdexcept>
+
 namespace ezy::gc {
 
 namespace {
@@ -49,7 +52,19 @@ std::optional<Dol> Dol::parse(std::span<const std::uint8_t> bytes) {
     return dol;
 }
 
-void Dol::load(std::span<const std::uint8_t> bytes, CpuBus& bus) const {
+void Dol::load(std::span<const std::uint8_t> bytes, CpuBus& bus, std::uint32_t memory_end) const {
+    const auto check = [memory_end](const char* what, std::uint32_t address, std::uint32_t size) {
+        if (size == 0) return;
+        if ((address & 0x80000000) == 0 || std::uint64_t{physical(address)} + size > memory_end) {
+            char text[128];
+            std::snprintf(text, sizeof(text), "DOL %s at 0x%08X (0x%X bytes) is outside memory (ends at 0x%08X)", what,
+                          address, size, memory_end);
+            throw std::runtime_error(text);
+        }
+    };
+    check("BSS", bss_address, bss_size);
+    for (const DolSection& section : sections) check(section.text ? "text section" : "data section", section.address, section.size);
+
     const std::uint32_t bss = physical(bss_address);
     for (std::uint32_t i = 0; i < bss_size; ++i) bus.write8(bss + i, 0);
     for (const DolSection& section : sections) {
