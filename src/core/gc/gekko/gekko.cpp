@@ -1,0 +1,333 @@
+#include "gc/gekko/gekko.hpp"
+
+#include <cstdio>
+
+#include "gc/gekko/gekko_ops.hpp"
+
+namespace ezy::gc {
+
+namespace {
+
+// Thrown by Gekko::raise() to end the executing instruction once its exception has been
+// entered; caught only by step(). Not a std::exception, so nothing else catches it.
+struct InstructionAborted {};
+
+std::string hex32(std::uint32_t value) {
+    char text[11];
+    std::snprintf(text, sizeof(text), "0x%08X", value);
+    return text;
+}
+
+enum class BatResult { Hit, Miss, Protection };
+
+// The 4 BAT pairs of one side (PEM 7.4). BATU: BEPI (bits 0-14), BL (19-29: block size mask
+// in 128 KiB units), Vs (30), Vp (31). BATL: BRPN (0-14), WIMG (25-28), PP (30-31).
+BatResult bat_lookup(const std::array<std::uint32_t, 8>& bats, bool user, std::uint32_t ea, bool write,
+                     std::uint32_t& paddr) {
+    for (std::size_t i = 0; i < bats.size(); i += 2) {
+        const std::uint32_t upper = bats[i], lower = bats[i + 1];
+        if ((upper & (user ? 1u : 2u)) == 0) continue;
+        const std::uint32_t mask = 0xFFFE0000 & ~(((upper >> 2) & 0x7FF) << 17);
+        if ((ea & mask) != (upper & mask)) continue;
+        // PP: 00 no access, 01 and 11 read-only, 10 read/write.
+        const std::uint32_t pp = lower & 3;
+        if (pp == 0 || (write && (pp & 1) != 0)) return BatResult::Protection;
+        paddr = (lower & mask) | (ea & ~mask);
+        return BatResult::Hit;
+    }
+    return BatResult::Miss;
+}
+
+[[noreturn]] void op_unimplemented(Gekko& cpu, std::uint32_t word) { cpu.unimplemented(word); }
+
+void op_table4(Gekko& cpu, std::uint32_t word) { gekko_decode_tables().op4[ppc_fields::xo10(word)](cpu, word); }
+void op_table19(Gekko& cpu, std::uint32_t word) { gekko_decode_tables().op19[ppc_fields::xo10(word)](cpu, word); }
+void op_table31(Gekko& cpu, std::uint32_t word) { gekko_decode_tables().op31[ppc_fields::xo10(word)](cpu, word); }
+void op_table59(Gekko& cpu, std::uint32_t word) { gekko_decode_tables().op59[ppc_fields::xo10(word)](cpu, word); }
+void op_table63(Gekko& cpu, std::uint32_t word) { gekko_decode_tables().op63[ppc_fields::xo10(word)](cpu, word); }
+
+GekkoDecodeTables build_tables() {
+    GekkoDecodeTables t;
+    t.primary.fill(op_unimplemented);
+    t.op4.fill(op_unimplemented);
+    t.op19.fill(op_unimplemented);
+    t.op31.fill(op_unimplemented);
+    t.op59.fill(op_unimplemented);
+    t.op63.fill(op_unimplemented);
+    t.primary[4] = op_table4;
+    t.primary[19] = op_table19;
+    t.primary[31] = op_table31;
+    t.primary[59] = op_table59;
+    t.primary[63] = op_table63;
+    install_integer_ops(t);
+    return t;
+}
+
+}  // namespace
+
+GekkoError::GekkoError(const std::string& what, std::uint32_t pc_, std::uint32_t word_or_address_)
+    : std::runtime_error("Gekko: " + what + " at pc " + hex32(pc_)), pc(pc_), word_or_address(word_or_address_) {}
+
+const GekkoDecodeTables& gekko_decode_tables() {
+    static const GekkoDecodeTables tables = build_tables();
+    return tables;
+}
+
+Gekko::Gekko(CpuBus& bus) : bus_(bus), tables_(&gekko_decode_tables()) { reset(); }
+
+void Gekko::reset() {
+    s_ = GekkoState{};
+    s_.msr = kMsrIp;  // 750 manual, "Reset settings": MSR = 0x00000040
+    set_pc(0xFFF00000 | static_cast<std::uint32_t>(Exception::SystemReset));
+}
+
+int Gekko::step() {
+    // Interrupts are taken between instructions, external before decrementer (750 manual,
+    // exception priorities).
+    if ((s_.msr & kMsrEe) != 0) {
+        if (s_.external_interrupt) {
+            enter_exception(Exception::External, s_.pc);
+            return 1;
+        }
+        if (s_.decrementer_pending) {
+            s_.decrementer_pending = false;
+            enter_exception(Exception::Decrementer, s_.pc);
+            return 1;
+        }
+    }
+
+    std::uint32_t paddr = s_.pc;
+    if ((s_.msr & kMsrIr) != 0) {
+        switch (bat_lookup(s_.ibat, (s_.msr & kMsrPr) != 0, s_.pc, false, paddr)) {
+        case BatResult::Hit:
+            break;
+        case BatResult::Miss:
+            enter_exception(Exception::Isi, s_.pc, 0x40000000);  // SRR1[1]: no translation
+            return 1;
+        case BatResult::Protection:
+            enter_exception(Exception::Isi, s_.pc, 0x08000000);  // SRR1[4]: protection
+            return 1;
+        }
+    }
+    const std::uint32_t word = bus_.read32(paddr);
+    s_.npc = s_.pc + 4;
+    try {
+        tables_->primary[word >> 26](*this, word);
+    } catch (const InstructionAborted&) {
+        // The instruction raised an exception: npc already points at its vector.
+    }
+    s_.pc = s_.npc;
+    return 1;
+}
+
+void Gekko::advance_timebase(std::uint64_t ticks) {
+    s_.tb += ticks;
+    const auto before = static_cast<std::int32_t>(s_.dec);
+    s_.dec -= static_cast<std::uint32_t>(ticks);
+    // The exception is requested when DEC[0] goes from 0 to 1 (PEM 2.3.14.1).
+    if (before >= 0 && ticks > static_cast<std::uint64_t>(before)) s_.decrementer_pending = true;
+}
+
+std::optional<std::uint32_t> Gekko::translate(std::uint32_t ea, bool instruction, bool write) const {
+    if ((s_.msr & (instruction ? kMsrIr : kMsrDr)) == 0) return ea;
+    std::uint32_t paddr = 0;
+    if (bat_lookup(instruction ? s_.ibat : s_.dbat, (s_.msr & kMsrPr) != 0, ea, write, paddr) != BatResult::Hit)
+        return std::nullopt;
+    return paddr;
+}
+
+std::uint32_t Gekko::data_address(std::uint32_t ea, bool write) {
+    if ((s_.msr & kMsrDr) == 0) return ea;
+    std::uint32_t paddr = 0;
+    const BatResult result = bat_lookup(s_.dbat, (s_.msr & kMsrPr) != 0, ea, write, paddr);
+    if (result == BatResult::Hit) return paddr;
+    s_.dar = ea;
+    s_.dsisr = (result == BatResult::Miss ? kDsisrNoTranslation : kDsisrProtection) | (write ? kDsisrStore : 0);
+    raise(Exception::Dsi);
+}
+
+std::uint8_t Gekko::read8(std::uint32_t ea) { return bus_.read8(data_address(ea, false)); }
+
+std::uint16_t Gekko::read16(std::uint32_t ea) {
+    if ((ea & 1) == 0) return bus_.read16(data_address(ea, false));
+    const std::uint32_t first = data_address(ea, false), second = data_address(ea + 1, false);
+    return static_cast<std::uint16_t>((bus_.read8(first) << 8) | bus_.read8(second));
+}
+
+std::uint32_t Gekko::read32(std::uint32_t ea) {
+    if ((ea & 3) == 0) return bus_.read32(data_address(ea, false));
+    std::uint32_t paddr[4];
+    for (std::uint32_t i = 0; i < 4; ++i) paddr[i] = data_address(ea + i, false);
+    std::uint32_t value = 0;
+    for (const std::uint32_t p : paddr) value = (value << 8) | bus_.read8(p);
+    return value;
+}
+
+std::uint64_t Gekko::read64(std::uint32_t ea) {
+    if ((ea & 7) == 0) return bus_.read64(data_address(ea, false));
+    if ((ea & 3) == 0) {
+        const std::uint32_t high = data_address(ea, false), low = data_address(ea + 4, false);
+        return (static_cast<std::uint64_t>(bus_.read32(high)) << 32) | bus_.read32(low);
+    }
+    std::uint32_t paddr[8];
+    for (std::uint32_t i = 0; i < 8; ++i) paddr[i] = data_address(ea + i, false);
+    std::uint64_t value = 0;
+    for (const std::uint32_t p : paddr) value = (value << 8) | bus_.read8(p);
+    return value;
+}
+
+void Gekko::write8(std::uint32_t ea, std::uint8_t value) { bus_.write8(data_address(ea, true), value); }
+
+// Unaligned stores translate every byte before writing any, so a DSI leaves memory alone.
+void Gekko::write16(std::uint32_t ea, std::uint16_t value) {
+    if ((ea & 1) == 0) return bus_.write16(data_address(ea, true), value);
+    const std::uint32_t first = data_address(ea, true), second = data_address(ea + 1, true);
+    bus_.write8(first, static_cast<std::uint8_t>(value >> 8));
+    bus_.write8(second, static_cast<std::uint8_t>(value));
+}
+
+void Gekko::write32(std::uint32_t ea, std::uint32_t value) {
+    if ((ea & 3) == 0) return bus_.write32(data_address(ea, true), value);
+    std::uint32_t paddr[4];
+    for (std::uint32_t i = 0; i < 4; ++i) paddr[i] = data_address(ea + i, true);
+    for (std::uint32_t i = 0; i < 4; ++i) bus_.write8(paddr[i], static_cast<std::uint8_t>(value >> (24 - 8 * i)));
+}
+
+void Gekko::write64(std::uint32_t ea, std::uint64_t value) {
+    if ((ea & 7) == 0) return bus_.write64(data_address(ea, true), value);
+    if ((ea & 3) == 0) {
+        const std::uint32_t high = data_address(ea, true), low = data_address(ea + 4, true);
+        bus_.write32(high, static_cast<std::uint32_t>(value >> 32));
+        bus_.write32(low, static_cast<std::uint32_t>(value));
+        return;
+    }
+    std::uint32_t paddr[8];
+    for (std::uint32_t i = 0; i < 8; ++i) paddr[i] = data_address(ea + i, true);
+    for (std::uint32_t i = 0; i < 8; ++i) bus_.write8(paddr[i], static_cast<std::uint8_t>(value >> (56 - 8 * i)));
+}
+
+void Gekko::enter_exception(Exception kind, std::uint32_t srr0, std::uint32_t srr1_cause) {
+    // SRR1 keeps MSR bits 0, 5-9 and 16-31 (bits 1-4 and 10-15 hold the cause); the new MSR
+    // clears POW, EE, PR, FP, FE0, SE, BE, FE1, PM, IR, DR and RI, keeps ILE, ME and IP, and
+    // copies ILE into LE (PEM 6.4; the masks are Dolphin's PowerPC.cpp CheckExceptions).
+    s_.srr0 = srr0;
+    s_.srr1 = (s_.msr & 0x87C0FFFF) | srr1_cause;
+    const bool ile = (s_.msr & kMsrIle) != 0;
+    s_.msr = (s_.msr & ~0x0004EF36u & ~kMsrLe) | (ile ? kMsrLe : 0);
+    const std::uint32_t base = (s_.msr & kMsrIp) != 0 ? 0xFFF00000 : 0;
+    s_.pc = s_.npc = base | static_cast<std::uint32_t>(kind);
+}
+
+void Gekko::raise(Exception kind, std::uint32_t srr1_cause) {
+    // sc saves the address after it; every other instruction-caused exception saves the
+    // instruction itself, so the handler can retry it.
+    enter_exception(kind, kind == Exception::Syscall ? s_.pc + 4 : s_.pc, srr1_cause);
+    throw InstructionAborted{};
+}
+
+void Gekko::raise_alignment(std::uint32_t ea, std::uint32_t word) {
+    // DSISR for alignment (PEM 6.4.6): indexed (X-form) instructions give bits 29-30 in
+    // DSISR 15-16, bit 25 in 17 and bits 21-24 in 18-21; D-form ones bit 5 in 17 and bits
+    // 1-4 in 18-21. Then rD/rS in 22-26 and rA in 27-31.
+    const std::uint32_t opcode = word >> 26;
+    std::uint32_t dsisr = 0;
+    if (opcode == 31) {
+        const std::uint32_t xo = (word >> 1) & 0x3FF;
+        dsisr = ((xo & 3) << 15) | (((xo >> 5) & 1) << 14) | (((xo >> 6) & 0xF) << 10);
+    } else {
+        dsisr = ((opcode & 1) << 14) | (((opcode >> 1) & 0xF) << 10);
+    }
+    dsisr |= (((word >> 21) & 31) << 5) | ((word >> 16) & 31);
+    s_.dar = ea;
+    s_.dsisr = dsisr;
+    raise(Exception::Alignment);
+}
+
+void Gekko::unimplemented(std::uint32_t word) const {
+    throw GekkoError("unimplemented instruction " + hex32(word), s_.pc, word);
+}
+
+bool Gekko::try_read_spr(int number, std::uint32_t& value) const {
+    const auto in = [number](int first, int count) { return number >= first && number < first + count; };
+    switch (number) {
+    case spr::kXer: value = s_.xer; return true;
+    case spr::kLr: value = s_.lr; return true;
+    case spr::kCtr: value = s_.ctr; return true;
+    case spr::kDsisr: value = s_.dsisr; return true;
+    case spr::kDar: value = s_.dar; return true;
+    case spr::kDec: value = s_.dec; return true;
+    case spr::kSrr0: value = s_.srr0; return true;
+    case spr::kSrr1: value = s_.srr1; return true;
+    case spr::kTbl:
+    case spr::kTblWrite: value = static_cast<std::uint32_t>(s_.tb); return true;
+    case spr::kTbu:
+    case spr::kTbuWrite: value = static_cast<std::uint32_t>(s_.tb >> 32); return true;
+    case spr::kPvr: value = kPvr; return true;
+    case spr::kHid0: value = s_.hid0; return true;
+    case spr::kHid1: value = s_.hid1; return true;
+    case spr::kHid2: value = s_.hid2; return true;
+    case spr::kHid4: value = s_.hid4; return true;
+    case spr::kWpar: value = s_.wpar; return true;
+    case spr::kDmaU: value = s_.dmau; return true;
+    case spr::kDmaL: value = s_.dmal; return true;
+    case spr::kL2cr: value = s_.l2cr; return true;
+    default: break;
+    }
+    if (in(spr::kSprg0, 4)) value = s_.sprg[static_cast<std::size_t>(number - spr::kSprg0)];
+    else if (in(spr::kIbat0u, 8)) value = s_.ibat[static_cast<std::size_t>(number - spr::kIbat0u)];
+    else if (in(spr::kDbat0u, 8)) value = s_.dbat[static_cast<std::size_t>(number - spr::kDbat0u)];
+    else if (in(spr::kGqr0, 8)) value = s_.gqr[static_cast<std::size_t>(number - spr::kGqr0)];
+    else return false;
+    return true;
+}
+
+bool Gekko::try_write_spr(int number, std::uint32_t value) {
+    const auto in = [number](int first, int count) { return number >= first && number < first + count; };
+    switch (number) {
+    case spr::kXer: s_.xer = value & kXerMask; return true;
+    case spr::kLr: s_.lr = value; return true;
+    case spr::kCtr: s_.ctr = value; return true;
+    case spr::kDsisr: s_.dsisr = value; return true;
+    case spr::kDar: s_.dar = value; return true;
+    case spr::kDec:
+        // A write that sets DEC[0] from 0 to 1 requests the exception too (PEM 2.3.14.1;
+        // Dolphin's mtspr does the same).
+        if ((s_.dec & 0x80000000) == 0 && (value & 0x80000000) != 0) s_.decrementer_pending = true;
+        s_.dec = value;
+        return true;
+    case spr::kSrr0: s_.srr0 = value; return true;
+    case spr::kSrr1: s_.srr1 = value; return true;
+    case spr::kTblWrite: s_.tb = (s_.tb & 0xFFFFFFFF00000000ULL) | value; return true;
+    case spr::kTbuWrite: s_.tb = (s_.tb & 0xFFFFFFFFULL) | (static_cast<std::uint64_t>(value) << 32); return true;
+    case spr::kHid0: s_.hid0 = value; return true;
+    case spr::kHid1: s_.hid1 = value; return true;
+    case spr::kHid2: s_.hid2 = value; return true;
+    case spr::kHid4: s_.hid4 = value; return true;
+    case spr::kWpar: s_.wpar = value; return true;  // the write-gather pipe address: stored only
+    case spr::kDmaU: s_.dmau = value; return true;  // locked-cache DMA: stored only (the DMA
+    case spr::kDmaL: s_.dmal = value; return true;  // itself belongs to the memory map)
+    case spr::kL2cr: s_.l2cr = value; return true;
+    default: break;
+    }
+    if (in(spr::kSprg0, 4)) s_.sprg[static_cast<std::size_t>(number - spr::kSprg0)] = value;
+    else if (in(spr::kIbat0u, 8)) s_.ibat[static_cast<std::size_t>(number - spr::kIbat0u)] = value;
+    else if (in(spr::kDbat0u, 8)) s_.dbat[static_cast<std::size_t>(number - spr::kDbat0u)] = value;
+    else if (in(spr::kGqr0, 8)) s_.gqr[static_cast<std::size_t>(number - spr::kGqr0)] = value;
+    else return false;  // unknown, or read-only (PVR, TBL/TBU's read numbers)
+    return true;
+}
+
+std::uint32_t Gekko::spr(int number) const {
+    std::uint32_t value = 0;
+    if (!try_read_spr(number, value))
+        throw GekkoError("unknown SPR " + std::to_string(number), s_.pc, static_cast<std::uint32_t>(number));
+    return value;
+}
+
+void Gekko::set_spr(int number, std::uint32_t value) {
+    if (!try_write_spr(number, value))
+        throw GekkoError("unknown or read-only SPR " + std::to_string(number), s_.pc,
+                         static_cast<std::uint32_t>(number));
+}
+
+}  // namespace ezy::gc
