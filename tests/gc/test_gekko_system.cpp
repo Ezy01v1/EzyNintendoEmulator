@@ -266,10 +266,11 @@ TEST_CASE("sc, rfi, mtmsr, mfspr and mtspr of HID, SPRG, BAT, DEC, TB") {
     CHECK(cpu.gpr(4) == cpu.msr());
     cpu.set_msr(0);
 
-    // Every stored SPR reads back what mtspr wrote (HID0's self-clearing bits: own test).
+    // Every stored SPR reads back what mtspr wrote (HID0's self-clearing bits: own test; DMAL
+    // starts the locked-cache DMA: test_memory.cpp).
     const int stored[] = {spr::kLr,    spr::kCtr,   spr::kDsisr, spr::kDar,  spr::kSrr0, spr::kSrr1,
                           spr::kSprg0, spr::kSprg0 + 1, spr::kSprg0 + 2, spr::kSprg0 + 3, spr::kHid1,
-                          spr::kHid2,  spr::kHid4,  spr::kWpar,  spr::kDmaU, spr::kDmaL, spr::kL2cr};
+                          spr::kHid2,  spr::kHid4,  spr::kWpar,  spr::kDmaU, spr::kL2cr};
     std::uint32_t value = 0x10203040;
     for (const int n : stored) {
         CAPTURE(n);

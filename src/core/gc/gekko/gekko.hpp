@@ -18,6 +18,25 @@ struct GekkoError : std::runtime_error {
     GekkoError(const std::string& what, std::uint32_t pc_, std::uint32_t word_or_address_);
     std::uint32_t pc;
     std::uint32_t word_or_address;
+
+protected:
+    struct FullMessage {};
+    GekkoError(FullMessage, const std::string& message, std::uint32_t pc_, std::uint32_t word_or_address_)
+        : std::runtime_error(message), pc(pc_), word_or_address(word_or_address_) {}
+};
+
+// A physical address with nothing behind it, or an access a device does not take (thrown by
+// the bus: Memory, its MMIO dispatch). The bus does not know the pc, so Gekko::step() catches
+// it and throws it again with the executing instruction's pc (pc_known = true): that is the
+// instruction whose fetch or data access failed. Thrown from outside step() (the HLE boot,
+// code using Gekko::bus(), a peripheral's DMA) it keeps pc_known = false and pc = 0.
+struct BusError : GekkoError {
+    // From the bus: word_or_address = the physical address.
+    BusError(const std::string& what_detail, std::uint32_t address);
+    // The same error, caused by the instruction at `at_pc`.
+    BusError(const BusError& from_bus, std::uint32_t at_pc);
+    std::string detail;
+    bool pc_known;
 };
 
 // Special-purpose register numbers (as mfspr/mtspr encode them, halves already swapped).
@@ -255,6 +274,8 @@ private:
     }
 
     std::uint32_t data_address(std::uint32_t ea, bool write);
+    // A DMAL write with T set: moves lines between MEM1 and the locked cache (gekko.cpp).
+    void locked_cache_dma();
 
     CpuBus& bus_;
     GekkoState s_;

@@ -70,6 +70,15 @@ GekkoDecodeTables build_tables() {
 GekkoError::GekkoError(const std::string& what, std::uint32_t pc_, std::uint32_t word_or_address_)
     : std::runtime_error("Gekko: " + what + " at pc " + hex32(pc_)), pc(pc_), word_or_address(word_or_address_) {}
 
+BusError::BusError(const std::string& detail_, std::uint32_t address)
+    : GekkoError(FullMessage{}, "bus: " + detail_ + " (pc unknown)", 0, address), detail(detail_), pc_known(false) {}
+
+BusError::BusError(const BusError& from_bus, std::uint32_t pc_)
+    : GekkoError(FullMessage{}, "Gekko: bus: " + from_bus.detail + " at pc " + hex32(pc_), pc_,
+                 from_bus.word_or_address),
+      detail(from_bus.detail),
+      pc_known(true) {}
+
 const GekkoDecodeTables& gekko_decode_tables() {
     static const GekkoDecodeTables tables = build_tables();
     return tables;
@@ -115,12 +124,19 @@ int Gekko::step() {
             return 1;
         }
     }
-    const std::uint32_t word = bus_.read32(paddr);
-    s_.npc = s_.pc + 4;
+    // The bus cannot know the pc, so its errors get it here: s_.pc is still the instruction
+    // whose fetch or access failed. The emulation stops there (the instruction may have
+    // half-run: a split access, an lmw); nothing is undone. No cost unless something throws.
     try {
-        tables_->primary[word >> 26](*this, word);
-    } catch (const InstructionAborted&) {
-        // The instruction raised an exception: npc already points at its vector.
+        const std::uint32_t word = bus_.read32(paddr);
+        s_.npc = s_.pc + 4;
+        try {
+            tables_->primary[word >> 26](*this, word);
+        } catch (const InstructionAborted&) {
+            // The instruction raised an exception: npc already points at its vector.
+        }
+    } catch (const BusError& e) {
+        throw BusError(e, s_.pc);
     }
     s_.pc = s_.npc;
     return 1;
@@ -321,8 +337,11 @@ bool Gekko::try_write_spr(int number, std::uint32_t value) {
     case spr::kHid2: s_.hid2 = value; return true;
     case spr::kHid4: s_.hid4 = value; return true;  // accepted, no effect
     case spr::kWpar: s_.wpar = value; return true;  // the write-gather pipe address: stored only
-    case spr::kDmaU: s_.dmau = value; return true;  // locked-cache DMA: stored only (the DMA
-    case spr::kDmaL: s_.dmal = value; return true;  // itself belongs to the memory map)
+    case spr::kDmaU: s_.dmau = value; return true;
+    case spr::kDmaL:
+        s_.dmal = value;
+        locked_cache_dma();
+        return true;
     case spr::kL2cr: s_.l2cr = value; return true;  // no L2 cache modeled: accepted, no effect
     default: break;
     }
@@ -332,6 +351,27 @@ bool Gekko::try_write_spr(int number, std::uint32_t value) {
     else if (in(spr::kGqr0, 8)) s_.gqr[static_cast<std::size_t>(number - spr::kGqr0)] = value;
     else return false;  // unknown, or read-only (PVR, TBL/TBU's read numbers)
     return true;
+}
+
+// The locked-cache DMA (750CL manual, "Locked cache DMA"; Dolphin's mtspr DMAL): a write of
+// DMAL with T set moves whole 32-byte lines at once (no transfer time is modeled, as in
+// Dolphin). DMAU: MEM_ADDR (bits 5-31, a physical address, as the SDK's LCLoadBlocks masks it)
+// | LEN_U (bits 0-4). DMAL: LC_ADDR (bits 5-31, in the locked cache at 0xE0000000) | LD
+// (bit 4: 1 = memory to cache) | LEN_L (bits 2-3) | T (bit 1: trigger) | F (bit 0: flush).
+// Lines = LEN_U << 2 | LEN_L, 0 meaning 128. T and F read back as 0 afterwards. Both
+// addresses are physical bus addresses (Memory maps the cache at 0xE0000000), so an address
+// outside MEM1 or the cache throws BusError.
+void Gekko::locked_cache_dma() {
+    if ((s_.dmal & 2) == 0) return;
+    const std::uint32_t memory = s_.dmau & ~0x1Fu, cache = s_.dmal & ~0x1Fu;
+    std::uint32_t lines = ((s_.dmau & 0x1F) << 2) | ((s_.dmal >> 2) & 3);
+    if (lines == 0) lines = 128;
+    const bool to_cache = (s_.dmal & 0x10) != 0;
+    for (std::uint32_t i = 0; i < lines * 32; i += 8) {
+        if (to_cache) bus_.write64(cache + i, bus_.read64(memory + i));
+        else bus_.write64(memory + i, bus_.read64(cache + i));
+    }
+    s_.dmal &= ~3u;
 }
 
 std::uint32_t Gekko::spr(int number) const {
