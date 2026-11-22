@@ -201,6 +201,125 @@ constexpr u32 mtsr(int sr, int rs) { return x_form(31, rs, sr & 15, 0, 210); }
 constexpr u32 mfsrin(int rt, int rb) { return x_form(31, rt, 0, rb, 659); }
 constexpr u32 mtsrin(int rs, int rb) { return x_form(31, rs, 0, rb, 242); }
 
+// A-form (floating-point arithmetic): opcode, frD, frA, frB, frC, a 5-bit extended opcode, Rc.
+constexpr u32 a_form(int op, int d, int a, int b, int c, int xo, bool rc = false) {
+    return (static_cast<u32>(op) << 26) | field(d, 21) | field(a, 16) | field(b, 11) | field(c, 6) |
+           (static_cast<u32>(xo & 31) << 1) | (rc ? 1u : 0u);
+}
+
+// Floating-point loads and stores: (frD/frS, offset, rA) and (frD/frS, rA, rB).
+constexpr u32 lfs(int ft, std::int32_t off, int ra) { return d_form(48, ft, ra, off); }
+constexpr u32 lfsu(int ft, std::int32_t off, int ra) { return d_form(49, ft, ra, off); }
+constexpr u32 lfd(int ft, std::int32_t off, int ra) { return d_form(50, ft, ra, off); }
+constexpr u32 lfdu(int ft, std::int32_t off, int ra) { return d_form(51, ft, ra, off); }
+constexpr u32 stfs(int fs, std::int32_t off, int ra) { return d_form(52, fs, ra, off); }
+constexpr u32 stfsu(int fs, std::int32_t off, int ra) { return d_form(53, fs, ra, off); }
+constexpr u32 stfd(int fs, std::int32_t off, int ra) { return d_form(54, fs, ra, off); }
+constexpr u32 stfdu(int fs, std::int32_t off, int ra) { return d_form(55, fs, ra, off); }
+constexpr u32 lfsx(int ft, int ra, int rb) { return x_form(31, ft, ra, rb, 535); }
+constexpr u32 lfsux(int ft, int ra, int rb) { return x_form(31, ft, ra, rb, 567); }
+constexpr u32 lfdx(int ft, int ra, int rb) { return x_form(31, ft, ra, rb, 599); }
+constexpr u32 lfdux(int ft, int ra, int rb) { return x_form(31, ft, ra, rb, 631); }
+constexpr u32 stfsx(int fs, int ra, int rb) { return x_form(31, fs, ra, rb, 663); }
+constexpr u32 stfsux(int fs, int ra, int rb) { return x_form(31, fs, ra, rb, 695); }
+constexpr u32 stfdx(int fs, int ra, int rb) { return x_form(31, fs, ra, rb, 727); }
+constexpr u32 stfdux(int fs, int ra, int rb) { return x_form(31, fs, ra, rb, 759); }
+constexpr u32 stfiwx(int fs, int ra, int rb) { return x_form(31, fs, ra, rb, 983); }
+
+// Floating-point arithmetic, assembler operand order: fmul/fmadd take frC before frB
+// (fmadd frD,frA,frC,frB computes frA * frC + frB).
+constexpr u32 fadd(int d, int a, int b, bool rc = false) { return a_form(63, d, a, b, 0, 21, rc); }
+constexpr u32 fadds(int d, int a, int b, bool rc = false) { return a_form(59, d, a, b, 0, 21, rc); }
+constexpr u32 fsub(int d, int a, int b, bool rc = false) { return a_form(63, d, a, b, 0, 20, rc); }
+constexpr u32 fsubs(int d, int a, int b, bool rc = false) { return a_form(59, d, a, b, 0, 20, rc); }
+constexpr u32 fmul(int d, int a, int c, bool rc = false) { return a_form(63, d, a, 0, c, 25, rc); }
+constexpr u32 fmuls(int d, int a, int c, bool rc = false) { return a_form(59, d, a, 0, c, 25, rc); }
+constexpr u32 fdiv(int d, int a, int b, bool rc = false) { return a_form(63, d, a, b, 0, 18, rc); }
+constexpr u32 fdivs(int d, int a, int b, bool rc = false) { return a_form(59, d, a, b, 0, 18, rc); }
+constexpr u32 fmadd(int d, int a, int c, int b) { return a_form(63, d, a, b, c, 29); }
+constexpr u32 fmadds(int d, int a, int c, int b) { return a_form(59, d, a, b, c, 29); }
+constexpr u32 fmsub(int d, int a, int c, int b) { return a_form(63, d, a, b, c, 28); }
+constexpr u32 fmsubs(int d, int a, int c, int b) { return a_form(59, d, a, b, c, 28); }
+constexpr u32 fnmadd(int d, int a, int c, int b) { return a_form(63, d, a, b, c, 31); }
+constexpr u32 fnmadds(int d, int a, int c, int b) { return a_form(59, d, a, b, c, 31); }
+constexpr u32 fnmsub(int d, int a, int c, int b) { return a_form(63, d, a, b, c, 30); }
+constexpr u32 fnmsubs(int d, int a, int c, int b) { return a_form(59, d, a, b, c, 30); }
+constexpr u32 fsel(int d, int a, int c, int b) { return a_form(63, d, a, b, c, 23); }
+constexpr u32 fres(int d, int b) { return a_form(59, d, 0, b, 0, 24); }
+constexpr u32 frsqrte(int d, int b) { return a_form(63, d, 0, b, 0, 26); }
+
+// Floating-point X-form (opcode 63)
+constexpr u32 fcmpu(int crf, int a, int b) { return x_form(63, crf << 2, a, b, 0); }
+constexpr u32 fcmpo(int crf, int a, int b) { return x_form(63, crf << 2, a, b, 32); }
+constexpr u32 frsp(int d, int b, bool rc = false) { return x_form(63, d, 0, b, 12, rc); }
+constexpr u32 fctiw(int d, int b, bool rc = false) { return x_form(63, d, 0, b, 14, rc); }
+constexpr u32 fctiwz(int d, int b, bool rc = false) { return x_form(63, d, 0, b, 15, rc); }
+constexpr u32 fneg(int d, int b, bool rc = false) { return x_form(63, d, 0, b, 40, rc); }
+constexpr u32 fmr(int d, int b, bool rc = false) { return x_form(63, d, 0, b, 72, rc); }
+constexpr u32 fnabs(int d, int b, bool rc = false) { return x_form(63, d, 0, b, 136, rc); }
+constexpr u32 fabs_(int d, int b, bool rc = false) { return x_form(63, d, 0, b, 264, rc); }
+constexpr u32 mffs(int d, bool rc = false) { return x_form(63, d, 0, 0, 583, rc); }
+constexpr u32 mtfsb0(int bit, bool rc = false) { return x_form(63, bit, 0, 0, 70, rc); }
+constexpr u32 mtfsb1(int bit, bool rc = false) { return x_form(63, bit, 0, 0, 38, rc); }
+constexpr u32 mcrfs(int crfd, int crfs) { return x_form(63, crfd << 2, crfs << 2, 0, 64); }
+constexpr u32 mtfsfi(int crf, int imm, bool rc = false) {
+    return (63u << 26) | (static_cast<u32>(crf & 7) << 23) | (static_cast<u32>(imm & 15) << 12) | (134u << 1) |
+           (rc ? 1u : 0u);
+}
+constexpr u32 mtfsf(int fm, int b, bool rc = false) {
+    return (63u << 26) | (static_cast<u32>(fm & 0xFF) << 17) | field(b, 11) | (711u << 1) | (rc ? 1u : 0u);
+}
+
+// Paired singles (opcode 4). A-form ones take (frD, frA, [frC,] [frB]) like the assembler.
+constexpr u32 ps_add(int d, int a, int b) { return a_form(4, d, a, b, 0, 21); }
+constexpr u32 ps_sub(int d, int a, int b) { return a_form(4, d, a, b, 0, 20); }
+constexpr u32 ps_mul(int d, int a, int c) { return a_form(4, d, a, 0, c, 25); }
+constexpr u32 ps_div(int d, int a, int b) { return a_form(4, d, a, b, 0, 18); }
+constexpr u32 ps_madd(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 29); }
+constexpr u32 ps_msub(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 28); }
+constexpr u32 ps_nmadd(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 31); }
+constexpr u32 ps_nmsub(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 30); }
+constexpr u32 ps_sel(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 23); }
+constexpr u32 ps_sum0(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 10); }
+constexpr u32 ps_sum1(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 11); }
+constexpr u32 ps_muls0(int d, int a, int c) { return a_form(4, d, a, 0, c, 12); }
+constexpr u32 ps_muls1(int d, int a, int c) { return a_form(4, d, a, 0, c, 13); }
+constexpr u32 ps_madds0(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 14); }
+constexpr u32 ps_madds1(int d, int a, int c, int b) { return a_form(4, d, a, b, c, 15); }
+constexpr u32 ps_res(int d, int b) { return a_form(4, d, 0, b, 0, 24); }
+constexpr u32 ps_rsqrte(int d, int b) { return a_form(4, d, 0, b, 0, 26); }
+constexpr u32 ps_cmpu0(int crf, int a, int b) { return x_form(4, crf << 2, a, b, 0); }
+constexpr u32 ps_cmpo0(int crf, int a, int b) { return x_form(4, crf << 2, a, b, 32); }
+constexpr u32 ps_cmpu1(int crf, int a, int b) { return x_form(4, crf << 2, a, b, 64); }
+constexpr u32 ps_cmpo1(int crf, int a, int b) { return x_form(4, crf << 2, a, b, 96); }
+constexpr u32 ps_neg(int d, int b) { return x_form(4, d, 0, b, 40); }
+constexpr u32 ps_mr(int d, int b) { return x_form(4, d, 0, b, 72); }
+constexpr u32 ps_nabs(int d, int b) { return x_form(4, d, 0, b, 136); }
+constexpr u32 ps_abs(int d, int b) { return x_form(4, d, 0, b, 264); }
+constexpr u32 ps_merge00(int d, int a, int b) { return x_form(4, d, a, b, 528); }
+constexpr u32 ps_merge01(int d, int a, int b) { return x_form(4, d, a, b, 560); }
+constexpr u32 ps_merge10(int d, int a, int b) { return x_form(4, d, a, b, 592); }
+constexpr u32 ps_merge11(int d, int a, int b) { return x_form(4, d, a, b, 624); }
+
+// Quantized loads and stores: W (one value), I (the GQR). D-form: (frD, offset (12-bit), rA,
+// W, I); indexed (opcode 4): (frD, rA, rB, W, I).
+constexpr u32 psq_d(int op, int f, std::int32_t off, int ra, int w, int i) {
+    return (static_cast<u32>(op) << 26) | field(f, 21) | field(ra, 16) | (static_cast<u32>(w & 1) << 15) |
+           (static_cast<u32>(i & 7) << 12) | (static_cast<u32>(off) & 0xFFF);
+}
+constexpr u32 psq_x(int xo, int f, int ra, int rb, int w, int i) {
+    return (4u << 26) | field(f, 21) | field(ra, 16) | field(rb, 11) | (static_cast<u32>(w & 1) << 10) |
+           (static_cast<u32>(i & 7) << 7) | (static_cast<u32>(xo) << 1);
+}
+constexpr u32 psq_l(int f, std::int32_t off, int ra, int w, int i) { return psq_d(56, f, off, ra, w, i); }
+constexpr u32 psq_lu(int f, std::int32_t off, int ra, int w, int i) { return psq_d(57, f, off, ra, w, i); }
+constexpr u32 psq_st(int f, std::int32_t off, int ra, int w, int i) { return psq_d(60, f, off, ra, w, i); }
+constexpr u32 psq_stu(int f, std::int32_t off, int ra, int w, int i) { return psq_d(61, f, off, ra, w, i); }
+constexpr u32 psq_lx(int f, int ra, int rb, int w, int i) { return psq_x(6, f, ra, rb, w, i); }
+constexpr u32 psq_stx(int f, int ra, int rb, int w, int i) { return psq_x(7, f, ra, rb, w, i); }
+constexpr u32 psq_lux(int f, int ra, int rb, int w, int i) { return psq_x(38, f, ra, rb, w, i); }
+constexpr u32 psq_stux(int f, int ra, int rb, int w, int i) { return psq_x(39, f, ra, rb, w, i); }
+
 }  // namespace ppc
 
 // A Gekko on a flat bus. Programs go at physical 0x3000 by default (above the exception

@@ -207,7 +207,7 @@ void trap_if(Gekko& cpu, u32 w, u32 a, u32 b) {
     const auto sa = static_cast<s32>(a), sb = static_cast<s32>(b);
     if (((to & 16) && sa < sb) || ((to & 8) && sa > sb) || ((to & 4) && a == b) || ((to & 2) && a < b) ||
         ((to & 1) && a > b))
-        cpu.raise(Gekko::Exception::Program, Gekko::kProgramTrap);
+        GekkoOps::raise(cpu, Gekko::Exception::Program, Gekko::kProgramTrap);
 }
 void op_twi(Gekko& cpu, u32 w) { trap_if(cpu, w, reg(cpu, ra(w)), simm(w)); }
 void op_tw(Gekko& cpu, u32 w) { trap_if(cpu, w, reg(cpu, ra(w)), reg(cpu, rb(w))); }
@@ -312,7 +312,9 @@ void op_bclr(Gekko& cpu, u32 w) {
     if (rc(w)) s.lr = s.pc + 4;
 }
 void op_bcctr(Gekko& cpu, u32 w) {
-    // bcctr with BO[2] = 0 (decrement CTR) is an invalid form (PEM): stop rather than guess.
+    // bcctr with BO[2] = 0 (decrement CTR) is an invalid form whose result the PEM leaves
+    // undefined, and compilers never emit it: stop rather than guess (policy in gekko_ops.hpp;
+    // Dolphin only asserts and ignores the CTR part).
     if ((rd(w) & 4) == 0) cpu.unimplemented(w);
     GekkoState& s = cpu.state();
     if (branch_condition(cpu, w)) s.npc = s.ctr & ~3u;
@@ -356,11 +358,7 @@ void op_mcrxr(Gekko& cpu, u32 w) {
 
 // ---- Loads and stores ------------------------------------------------------------------------
 
-u32 ea_d(Gekko& cpu, u32 w) { return ra_or_zero(cpu, w) + simm(w); }
-u32 ea_x(Gekko& cpu, u32 w) { return ra_or_zero(cpu, w) + reg(cpu, rb(w)); }
-// Update forms use rA itself (rA = 0 is an invalid form).
-u32 ea_du(Gekko& cpu, u32 w) { return reg(cpu, ra(w)) + simm(w); }
-u32 ea_xu(Gekko& cpu, u32 w) { return reg(cpu, ra(w)) + reg(cpu, rb(w)); }
+// Effective addresses: ea_d, ea_x, ea_du, ea_xu (gekko_ops.hpp, with the invalid update forms).
 
 // C++20 has no std::byteswap yet.
 u32 swap32(u32 value) {
@@ -384,41 +382,44 @@ void store_op(Gekko& cpu, u32 w) {
     if constexpr (Update) reg(cpu, ra(w)) = ea;
 }
 
-u32 load_word(Gekko& cpu, u32 ea) { return cpu.read32(ea); }
-u32 load_half(Gekko& cpu, u32 ea) { return cpu.read16(ea); }
-u32 load_half_algebraic(Gekko& cpu, u32 ea) { return sign16(cpu.read16(ea)); }
-u32 load_byte(Gekko& cpu, u32 ea) { return cpu.read8(ea); }
-u32 load_word_reversed(Gekko& cpu, u32 ea) { return swap32(cpu.read32(ea)); }
-u32 load_half_reversed(Gekko& cpu, u32 ea) { return swap16(cpu.read16(ea)); }
-void store_word(Gekko& cpu, u32 ea, u32 value) { cpu.write32(ea, value); }
-void store_half(Gekko& cpu, u32 ea, u32 value) { cpu.write16(ea, static_cast<std::uint16_t>(value)); }
-void store_byte(Gekko& cpu, u32 ea, u32 value) { cpu.write8(ea, static_cast<std::uint8_t>(value)); }
-void store_word_reversed(Gekko& cpu, u32 ea, u32 value) { cpu.write32(ea, swap32(value)); }
+u32 load_word(Gekko& cpu, u32 ea) { return GekkoOps::read32(cpu, ea); }
+u32 load_half(Gekko& cpu, u32 ea) { return GekkoOps::read16(cpu, ea); }
+u32 load_half_algebraic(Gekko& cpu, u32 ea) { return sign16(GekkoOps::read16(cpu, ea)); }
+u32 load_byte(Gekko& cpu, u32 ea) { return GekkoOps::read8(cpu, ea); }
+u32 load_word_reversed(Gekko& cpu, u32 ea) { return swap32(GekkoOps::read32(cpu, ea)); }
+u32 load_half_reversed(Gekko& cpu, u32 ea) { return swap16(GekkoOps::read16(cpu, ea)); }
+void store_word(Gekko& cpu, u32 ea, u32 value) { GekkoOps::write32(cpu, ea, value); }
+void store_half(Gekko& cpu, u32 ea, u32 value) { GekkoOps::write16(cpu, ea, static_cast<std::uint16_t>(value)); }
+void store_byte(Gekko& cpu, u32 ea, u32 value) { GekkoOps::write8(cpu, ea, static_cast<std::uint8_t>(value)); }
+void store_word_reversed(Gekko& cpu, u32 ea, u32 value) { GekkoOps::write32(cpu, ea, swap32(value)); }
 void store_half_reversed(Gekko& cpu, u32 ea, u32 value) {
-    cpu.write16(ea, swap16(static_cast<std::uint16_t>(value)));
+    GekkoOps::write16(cpu, ea, swap16(static_cast<std::uint16_t>(value)));
 }
 
 // lmw/stmw: rD..r31, word-aligned only (an unaligned address raises alignment on the 750).
+// lmw with rA among the loaded registers (an invalid form) uses the EA computed first and
+// leaves rA with its loaded word, as Dolphin's lmw does.
 void op_lmw(Gekko& cpu, u32 w) {
     const u32 ea = ea_d(cpu, w);
-    if ((ea & 3) != 0) cpu.raise_alignment(ea, w);
+    if ((ea & 3) != 0) GekkoOps::raise_alignment(cpu, ea, w);
     std::array<u32, 32> words{};
     const int first = rd(w);
-    for (int r = first; r < 32; ++r) words[static_cast<std::size_t>(r)] = cpu.read32(ea + 4 * static_cast<u32>(r - first));
+    for (int r = first; r < 32; ++r) words[static_cast<std::size_t>(r)] = GekkoOps::read32(cpu, ea + 4 * static_cast<u32>(r - first));
     for (int r = first; r < 32; ++r) reg(cpu, r) = words[static_cast<std::size_t>(r)];
 }
 void op_stmw(Gekko& cpu, u32 w) {
     const u32 ea = ea_d(cpu, w);
-    if ((ea & 3) != 0) cpu.raise_alignment(ea, w);
+    if ((ea & 3) != 0) GekkoOps::raise_alignment(cpu, ea, w);
     const int first = rd(w);
-    for (int r = first; r < 32; ++r) cpu.write32(ea + 4 * static_cast<u32>(r - first), reg(cpu, r));
+    for (int r = first; r < 32; ++r) GekkoOps::write32(cpu, ea + 4 * static_cast<u32>(r - first), reg(cpu, r));
 }
 
 // String loads: `count` bytes into rD, rD+1... (wrapping r31 -> r0), 4 per register from
 // the high byte; the last register's unused low bytes become 0. All bytes are read first.
+// rA or rB among the loaded registers (an invalid form) works like lmw: the EA comes first.
 void load_string(Gekko& cpu, u32 w, u32 ea, u32 count) {
     std::array<std::uint8_t, 128> bytes{};
-    for (u32 i = 0; i < count; ++i) bytes[i] = cpu.read8(ea + i);
+    for (u32 i = 0; i < count; ++i) bytes[i] = GekkoOps::read8(cpu, ea + i);
     int r = rd(w);
     for (u32 i = 0; i < count; i += 4) {
         u32 value = 0;
@@ -430,7 +431,7 @@ void load_string(Gekko& cpu, u32 w, u32 ea, u32 count) {
 void store_string(Gekko& cpu, u32 w, u32 ea, u32 count) {
     int r = rd(w);
     for (u32 i = 0; i < count; ++i) {
-        cpu.write8(ea + i, static_cast<std::uint8_t>(reg(cpu, r) >> (24 - 8 * (i & 3))));
+        GekkoOps::write8(cpu, ea + i, static_cast<std::uint8_t>(reg(cpu, r) >> (24 - 8 * (i & 3))));
         if ((i & 3) == 3) r = (r + 1) & 31;
     }
 }
@@ -444,21 +445,28 @@ void op_stswx(Gekko& cpu, u32 w) { store_string(cpu, w, ea_x(cpu, w), cpu.state(
 
 void op_lwarx(Gekko& cpu, u32 w) {
     const u32 ea = ea_x(cpu, w);
-    if ((ea & 3) != 0) cpu.raise_alignment(ea, w);
-    const u32 value = cpu.read32(ea);
+    if ((ea & 3) != 0) GekkoOps::raise_alignment(cpu, ea, w);
+    const u32 value = GekkoOps::read32(cpu, ea);
     GekkoState& s = cpu.state();
     reg(cpu, rd(w)) = value;
     s.reservation = true;
     s.reservation_address = ea;
 }
-// Stores only while the reservation lwarx made still holds; CR0 = EQ if it stored, + SO.
+// Stores only while the reservation lwarx made still holds and the EA is the one lwarx
+// used; CR0 = EQ if it stored, + SO. A store clears the reservation; a different address
+// stores nothing and keeps it. The PEM leaves a different address undefined; this is
+// Dolphin's stwcxd, which compares the exact EA (the 750's reservation granule is a 32-byte
+// block, but nothing observed relies on the difference). The Rc = 0 form (invalid) shares
+// the table slot and behaves the same, setting CR0, as in Dolphin.
 void op_stwcx_rc(Gekko& cpu, u32 w) {
     const u32 ea = ea_x(cpu, w);
-    if ((ea & 3) != 0) cpu.raise_alignment(ea, w);
+    if ((ea & 3) != 0) GekkoOps::raise_alignment(cpu, ea, w);
     GekkoState& s = cpu.state();
-    const bool stored = s.reservation;
-    if (stored) cpu.write32(ea, reg(cpu, rd(w)));
-    s.reservation = false;
+    const bool stored = s.reservation && s.reservation_address == ea;
+    if (stored) {
+        GekkoOps::write32(cpu, ea, reg(cpu, rd(w)));
+        s.reservation = false;
+    }
     set_cr_field(cpu, 0, (stored ? 2u : 0u) | (s.xer >> 31));
 }
 
@@ -467,26 +475,34 @@ void op_stwcx_rc(Gekko& cpu, u32 w) {
 // dcbz: the 32-byte block holding the address becomes zero (a store for translation).
 void zero_block(Gekko& cpu, u32 ea) {
     const u32 block = ea & ~31u;
-    for (u32 i = 0; i < 32; i += 8) cpu.write64(block + i, 0);
+    for (u32 i = 0; i < 32; i += 8) GekkoOps::write64(cpu, block + i, 0);
 }
-void op_dcbz(Gekko& cpu, u32 w) { zero_block(cpu, ea_x(cpu, w)); }
+// With the data cache disabled (HID0[DCE] = 0) the 750 cannot allocate the line and raises
+// alignment instead (750 manual, alignment exception causes; Dolphin's dcbz).
+void op_dcbz(Gekko& cpu, u32 w) {
+    const u32 ea = ea_x(cpu, w);
+    if ((cpu.state().hid0 & Gekko::kHid0Dce) == 0) GekkoOps::raise_alignment(cpu, ea, w);
+    zero_block(cpu, ea);
+}
 // dcbz_l: allocates a zeroed line in the locked cache, which the memory map places at the
-// address (0xE0000000 under the boot BATs). Illegal unless HID2[LCE] (Dolphin's
-// Interpreter_LoadStore.cpp dcbz_l does the same).
+// address (0xE0000000 under the boot BATs). Illegal unless HID2[LCE]; then alignment while
+// HID0[DCE] = 0, like dcbz (Dolphin's Interpreter_LoadStore.cpp dcbz_l, same order).
 void op_dcbz_l(Gekko& cpu, u32 w) {
-    if ((cpu.state().hid2 & Gekko::kHid2Lce) == 0) cpu.raise(Gekko::Exception::Program, Gekko::kProgramIllegal);
-    zero_block(cpu, ea_x(cpu, w));
+    if ((cpu.state().hid2 & Gekko::kHid2Lce) == 0) GekkoOps::raise(cpu, Gekko::Exception::Program, Gekko::kProgramIllegal);
+    const u32 ea = ea_x(cpu, w);
+    if ((cpu.state().hid0 & Gekko::kHid0Dce) == 0) GekkoOps::raise_alignment(cpu, ea, w);
+    zero_block(cpu, ea);
 }
 // No caches, store buffers or TLB are modeled: memory is always coherent, so these change
 // nothing. (icbi will matter to a JIT: it is where compiled code gets invalidated.)
 void op_cache_no_effect(Gekko&, u32) {}
-void op_supervisor_no_effect(Gekko& cpu, u32) { cpu.require_supervisor(); }  // dcbi, tlbie, tlbsync
+void op_supervisor_no_effect(Gekko& cpu, u32) { GekkoOps::require_supervisor(cpu); }  // dcbi, tlbie, tlbsync
 
 // ---- System --------------------------------------------------------------------------------------
 
-void op_sc(Gekko& cpu, u32) { cpu.raise(Gekko::Exception::Syscall); }
+void op_sc(Gekko& cpu, u32) { GekkoOps::raise(cpu, Gekko::Exception::Syscall); }
 void op_rfi(Gekko& cpu, u32) {
-    cpu.require_supervisor();
+    GekkoOps::require_supervisor(cpu);
     // MSR bits 0, 5-9 and 16-31 come back from SRR1, then POW (bit 13) is cleared: Dolphin's
     // Interpreter_Branch.cpp rfi (mask 0x87C0FFFF), matching what exception entry saves.
     GekkoState& s = cpu.state();
@@ -495,17 +511,21 @@ void op_rfi(Gekko& cpu, u32) {
     s.npc = s.srr0 & ~3u;
 }
 void op_mfmsr(Gekko& cpu, u32 w) {
-    cpu.require_supervisor();
+    GekkoOps::require_supervisor(cpu);
     reg(cpu, rd(w)) = cpu.state().msr;
 }
+// Every MSR bit is stored. EE, PR, FP, ME, IP, IR, DR and RI act. Accepted, no effect: POW
+// (power management: the CPU never dozes here), ILE/LE (little-endian mode: the GameCube
+// runs big-endian only), SE/BE (trace exceptions are not modeled) and FE0/FE1 (enabled FP
+// exceptions are not modeled: games run with them off).
 void op_mtmsr(Gekko& cpu, u32 w) {
-    cpu.require_supervisor();
+    GekkoOps::require_supervisor(cpu);
     cpu.state().msr = reg(cpu, rd(w));  // an interrupt it enables is taken before the next instruction
 }
 
 // SPRs with bit 4 of their number set (0x10) are supervisor-only (PEM 8, mfspr/mtspr).
 void check_spr_privilege(Gekko& cpu, int number) {
-    if ((number & 0x10) != 0) cpu.require_supervisor();
+    if ((number & 0x10) != 0) GekkoOps::require_supervisor(cpu);
 }
 void op_mfspr(Gekko& cpu, u32 w) {
     const int number = spr_number(w);
@@ -529,19 +549,19 @@ void op_mftb(Gekko& cpu, u32 w) {
     else throw GekkoError("mftb of unknown TBR " + std::to_string(number), cpu.pc(), w);
 }
 void op_mfsr(Gekko& cpu, u32 w) {
-    cpu.require_supervisor();
+    GekkoOps::require_supervisor(cpu);
     reg(cpu, rd(w)) = cpu.state().sr[static_cast<std::size_t>(ra(w) & 15)];
 }
 void op_mtsr(Gekko& cpu, u32 w) {
-    cpu.require_supervisor();
+    GekkoOps::require_supervisor(cpu);
     cpu.state().sr[static_cast<std::size_t>(ra(w) & 15)] = reg(cpu, rd(w));
 }
 void op_mfsrin(Gekko& cpu, u32 w) {
-    cpu.require_supervisor();
+    GekkoOps::require_supervisor(cpu);
     reg(cpu, rd(w)) = cpu.state().sr[reg(cpu, rb(w)) >> 28];
 }
 void op_mtsrin(Gekko& cpu, u32 w) {
-    cpu.require_supervisor();
+    GekkoOps::require_supervisor(cpu);
     cpu.state().sr[reg(cpu, rb(w)) >> 28] = reg(cpu, rd(w));
 }
 

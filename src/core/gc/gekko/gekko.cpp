@@ -60,6 +60,8 @@ GekkoDecodeTables build_tables() {
     t.primary[59] = op_table59;
     t.primary[63] = op_table63;
     install_integer_ops(t);
+    install_fpu_ops(t);
+    install_paired_ops(t);
     return t;
 }
 
@@ -78,6 +80,10 @@ Gekko::Gekko(CpuBus& bus) : bus_(bus), tables_(&gekko_decode_tables()) { reset()
 void Gekko::reset() {
     s_ = GekkoState{};
     s_.msr = kMsrIp;  // 750 manual, "Reset settings": MSR = 0x00000040
+    // HID0 = HID2 = 0 here, as at power-on: the caches are off (dcbz and dcbz_l raise
+    // alignment) and psq_l/psq_st are illegal. The IPL enables them before starting a game,
+    // so the HLE boot (Task 3) must set them like the IPL does: Dolphin's Boot_BS2Emu.cpp
+    // SetupHID uses HID0 = 0x0011C464 (ICE and DCE on) and HID2 = 0xE0000000 (LSQE, WPE, PSE).
     set_pc(0xFFF00000 | static_cast<std::uint32_t>(Exception::SystemReset));
 }
 
@@ -228,10 +234,10 @@ void Gekko::raise(Exception kind, std::uint32_t srr1_cause) {
 void Gekko::raise_alignment(std::uint32_t ea, std::uint32_t word) {
     // DSISR for alignment (PEM 6.4.6): indexed (X-form) instructions give bits 29-30 in
     // DSISR 15-16, bit 25 in 17 and bits 21-24 in 18-21; D-form ones bit 5 in 17 and bits
-    // 1-4 in 18-21. Then rD/rS in 22-26 and rA in 27-31.
+    // 1-4 in 18-21. Then rD/rS in 22-26 and rA in 27-31. dcbz_l (opcode 4) is X-form too.
     const std::uint32_t opcode = word >> 26;
     std::uint32_t dsisr = 0;
-    if (opcode == 31) {
+    if (opcode == 31 || opcode == 4) {
         const std::uint32_t xo = (word >> 1) & 0x3FF;
         dsisr = ((xo & 3) << 15) | (((xo >> 5) & 1) << 14) | (((xo >> 6) & 0xF) << 10);
     } else {
@@ -299,14 +305,22 @@ bool Gekko::try_write_spr(int number, std::uint32_t value) {
     case spr::kSrr1: s_.srr1 = value; return true;
     case spr::kTblWrite: s_.tb = (s_.tb & 0xFFFFFFFF00000000ULL) | value; return true;
     case spr::kTbuWrite: s_.tb = (s_.tb & 0xFFFFFFFFULL) | (static_cast<std::uint64_t>(value) << 32); return true;
+    // HID0: only DCE is read (dcbz/dcbz_l); every other bit (ICE, the cache locks and
+    // flash-invalidates, branch prediction, power modes...) is accepted, no effect, since no
+    // cache or pipeline is modeled. HID0[ICFI] (flash-invalidate the instruction cache) needs
+    // nothing here, but a JIT must treat a write that sets it as "drop all compiled code".
     case spr::kHid0: s_.hid0 = value; return true;
+    // HID1 (the PLL configuration, read-only on hardware): accepted, no effect.
     case spr::kHid1: s_.hid1 = value; return true;
+    // HID2: LCE (dcbz_l) and LSQE (psq_l/psq_st) are read. PSE (paired singles enabled) is
+    // accepted, no effect, like Dolphin, which runs paired singles whatever it says; WPE and
+    // the locked-cache DMA bits belong to the memory map (write-gather pipe, DMA).
     case spr::kHid2: s_.hid2 = value; return true;
-    case spr::kHid4: s_.hid4 = value; return true;
+    case spr::kHid4: s_.hid4 = value; return true;  // accepted, no effect
     case spr::kWpar: s_.wpar = value; return true;  // the write-gather pipe address: stored only
     case spr::kDmaU: s_.dmau = value; return true;  // locked-cache DMA: stored only (the DMA
     case spr::kDmaL: s_.dmal = value; return true;  // itself belongs to the memory map)
-    case spr::kL2cr: s_.l2cr = value; return true;
+    case spr::kL2cr: s_.l2cr = value; return true;  // no L2 cache modeled: accepted, no effect
     default: break;
     }
     if (in(spr::kSprg0, 4)) s_.sprg[static_cast<std::size_t>(number - spr::kSprg0)] = value;

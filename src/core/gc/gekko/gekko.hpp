@@ -34,9 +34,20 @@ inline constexpr int kHid2 = 920, kWpar = 921, kDmaU = 922, kDmaL = 923;
 inline constexpr int kHid0 = 1008, kHid1 = 1009, kHid4 = 1011, kL2cr = 1017;
 }  // namespace spr
 
+// One floating-point register: the Gekko's FPRs hold two halves. Double-precision
+// instructions use ps0 only; single-precision ones write their result to both; the paired
+// singles work on both lanes. Kept as host doubles whose bits are the register's bits (NaN
+// payloads included: values are only copied, never converted, unless an instruction says so).
+struct PairedSingle {
+    double ps0 = 0.0;
+    double ps1 = 0.0;
+};
+
 // The architected state, kept in one plain struct so a future JIT can address it directly.
 struct GekkoState {
     std::array<std::uint32_t, 32> gpr{};
+    std::array<PairedSingle, 32> fpr{};
+    std::uint32_t fpscr = 0;
     std::uint32_t pc = 0;   // the instruction executing (between steps: the next to execute)
     std::uint32_t npc = 0;  // while an instruction executes: the one after it
     std::uint32_t cr = 0, xer = 0, lr = 0, ctr = 0, msr = 0;
@@ -47,14 +58,14 @@ struct GekkoState {
     std::array<std::uint32_t, 8> gqr{};           // stored here; used by the paired singles
     std::array<std::uint32_t, 16> sr{};           // stored only: no page tables (BAT-only MMU)
     std::uint32_t hid0 = 0, hid1 = 0, hid2 = 0, hid4 = 0, wpar = 0, dmau = 0, dmal = 0, l2cr = 0;
-    bool reservation = false;  // lwarx/stwcx.
-    std::uint32_t reservation_address = 0;
+    bool reservation = false;               // lwarx/stwcx.
+    std::uint32_t reservation_address = 0;  // the EA lwarx used; stwcx. stores only to the same one
     bool external_interrupt = false;   // the level of the interrupt line (PI)
     bool decrementer_pending = false;  // DEC went from >= 0 to negative; taken when MSR[EE]
 };
 
 class Gekko;
-// An instruction handler (gekko_integer.cpp, and later the FPU and paired-single files).
+// An instruction handler (gekko_integer.cpp, gekko_fpu.cpp, gekko_paired.cpp).
 using GekkoOp = void (*)(Gekko&, std::uint32_t);
 struct GekkoDecodeTables;
 
@@ -80,8 +91,38 @@ public:
     // DSISR bits of a DSI.
     static constexpr std::uint32_t kDsisrNoTranslation = 0x40000000, kDsisrProtection = 0x08000000,
                                    kDsisrStore = 0x02000000;
-    // HID2[LCE]: the locked cache is enabled (dcbz_l is legal).
-    static constexpr std::uint32_t kHid2Lce = 0x10000000;
+    // HID0[ICE]/[DCE]: instruction and data caches enabled. No cache is modeled, but dcbz and
+    // dcbz_l raise alignment while DCE = 0, as on the 750.
+    static constexpr std::uint32_t kHid0Ice = 0x00008000, kHid0Dce = 0x00004000;
+    // HID2: LSQE (psq_l[u]/psq_st[u] legal), WPE (write-gather pipe), PSE (paired singles), LCE
+    // (the locked cache is enabled: dcbz_l is legal).
+    static constexpr std::uint32_t kHid2Lsqe = 0x80000000, kHid2Wpe = 0x40000000, kHid2Pse = 0x20000000,
+                                   kHid2Lce = 0x10000000;
+    // FPSCR bits (PEM 2.1.4). FEX and VX are summaries the CPU computes; the rest are stored.
+    static constexpr std::uint32_t kFpscrFx = 0x80000000, kFpscrFex = 0x40000000, kFpscrVx = 0x20000000,
+                                   kFpscrOx = 0x10000000, kFpscrUx = 0x08000000, kFpscrZx = 0x04000000,
+                                   kFpscrXx = 0x02000000, kFpscrVxsnan = 0x01000000, kFpscrVxisi = 0x00800000,
+                                   kFpscrVxidi = 0x00400000, kFpscrVxzdz = 0x00200000, kFpscrVximz = 0x00100000,
+                                   kFpscrVxvc = 0x00080000, kFpscrFr = 0x00040000, kFpscrFi = 0x00020000,
+                                   kFpscrFprf = 0x0001F000, kFpscrFpcc = 0x0000F000, kFpscrVxsoft = 0x00000400,
+                                   kFpscrVxsqrt = 0x00000200, kFpscrVxcvi = 0x00000100, kFpscrVe = 0x00000080,
+                                   kFpscrOe = 0x00000040, kFpscrUe = 0x00000020, kFpscrZe = 0x00000010,
+                                   kFpscrXe = 0x00000008, kFpscrNi = 0x00000004, kFpscrRn = 0x00000003;
+    // The invalid-operation bits (any of them sets VX), and every sticky exception bit.
+    static constexpr std::uint32_t kFpscrVxAny = kFpscrVxsnan | kFpscrVxisi | kFpscrVxidi | kFpscrVxzdz |
+                                                 kFpscrVximz | kFpscrVxvc | kFpscrVxsoft | kFpscrVxsqrt |
+                                                 kFpscrVxcvi;
+    static constexpr std::uint32_t kFpscrAnyException = kFpscrOx | kFpscrUx | kFpscrZx | kFpscrXx | kFpscrVxAny;
+    // Bit 20 is reserved and reads as 0.
+    static constexpr std::uint32_t kFpscrWritable = 0xFFFFF7FF;
+    // FPSCR with its summary bits recomputed: VX = any VX* bit; FEX = any exception bit whose
+    // enable (VE, OE, UE, ZE, XE: 22 bits lower) is set.
+    static constexpr std::uint32_t fpscr_with_summary(std::uint32_t value) {
+        value &= ~(kFpscrVx | kFpscrFex);
+        if ((value & kFpscrVxAny) != 0) value |= kFpscrVx;
+        if (((value >> 22) & value & (kFpscrVe | kFpscrOe | kFpscrUe | kFpscrZe | kFpscrXe)) != 0) value |= kFpscrFex;
+        return value;
+    }
 
     // The exceptions this core takes, by vector offset.
     enum class Exception : std::uint32_t {
@@ -125,6 +166,7 @@ public:
     }
     [[nodiscard]] std::uint32_t msr() const { return s_.msr; }
     // Sets MSR as mtmsr would; a pending interrupt it enables is taken by the next step().
+    // POW, ILE/LE, SE/BE and FE0/FE1 are accepted, no effect (see op_mtmsr).
     void set_msr(std::uint32_t value) { s_.msr = value; }
     [[nodiscard]] std::uint32_t cr() const { return s_.cr; }
     void set_cr(std::uint32_t value) { s_.cr = value; }
@@ -134,6 +176,17 @@ public:
     void set_lr(std::uint32_t value) { s_.lr = value; }
     [[nodiscard]] std::uint32_t ctr() const { return s_.ctr; }
     void set_ctr(std::uint32_t value) { s_.ctr = value; }
+    // Floating-point registers: both halves of FPR `index`.
+    [[nodiscard]] double ps0(int index) const { return s_.fpr[static_cast<std::size_t>(index)].ps0; }
+    [[nodiscard]] double ps1(int index) const { return s_.fpr[static_cast<std::size_t>(index)].ps1; }
+    void set_ps(int index, double ps0, double ps1) { s_.fpr[static_cast<std::size_t>(index)] = {ps0, ps1}; }
+    [[nodiscard]] std::uint32_t fpscr() const { return s_.fpscr; }
+    // Sets FPSCR as mtfsf with every field would: the reserved bit is dropped and FEX/VX are
+    // recomputed from the other bits.
+    void set_fpscr(std::uint32_t value) { s_.fpscr = fpscr_with_summary(value & kFpscrWritable); }
+    // The quantization registers GQR0..7 (also SPRs 912..919).
+    [[nodiscard]] std::uint32_t gqr(int index) const { return s_.gqr[static_cast<std::size_t>(index)]; }
+    void set_gqr(int index, std::uint32_t value) { s_.gqr[static_cast<std::size_t>(index)] = value; }
     // mfspr/mtspr by number, with their effects (a DEC write can request the exception).
     // Throw GekkoError (word_or_address = the SPR number) for an SPR this core does not
     // model, or a write to a read-only one (PVR, the TBL/TBU read numbers).
@@ -141,8 +194,39 @@ public:
     void set_spr(int number, std::uint32_t value);
     [[nodiscard]] GekkoState& state() { return s_; }
     [[nodiscard]] const GekkoState& state() const { return s_; }
+    // The physical bus, for code outside the CPU that needs guest memory (the HLE boot, the
+    // runner, debuggers): physical addresses, no translation, no exceptions. For an effective
+    // address, translate() it first.
+    [[nodiscard]] CpuBus& bus() { return bus_; }
 
-    // --- Services for the instruction handlers (gekko_*.cpp), valid only inside step() ---
+    // --- Services for the instruction handlers that cannot fault (the faulting ones are
+    // private, reached through GekkoOps in gekko_ops.hpp) ---
+
+    // Stops emulation: the executing instruction is not implemented.
+    [[noreturn]] void unimplemented(std::uint32_t word) const;
+    // Enters an exception handler: SRR0 = srr0; SRR1 = MSR bits 0, 5-9 and 16-31 | cause;
+    // MSR keeps ILE, ME and IP, LE = ILE, the rest cleared; pc = vector (0 or 0xFFF00000 base
+    // by MSR[IP]). Does not end an executing instruction (raise() does).
+    void enter_exception(Exception kind, std::uint32_t srr0, std::uint32_t srr1_cause = 0);
+    // CR0 = LT/GT/EQ of the signed result, plus XER[SO].
+    void update_cr0(std::uint32_t result) {
+        const auto v = static_cast<std::int32_t>(result);
+        const std::uint32_t field = v < 0 ? 8u : v > 0 ? 4u : 2u;
+        s_.cr = (s_.cr & 0x0FFFFFFF) | ((field | (s_.xer >> 31)) << 28);
+    }
+    // mfspr/mtspr without the privilege check; false for an unknown (or, for writes,
+    // read-only) SPR.
+    bool try_read_spr(int number, std::uint32_t& value) const;
+    bool try_write_spr(int number, std::uint32_t value);
+
+private:
+    // Instruction handlers reach the services below through GekkoOps (gekko_ops.hpp).
+    friend struct GekkoOps;
+
+    // These are valid only while step() executes an instruction: a fault enters the exception
+    // (SRR0/SRR1/MSR/pc change) and ends the instruction by throwing an internal exception
+    // that only step() catches. Called from anywhere else they would corrupt the state and
+    // throw an unknown type, hence private; outside code uses bus() and translate().
 
     // Data accesses at an effective address, translated by the DBATs. A miss or a protection
     // violation raises DSI, which ends the instruction (nothing after it runs). Unaligned
@@ -166,24 +250,7 @@ public:
     void require_supervisor() {
         if ((s_.msr & kMsrPr) != 0) raise(Exception::Program, kProgramPrivileged);
     }
-    // Stops emulation: the executing instruction is not implemented.
-    [[noreturn]] void unimplemented(std::uint32_t word) const;
-    // Enters an exception handler: SRR0 = srr0; SRR1 = MSR bits 0, 5-9 and 16-31 | cause;
-    // MSR keeps ILE, ME and IP, LE = ILE, the rest cleared; pc = vector (0 or 0xFFF00000 base
-    // by MSR[IP]). Does not end an executing instruction (raise() does).
-    void enter_exception(Exception kind, std::uint32_t srr0, std::uint32_t srr1_cause = 0);
-    // CR0 = LT/GT/EQ of the signed result, plus XER[SO].
-    void update_cr0(std::uint32_t result) {
-        const auto v = static_cast<std::int32_t>(result);
-        const std::uint32_t field = v < 0 ? 8u : v > 0 ? 4u : 2u;
-        s_.cr = (s_.cr & 0x0FFFFFFF) | ((field | (s_.xer >> 31)) << 28);
-    }
-    // mfspr/mtspr without the privilege check; false for an unknown (or, for writes,
-    // read-only) SPR.
-    bool try_read_spr(int number, std::uint32_t& value) const;
-    bool try_write_spr(int number, std::uint32_t value);
 
-private:
     std::uint32_t data_address(std::uint32_t ea, bool write);
 
     CpuBus& bus_;

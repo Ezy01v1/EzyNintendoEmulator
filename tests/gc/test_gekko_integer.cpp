@@ -691,6 +691,43 @@ TEST_CASE("lwarx and stwcx. use the reservation") {
     f.exec(stwcx_(6, 0, 4));
     CHECK(bus.read32(0x1000) == 42);
     CHECK(cr_field(cpu, 0) == kSoBit);
+
+    // stwcx. to another address than lwarx's stores nothing and keeps the reservation
+    // (Dolphin's stwcxd compares the address).
+    bus.write32(0x1004, 7);
+    f.exec(lwarx(3, 0, 4));
+    cpu.set_gpr(5, 0x1004);
+    f.exec(stwcx_(6, 0, 5));
+    CHECK(bus.read32(0x1004) == 7);
+    CHECK(cr_field(cpu, 0) == kSoBit);
+    f.exec(stwcx_(6, 0, 4));
+    CHECK(bus.read32(0x1000) == 43);
+    CHECK(cr_field(cpu, 0) == (kEq | kSoBit));
+}
+
+TEST_CASE("invalid forms with a known result run like the hardware") {
+    GekkoFixture f;
+    auto& cpu = f.cpu;
+    auto& bus = f.bus;
+    bus.write32(0x1008, 0x11223344);
+    // lwzu with rA = rD: rA gets the EA (written last; Dolphin's lwzu).
+    cpu.set_gpr(4, 0x1000);
+    f.exec(lwzu(4, 8, 4));
+    CHECK(cpu.gpr(4) == 0x1008);
+    // stwcx with Rc = 0 behaves as stwcx. (the table slot ignores Rc): CR0 is set.
+    f.exec(lwarx(3, 0, 4));
+    cpu.set_gpr(6, 99);
+    cpu.set_cr(0);
+    f.exec(x_form(31, 6, 0, 4, 150, false));
+    CHECK(bus.read32(0x1008) == 99);
+    CHECK(cr_field(cpu, 0) == kEq);
+    // lmw loading rA: rA ends with the loaded word (the EA was computed first).
+    bus.write32(0x1100, 0xAAAA0000);
+    bus.write32(0x1104, 0xBBBB0000);
+    cpu.set_gpr(30, 0x1100);
+    f.exec(lmw(30, 0, 30));
+    CHECK(cpu.gpr(30) == 0xAAAA0000);
+    CHECK(cpu.gpr(31) == 0xBBBB0000);
 }
 
 TEST_CASE("cache and synchronization instructions") {
@@ -701,7 +738,9 @@ TEST_CASE("cache and synchronization instructions") {
     cpu.set_gpr(4, 0x1000);
     cpu.set_gpr(5, 0x2C);
 
-    // dcbz clears the 32-byte line holding the address.
+    // dcbz clears the 32-byte line holding the address (with the data cache on, as the IPL
+    // leaves it).
+    cpu.set_spr(ezy::gc::spr::kHid0, Gekko::kHid0Dce);
     f.exec(dcbz(4, 5));
     for (std::uint32_t i = 0x20; i < 0x40; i += 4) CHECK(bus.read32(0x1000 + i) == 0);
     CHECK(bus.read32(0x101C) == 0xFFFFFFFF);

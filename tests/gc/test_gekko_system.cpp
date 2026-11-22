@@ -394,11 +394,79 @@ TEST_CASE("dcbz_l needs the locked cache enabled in HID2") {
     CHECK((cpu.spr(spr::kSrr1) & 0x00080000) != 0);  // SRR1[12]: illegal instruction
     CHECK(f.bus.read32(0x1000) == 0xFFFFFFFF);
 
+    // With HID2[LCE] but the data cache off (HID0[DCE] = 0): alignment, as dcbz.
     cpu.set_msr(0);
     cpu.set_spr(spr::kHid2, 0x10000000);  // HID2[LCE]
     f.exec(dcbz_l(0, 4));
+    CHECK(cpu.pc() == 0x600);
+    CHECK(cpu.spr(spr::kDar) == 0x1000);
+    CHECK(f.bus.read32(0x1000) == 0xFFFFFFFF);
+
+    cpu.set_msr(0);
+    cpu.set_spr(spr::kHid0, Gekko::kHid0Dce);
+    f.exec(dcbz_l(0, 4));
     CHECK(cpu.pc() == 0x3004);
     CHECK(f.bus.read32(0x1000) == 0);
+
+    // LCE is checked before DCE: without LCE it is illegal even with the cache off.
+    cpu.set_spr(spr::kHid0, 0);
+    cpu.set_spr(spr::kHid2, 0);
+    f.exec(dcbz_l(0, 4));
+    CHECK(cpu.pc() == 0x700);
+}
+
+TEST_CASE("dcbz raises alignment while the data cache is off") {
+    GekkoFixture f;
+    auto& cpu = f.cpu;
+    f.bus.write32(0x1020, 0xFFFFFFFF);
+    cpu.set_gpr(4, 0x1000);
+    cpu.set_gpr(5, 0x24);
+    // HID0 = 0 after reset: DCE off (the IPL turns it on; so will the HLE boot).
+    f.exec(dcbz(4, 5));
+    CHECK(cpu.pc() == 0x600);
+    CHECK(cpu.spr(spr::kSrr0) == 0x3000);
+    CHECK(cpu.spr(spr::kDar) == 0x1024);
+    // DSISR, X-form: xo 1014 bits 29-30 (10) in 15-16, bit 25 (1) in 17, bits 21-24 (1111) in
+    // 18-21; rA in 27-31.
+    CHECK(cpu.spr(spr::kDsisr) == ((2u << 15) | (1u << 14) | (15u << 10) | 4u));
+    CHECK(f.bus.read32(0x1020) == 0xFFFFFFFF);
+
+    cpu.set_msr(0);
+    cpu.set_spr(spr::kHid0, Gekko::kHid0Dce | Gekko::kHid0Ice);
+    f.exec(dcbz(4, 5));
+    CHECK(cpu.pc() == 0x3004);
+    CHECK(f.bus.read32(0x1020) == 0);
+}
+
+TEST_CASE("bcctr that decrements CTR (an invalid form) stops emulation") {
+    GekkoFixture f;
+    auto& cpu = f.cpu;
+    cpu.set_ctr(0x5000);
+    // BO = 16 (decrement CTR, branch if != 0, ignore the condition): undefined for bcctr.
+    const std::uint32_t word = bcctr(16, 0);
+    f.load({word});
+    try {
+        f.run(1);
+        FAIL("expected GekkoError");
+    } catch (const GekkoError& e) {
+        CHECK(e.pc == GekkoFixture::kProgram);
+        CHECK(e.word_or_address == word);
+    }
+    CHECK(cpu.pc() == GekkoFixture::kProgram);
+    CHECK(cpu.ctr() == 0x5000);
+}
+
+TEST_CASE("bus() reaches guest memory by physical address without touching the CPU") {
+    GekkoFixture f;
+    auto& cpu = f.cpu;
+    cpu.set_msr(kDr);  // translation on, no BATs: a CPU access would DSI
+    cpu.set_pc(0x4000);
+    cpu.bus().write32(0x2000, 0x12345678);
+    CHECK(cpu.bus().read32(0x2000) == 0x12345678);
+    CHECK(f.bus.read32(0x2000) == 0x12345678);
+    CHECK(cpu.pc() == 0x4000);
+    CHECK(cpu.msr() == kDr);
+    CHECK(!cpu.translate(0x2000, false, false).has_value());
 }
 
 TEST_CASE("an unimplemented opcode throws GekkoError with the pc and the word") {
