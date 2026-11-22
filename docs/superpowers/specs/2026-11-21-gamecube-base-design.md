@@ -143,7 +143,16 @@ después el JIT comparado contra él.
 
 - Lector de imágenes ISO/GCM (1 459 978 240 bytes, sin compresión). Cabecera: identificador de
   juego (MKDD USA = `GM4E01`), offset del DOL (`0x420`), del FST (`0x424`, tamaño `0x428`).
-- **Regla para el volcado que llegue:** si es `.iso`/`.gcm`, se usa tal cual. Si viene en `.zip`
+- **El volcado que llegó (2026-11-21):** `Mario Kart_ Double Dash!!.zip`, que en realidad es un
+  7z, con `Mario Kart - Double Dash!! (USA).nkit.iso` (490 999 808 bytes, CRC32 `099e2c6d`
+  verificado). Se extrajo con un script de la biblioteca estándar de Python (no hay 7-Zip en la
+  PC) a `E:\Rom nintendo\Mario Kart Double Dash\`. Es un **NKit ISO** de GameCube: sigue siendo
+  una imagen GCM válida (identificador `GM4E01`, magia en `0x1C`, marca `NKIT v01` en `0x200`,
+  DOL en `0x1F700`, FST en `0x387B00`, tamaño `0x1313`) a la que se le quitó el relleno, con el
+  FST apuntando a los archivos reubicados. **Decisión:** el lector lo usa tal cual, sin
+  conversión; por eso el lector **no exige** el tamaño de 1 459 978 240 bytes, solo la magia y
+  que los offsets caigan dentro del archivo.
+- **Regla general para otros volcados:** si es `.iso`/`.gcm`, se usa tal cual. Si viene en `.zip`
   o `.7z`, se extrae (como se hizo con MK64 y Spider-Man). Si es RVZ, NKit o CISO, el agente lo
   anota y el subproyecto 1 se prueba con lo que haya (por ejemplo, una imagen sintética en las
   pruebas), y la conversión o un lector de RVZ se decide entonces (RVZ necesita zstd/LZMA:
