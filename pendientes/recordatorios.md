@@ -913,3 +913,12 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Pendiente del usuario: probar el puente de DK's Jungle Parkway; luego el PR.
 - 2026-11-21 (4) — PR #19 abierto: `n64/jit-smooth` → `n64/vi-output` (apilado sobre #16-#18). Fusionar en orden #16, #17, #18, #19.
 - 2026-11-21 (5) — PRs #16-#19 fusionados en `main` (de arriba abajo: #19, #18, #17, #16). `main` = `n64/jit-smooth`. Desde ahora trabajar en ramas nuevas desde `main`.
+- 2026-11-22 — PAUSA en GameCube, subproyecto 1 (rama `gc/base`, subida). Diseño
+  `docs/superpowers/specs/2026-11-21-gamecube-base-design.md`, plan `docs/superpowers/plans/2026-11-21-gamecube-base.md`.
+  Hechas y revisadas: Tareas 1–4 (CPU Gekko entera + FPU + paired singles; disco NKit/DOL/arranque HLE/mapa de
+  memoria; máquina, PI, MI, VI y XFB). Suite Debug 12/12. MKDD (volcado en `E:\Rom nintendo\Mario Kart Double Dash\`,
+  NKit ISO; el .zip era un 7z, extraído con un script de Python) arranca y ejecuta 132 511 instrucciones hasta
+  `mtspr` MMCR0 (SPR 952) en 0x800A9654 (para la Tarea 7).
+  Falta: Tarea 5 (DI, SI, EXI, AI, interfaz DSP; detenida antes de escribir nada), 6 (FIFO gráfico), 7 (runner,
+  ezyemu, arrancar MKDD) y la revisión final. Registro de la ejecución (fuera de git):
+  `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`.
