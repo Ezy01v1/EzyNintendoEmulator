@@ -4,7 +4,7 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-21_
+_Última actualización: 2026-11-23_
 
 > **Perfil actualizado y SHADE (2026-11-15): nuevo atajo descartado.**
 > Con rectángulos constantes ya activos: 8258 muestras, 0 errores de captura;
@@ -345,6 +345,25 @@ eferenciares-v148` (fuera del repo).
       tejido es viejo (mismo campo dos veces). MK64 no es entrelazado.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
+
+## GameCube (en curso, rama `gc/base`)
+
+Diseño: `docs/superpowers/specs/2026-11-21-gamecube-base-design.md`. Subproyectos: 1 base y arranque →
+2 GX en la GPU del host → 3 audio (DSP y AI) → 4 JIT de Gekko → 5 tarjeta de memoria, más juegos, Wii.
+
+- [x] **Subproyecto 1: base y arranque de MKDD.** Gekko interpretado con pruebas, disco ISO/GCM (NKit leído
+  directo), DOL y arranque HLE, PI/MI/VI/DI/SI/EXI/AI/DSP, FIFO gráfico sin dibujar, `ezy_gc_runner` y la
+  consola en `ezyemu` (`.iso`/`.gcm` por ruta; mando de Xbox: A/B/X/Y/Start, RB = Z, gatillos = L/R
+  analógicos, sticks = stick y stick C; teclado como en N64 más C/V = X/Y). **MKDD llega a su bucle
+  principal**: 600+ campos seguidos con datos en el FIFO y la interrupción del VI, sin paradas (registro:
+  `docs/progress/2026-11-21-gamecube-mkdd-boot.md`). El DSP es un HLE del protocolo de correos del
+  microcódigo "Zelda" de JAudio (CRC 0x2FCDF1EC), sin mezclar audio. Falta la revisión final del subproyecto
+  y el PR a `main`.
+- [ ] **Subproyecto 2 (siguiente): GX en la GPU del host.** Hito: la pantalla de título de MKDD se ve. Hoy el
+  XFB es negro (la copia del EFB solo escribe el color de borrado). Necesita su propio diseño y plan.
+- [ ] Subproyecto 3 (audio): mezclar de verdad en el HLE Zelda (VPB, AFC, reverberación) y reproducir el AI.
+- Velocidad: el intérprete corre MKDD a ~0,47× (600 campos en ~2 min 10 s en Release); el JIT es el
+  subproyecto 4.
 
 ## Roadmap
 
@@ -928,3 +947,9 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   confirmar la re-revisión de esas correcciones. Falta: Tarea 7 (runner, ezyemu, MKDD) y la revisión final.
   Ojo: el Release incremental (LTCG) de ezy_gc_tests compiló mal dos veces; borrar los objetos Release de GC
   antes de fiarse de un resultado Release. Registro: `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`.
+- 2026-11-23 (2) — GameCube, subproyecto 1, Tarea 7 hecha (rama `gc/base`): `ezy_gc_runner` (estadísticas cada
+  60 campos, `--trace N`, `--screenshot`, `--dump-end`), `GameCubeSystem` en ezyemu, y MKDD hasta su bucle
+  principal. Paradas resueltas: SPR del monitor de rendimiento (MMCR0…PMC4), puerto serie 1 vacío (EXI 0:2),
+  saludo `DSP_INIT` y protocolo de correos del microcódigo Zelda (CRC 0x2FCDF1EC), PIINT; además el ancho
+  del XFB sale de WPL (MKDD usa 608). Criterio: 618 campos seguidos con FIFO y VI (3-620), sin paradas.
+  Registro: `docs/progress/2026-11-21-gamecube-mkdd-boot.md`. Falta la revisión final y el PR.

@@ -8,12 +8,13 @@
 namespace ezy::gc {
 
 // The mail protocol of MKDD's DSP microcode: Nintendo EAD's JAudio "Zelda" microcode, CRC
-// 0x2FCDF1EC (Dolphin's Core/HW/DSPHLE/UCodes/Zelda.cpp and UCodes.cpp, master, read on
-// 2026-11-23: flags MAKE_DOLBY_LOUD, so the default protocol, neither LIGHT_PROTOCOL nor
-// SYNC_PER_FRAME). The protocol is followed mail for mail, so the CPU gets every answer when
-// Dolphin's HLE would give it; no audio is mixed (design: audio is sub-project 3), so the
-// output buffers are left as they are. Every mail or command this does not model throws
-// BusError at the mailbox.
+// 0x2FCDF1EC (after Dolphin's Core/HW/DSPHLE/UCodes/Zelda.cpp and UCodes.cpp, from memory of
+// that code, not re-read in this session: flags MAKE_DOLBY_LOUD, so the default protocol,
+// neither LIGHT_PROTOCOL nor SYNC_PER_FRAME; checked against what MKDD's own SDK and JAudio
+// code send and wait for). The protocol is followed mail for mail, so the CPU gets every
+// answer when Dolphin's HLE would give it; no audio is mixed (design: audio is sub-project
+// 3), so the output buffers are left as they are. Every mail or command this does not model
+// throws BusError at the mailbox.
 //
 // Start (ZeldaUCode::Initialize): DSP_INIT 0xDCD10000 with the DSP interrupt, then the
 // handshake 0xF3551111.

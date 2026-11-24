@@ -93,6 +93,37 @@ La prueba de MKDD en `test_pi_vi.cpp` ahora exige que los 5 primeros campos corr
 que el DSP arranque el microcódigo 0x2FCDF1EC (unos 7 s en Debug; la suite cabe en su límite).
 
 El protocolo del DSP no fue un bloqueo para el subproyecto 3: con respuestas al protocolo de
-correos (sin mezclar) el juego avanza. Lo que queda para el subproyecto 3 es mezclar de verdad
+correos (sin mezclar) el juego avanza. Nota: el protocolo se escribió de memoria del código de
+Dolphin (`Zelda.cpp`), sin releerlo en esta sesión (sin red), y se comprobó contra lo que envía y
+espera el propio código del SDK y de JAudio en MKDD (desensamblado con un script local); conviene
+cotejarlo con `Zelda.cpp` en el subproyecto 3. Lo que queda para el subproyecto 3 es mezclar de verdad
 (las voces de los VPB, los coeficientes AFC, la reverberación) y llenar los búferes de salida
 que el AI reproduce.
+
+## Corrida del criterio (meta 1)
+
+Runner Release reconstruido desde cero para GC (objetos Release de `ezy_gc`, `ezy_gc_tests` y
+`ezy_gc_runner` borrados antes), en `gc/base` tras el commit 2671e3b:
+
+```
+ezy_gc_runner "<MKDD>.nkit.iso" --fields 620 --screenshot build/gc/mkdd_600.bmp
+field 600: instructions 4864860000 | interrupts VI=600 PE_TOKEN=0 PE_FINISH=1192 CP=0 DI=440 SI=4231
+  EXI=0 AI=0 DSP=8110 MI=0 ... | DI reads 439 | FIFO bytes 14560 | GX nop=706 cp=450 xf=388 indx=0 dl=35
+  inval=3 bp=1690 prim=298 | primitives 298 vertices 1618 | DSP mails 34359
+field 620: instructions 5027022000 | interrupts VI=620 PE_FINISH=1232 DI=452 SI=4372 DSP=8281 ...
+  | DI reads 451 | FIFO bytes 15360 | ... prim=299 | primitives 299 vertices 1622 | DSP mails 35518
+fields with FIFO data: 618 of 620; fields with a VI interrupt: 620 of 620
+longest run of fields with both: 618 (fields 3-620)
+XFB 608x448 saved to build/gc/mkdd_600.bmp
+exit 0
+```
+
+**Criterio cumplido**: 618 campos seguidos (del 3 al 620; los dos primeros son el arranque, antes
+de que el juego programe el GX) con datos en el FIFO gráfico y la interrupción del VI en cada
+uno, y ninguna parada. 620 campos tardan unos 2 min 15 s en Release (~0,46× de la velocidad
+real, ~37 M instrucciones/s del intérprete).
+
+Captura (`build/gc/mkdd_600.bmp`, fuera de git): 608×448, **negra entera**. Es lo esperado en
+este subproyecto: el juego dibuja con GX (cerca de 300 primitivas por campo), pero el EFB no se
+dibuja todavía, así que la copia del EFB al XFB solo escribe su color de borrado, que en MKDD es
+negro. Ver la pantalla de título es la meta del subproyecto 2.
