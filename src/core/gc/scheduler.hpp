@@ -15,6 +15,11 @@ namespace ezy::gc {
 enum class EventType : std::uint8_t {
     ViLine,      // VI reaches the next line (Task 4)
     DiTransfer,  // a DI command (a disc read and its DMA) finishes (Task 5)
+    SiPoll,      // the SI polls its enabled channels (every SIPOLL.X lines)
+    ArDma,       // an ARAM DMA finishes (ARINT)
+    AiDmaStart,  // the AI DMA latched its buffer, 200 cycles after it was enabled (AID)
+    AiDmaBlock,  // the AI DMA consumed one 32-byte block
+    AiSample,    // the AI sample counter reaches AIIT (AIINT)
     Count,
 };
 

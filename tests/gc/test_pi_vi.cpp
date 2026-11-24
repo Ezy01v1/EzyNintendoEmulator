@@ -312,7 +312,7 @@ TEST_CASE("a store to a hardware register does not touch RAM") {
 
     // Blocks the later tasks have not registered still stop the machine; so do 8-bit accesses
     // and a register in a registered block that nobody models.
-    CHECK_THROWS_AS(mem.read32(0x0C006000), ezy::gc::BusError);  // DI
+    CHECK_THROWS_AS(mem.read32(0x0C000000), ezy::gc::BusError);  // CP (Task 6)
     CHECK_THROWS_AS(mem.write8(kPi + 0x24, 1), ezy::gc::BusError);
     CHECK_THROWS_AS(mem.read32(0x0C004030), ezy::gc::BusError);  // MI profiling counters
 }

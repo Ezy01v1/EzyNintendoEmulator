@@ -12,12 +12,23 @@ std::unique_ptr<GameCube> GameCube::create(const std::filesystem::path& path) {
 }
 
 GameCube::GameCube(std::unique_ptr<Disc> disc)
-    : disc_(std::move(disc)), cpu_(memory_), vi_(scheduler_, pi_) {
-    // Register blocks. Tasks 5-6 register DI, SI, EXI, AI, the DSP interface, CP and PE here
-    // (memory_.map_mmio(MmioBlock::Di, &di_), ...); a block nobody maps throws when touched.
+    : disc_(std::move(disc)),
+      cpu_(memory_),
+      vi_(scheduler_, pi_),
+      di_(scheduler_, pi_, memory_.mem1(), *disc_),
+      si_(scheduler_, pi_),
+      exi_(pi_, memory_.mem1()),
+      ai_(scheduler_, pi_),
+      dsp_(scheduler_, pi_, memory_.mem1(), ai_) {
+    // Register blocks. Task 6 registers CP and PE here; a block nobody maps throws when touched.
     memory_.map_mmio(MmioBlock::Pi, &pi_);
     memory_.map_mmio(MmioBlock::Mi, &mi_);
     memory_.map_mmio(MmioBlock::Vi, &vi_);
+    memory_.map_mmio(MmioBlock::Dsp, &dsp_);
+    memory_.map_mmio(MmioBlock::Di, &di_);
+    memory_.map_mmio(MmioBlock::Si, &si_);
+    memory_.map_mmio(MmioBlock::Exi, &exi_);
+    memory_.map_mmio(MmioBlock::Ai, &ai_);
 
     // Interrupt wiring: peripherals -> PI cause bits -> the Gekko's external interrupt line.
     pi_.set_line_sink([this](bool level) { cpu_.set_external_interrupt(level); });
@@ -45,9 +56,13 @@ void GameCube::run_field() {
                 case EventType::ViLine:
                     if (vi_.on_event(due->when)) stats_.fifo_bytes_this_field = 0;
                     break;
-                case EventType::DiTransfer:  // Task 5
-                case EventType::Count:
-                    break;
+                case EventType::DiTransfer: di_.on_event(); break;
+                case EventType::SiPoll: si_.on_event(due->when); break;
+                case EventType::ArDma: dsp_.on_aram_dma_done(); break;
+                case EventType::AiDmaStart: dsp_.on_ai_dma_start(); break;
+                case EventType::AiDmaBlock: dsp_.on_ai_dma_block(due->when); break;
+                case EventType::AiSample: ai_.on_event(); break;
+                case EventType::Count: break;
             }
         }
     }
@@ -59,6 +74,8 @@ Image GameCube::xfb() const { return vi_.xfb_image(memory_.mem1()); }
 Stats GameCube::stats() const {
     Stats s = stats_;
     for (unsigned bit = 0; bit < Pi::kCauseCount; ++bit) s.interrupts[bit] = pi_.interrupts(bit);
+    s.di_reads = di_.reads();
+    s.dsp_mails = dsp_.mails_received();
     s.fields = vi_.fields();
     return s;
 }
