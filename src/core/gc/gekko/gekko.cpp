@@ -300,6 +300,10 @@ bool Gekko::try_read_spr(int number, std::uint32_t& value) const {
     else if (in(spr::kIbat0u, 8)) value = s_.ibat[static_cast<std::size_t>(number - spr::kIbat0u)];
     else if (in(spr::kDbat0u, 8)) value = s_.dbat[static_cast<std::size_t>(number - spr::kDbat0u)];
     else if (in(spr::kGqr0, 8)) value = s_.gqr[static_cast<std::size_t>(number - spr::kGqr0)];
+    else if (in(spr::kMmcr0, spr::kPerfMonitorCount))
+        value = s_.perf_monitor[static_cast<std::size_t>(number - spr::kMmcr0)];
+    else if (in(spr::kUmmcr0, spr::kPerfMonitorCount))  // the user-level copies read the same registers
+        value = s_.perf_monitor[static_cast<std::size_t>(number - spr::kUmmcr0)];
     else return false;
     return true;
 }
@@ -354,7 +358,12 @@ bool Gekko::try_write_spr(int number, std::uint32_t value) {
     else if (in(spr::kIbat0u, 8)) s_.ibat[static_cast<std::size_t>(number - spr::kIbat0u)] = value;
     else if (in(spr::kDbat0u, 8)) s_.dbat[static_cast<std::size_t>(number - spr::kDbat0u)] = value;
     else if (in(spr::kGqr0, 8)) s_.gqr[static_cast<std::size_t>(number - spr::kGqr0)] = value;
-    else return false;  // unknown, or read-only (PVR, TBL/TBU's read numbers)
+    // The performance monitor: stored and read back (Dolphin's mtspr stores them too). No
+    // event is modeled, so the PMCs hold what was written and never count or raise the
+    // performance-monitor exception; the SDK writes them at boot (MKDD: MMCR0 at 0x800A9654).
+    else if (in(spr::kMmcr0, spr::kPerfMonitorCount))
+        s_.perf_monitor[static_cast<std::size_t>(number - spr::kMmcr0)] = value;
+    else return false;  // unknown, or read-only (PVR, TBL/TBU's read numbers, UMMCR0..UPMC4)
     return true;
 }
 

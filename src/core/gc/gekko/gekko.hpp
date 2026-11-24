@@ -50,6 +50,9 @@ inline constexpr int kDbat0u = 536;  // DBAT0U ... DBAT3L = 536..543
 inline constexpr int kIbat0l = kIbat0u + 1, kDbat0l = kDbat0u + 1, kDbat1u = kDbat0u + 2, kDbat1l = kDbat0u + 3;
 inline constexpr int kGqr0 = 912;  // GQR0..7 = 912..919
 inline constexpr int kHid2 = 920, kWpar = 921, kDmaU = 922, kDmaL = 923;
+// The performance monitor (750 manual, "Performance Monitor"): MMCR0, PMC1, PMC2, SIA, MMCR1,
+// PMC3, PMC4 at 952..958, and their user-level read-only copies UMMCR0 ... UPMC4 at 936..942.
+inline constexpr int kUmmcr0 = 936, kMmcr0 = 952, kPerfMonitorCount = 7;
 inline constexpr int kHid0 = 1008, kHid1 = 1009, kHid4 = 1011, kL2cr = 1017;
 }  // namespace spr
 
@@ -77,6 +80,7 @@ struct GekkoState {
     std::array<std::uint32_t, 8> gqr{};           // stored here; used by the paired singles
     std::array<std::uint32_t, 16> sr{};           // stored only: no page tables (BAT-only MMU)
     std::uint32_t hid0 = 0, hid1 = 0, hid2 = 0, hid4 = 0, wpar = 0, dmau = 0, dmal = 0, l2cr = 0;
+    std::array<std::uint32_t, 7> perf_monitor{};  // MMCR0, PMC1, PMC2, SIA, MMCR1, PMC3, PMC4
     bool reservation = false;               // lwarx/stwcx.
     std::uint32_t reservation_address = 0;  // the EA lwarx used; stwcx. stores only to the same one
     bool external_interrupt = false;   // the level of the interrupt line (PI)

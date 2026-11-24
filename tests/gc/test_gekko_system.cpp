@@ -514,3 +514,36 @@ TEST_CASE("reset leaves the CPU at the system reset vector") {
     CHECK(cpu.spr(spr::kPvr) == 0x00083214);
     CHECK(f.run(1) == 1);
 }
+
+TEST_CASE("the performance monitor SPRs are stored, and their user-level copies read them") {
+    GekkoFixture f;
+    auto& cpu = f.cpu;
+    // MMCR0, PMC1, PMC2, SIA, MMCR1, PMC3, PMC4 (952..958): mtspr stores, mfspr reads back.
+    for (int i = 0; i < spr::kPerfMonitorCount; ++i) {
+        CAPTURE(i);
+        const std::uint32_t value = 0x80000000u | static_cast<std::uint32_t>(i * 0x111);
+        cpu.set_gpr(3, value);
+        f.load({mtspr(spr::kMmcr0 + i, 3), mfspr(4, spr::kMmcr0 + i), mfspr(5, spr::kUmmcr0 + i)});
+        f.run(3);
+        CHECK(cpu.gpr(4) == value);
+        CHECK(cpu.gpr(5) == value);  // UMMCR0 ... UPMC4 (936..942)
+    }
+    // No event is modeled: a PMC keeps what was written while instructions run.
+    cpu.set_gpr(3, 0x00000080);  // MMCR0: count instructions in PMC1 (750 manual, PMC1 event 2 = 0x80 >> 6)
+    cpu.set_gpr(4, 5);
+    f.load({mtspr(spr::kMmcr0, 3), mtspr(spr::kMmcr0 + 1, 4), ori(0, 0, 0), ori(0, 0, 0), mfspr(6, spr::kMmcr0 + 1)});
+    f.run(5);
+    CHECK(cpu.gpr(6) == 5);
+    // The user-level copies are read-only.
+    CHECK_THROWS_AS(cpu.set_spr(spr::kUmmcr0, 0), GekkoError);
+    // The user-level copies are readable in user mode; the supervisor ones are not (bit 4 of
+    // the SPR number: 952 = 0x3B8 has it, 936 = 0x3A8 does not).
+    cpu.set_msr(kPr);
+    f.load({mfspr(7, spr::kUmmcr0 + 1)});
+    f.run(1);
+    CHECK(cpu.gpr(7) == 5);
+    f.load({mfspr(7, spr::kMmcr0)});
+    f.run(1);
+    CHECK(cpu.pc() == 0x700);  // program exception, privileged
+    CHECK(cpu.spr(spr::kSrr1) == (kPr | Gekko::kProgramPrivileged));
+}

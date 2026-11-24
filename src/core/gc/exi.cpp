@@ -140,25 +140,32 @@ void Exi::transfer(unsigned channel) {
     if (cs == 0) transfer_error(channel, "transfer with no device selected");
     if (cs != 1 && cs != 2 && cs != 4) transfer_error(channel, "transfer with several devices selected");
     const unsigned device = cs == 1 ? 0 : cs == 2 ? 1 : 2;
-    if (channel != 0 || device != 1) {
+    // Serial port 1 (channel 0, device 2) holds Dolphin's default None device, which drives
+    // nothing: reads give 0 and writes vanish.
+    const bool serial_port_1 = channel == 0 && device == 2;
+    if (channel != 0 || (device != 1 && !serial_port_1)) {
         transfer_error(channel, "device " + std::to_string(device) + " has nothing plugged in (empty slot)");
     }
     const std::uint32_t rw = (ch.cr >> 2) & 3;
-    if (rw > 1) transfer_error(channel, "read-write transfers to the IPL chip are not modeled");
+    if (rw > 1) transfer_error(channel, "read-write transfers are not modeled");
+    const auto move_byte = [&](std::uint8_t& byte) {
+        if (serial_port_1) byte = 0;
+        else ipl_byte(byte, channel);
+    };
     if (!(ch.cr & kDma)) {
         const unsigned bytes = ((ch.cr >> 4) & 3) + 1;
         if (rw == 0) {
             std::uint32_t result = 0;
             for (unsigned i = 0; i < bytes; ++i) {
                 std::uint8_t byte = 0;
-                ipl_byte(byte, channel);
+                move_byte(byte);
                 result |= std::uint32_t{byte} << (24 - 8 * i);
             }
             ch.data = result;
         } else {
             for (unsigned i = 0; i < bytes; ++i) {
                 auto byte = static_cast<std::uint8_t>(ch.data >> (24 - 8 * i));
-                ipl_byte(byte, channel);
+                move_byte(byte);
             }
         }
     } else {
@@ -170,7 +177,7 @@ void Exi::transfer(unsigned channel) {
         }
         for (std::uint32_t i = 0; i < ch.length; ++i) {  // Dolphin's DMARead / DMAWrite, byte by byte
             std::uint8_t byte = rw == 0 ? 0 : mem1_[ch.mar + i];
-            ipl_byte(byte, channel);
+            move_byte(byte);
             if (rw == 0) mem1_[ch.mar + i] = byte;  // a DMA write never changes MEM1
         }
     }

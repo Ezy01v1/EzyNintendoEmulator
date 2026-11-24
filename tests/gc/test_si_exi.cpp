@@ -229,3 +229,31 @@ TEST_CASE("EXI RTC and SRAM reads return the clock and a valid SRAM") {
     CHECK_THROWS_AS(exi.read16(kCsr), BusError);
     CHECK_THROWS_AS(exi.read32(0x3C), BusError);
 }
+
+TEST_CASE("EXI channel 0 device 2 (serial port 1) is empty: writes vanish, reads give 0") {
+    // Later SDKs' EXIInit reads EXIGetID(0, 2) to look for a Barnacle debugger; Dolphin's
+    // default serial port 1 device is None (IEXIDevice: TransferByte does nothing).
+    Pi pi;
+    std::vector<std::uint8_t> ram(Memory::kMem1Size, 0xAB);
+    Exi exi(pi, ram);
+    pi.write32(0x04, 1u << Pi::kExi);
+    constexpr std::uint32_t kSelectSp1 = (4u << 7) | kExiTcintMask;  // channel 0, device 2
+    exi.write32(kCsr, kSelectSp1);
+    exi_imm_write(exi, 0x00000000, 2);  // EXIGetID's command
+    CHECK((exi.read32(kCsr) & kExiTcint) != 0);
+    exi.write32(kData, 0x12345678);
+    CHECK(exi_imm_read(exi, 4) == 0);  // the ID: nothing there
+    CHECK(pi.line());                  // TCINT reached the PI
+    // A DMA read fills MEM1 with zeros; a DMA write leaves it alone.
+    exi.write32(kMar, 0x1000);
+    exi.write32(kLen, 0x20);
+    exi.write32(kCr, 1 | 2);  // DMA read
+    for (std::uint32_t i = 0; i < 0x20; ++i) CHECK(ram[0x1000 + i] == 0);
+    exi.write32(kMar, 0x2000);
+    exi.write32(kCr, 1 | 2 | (1u << 2));  // DMA write
+    CHECK(ram[0x2000] == 0xAB);
+    exi.write32(kCsr, 0);
+    // Channel 2 device 0 (Dolphin's AD16) is still not modeled.
+    exi.write32(0x28 + kCsr, 1u << 7);
+    CHECK_THROWS_AS(exi.write32(0x28 + kCr, 1 | (3u << 4)), BusError);
+}

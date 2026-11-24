@@ -32,10 +32,12 @@ class Pi;
 // The EXI cause to the PI: any channel's (EXIINT & EXIINTMASK) | (TCINT & TCINTMASK) |
 // (EXTINT & EXTINTMASK).
 //
-// Devices: channel 0 device 1 is the IPL chip's RTC and SRAM; nothing else is plugged in
+// Devices: channel 0 device 1 is the IPL chip's RTC and SRAM. Channel 0 device 2, serial
+// port 1, has Dolphin's default None device (IEXIDevice): reads give 0, writes vanish (the
+// SDK's EXIInit reads its ID looking for a Barnacle debugger). Nothing else is plugged in
 // (the memory card slots, channel 0 device 0 and channel 1 device 0, are empty: EXT reads 0).
-// A transfer with no device selected, to an empty slot, in read-write mode, or a DMA that is
-// not 32-byte aligned or runs past MEM1 throws BusError (at the CR write, so with the PC).
+// A transfer with no device selected, to another empty slot, in read-write mode, or a DMA that
+// is not 32-byte aligned or runs past MEM1 throws BusError (at the CR write, so with the PC).
 //
 // The IPL chip (Dolphin's CEXIIPL): the first 4 bytes after selecting it are a command word,
 // bit 31 = write, address = (command >> 6) & 0x1FFFFFF. Addresses 0x800000-0x800043 are the
