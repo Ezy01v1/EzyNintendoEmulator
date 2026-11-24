@@ -110,10 +110,59 @@ TEST_CASE("ARAM DMA copies both ways and raises its interrupt") {
     CHECK(std::all_of(rig.ram.begin() + 0x20000, rig.ram.begin() + 0x20020, [](std::uint8_t b) { return b == 0; }));
     rig.run_for(246);
 
-    // A main-memory side past MEM1 stops the machine, before anything is copied.
+    // Deeper in the expansion range, where __ARChecksize goes next (0x01200000, 0x01400000, up
+    // to the register's top), both ways: nothing reaches ARAM, zeros come back.
+    for (const std::uint32_t probe : {0x01200000u, 0x01400000u, 0x02000000u, 0x03FFFFE0u}) {
+        dsp.write32(kArMm, 0x00010000);
+        dsp.write32(kArAr, probe);
+        dsp.write32(kArCnt, 0x00000020);
+        rig.run_for(246);
+        std::fill_n(rig.ram.begin() + 0x20000, 0x20, std::uint8_t{0xAA});
+        dsp.write32(kArMm, 0x00020000);
+        dsp.write32(kArAr, probe);
+        dsp.write32(kArCnt, 0x80000020);
+        CHECK(std::all_of(rig.ram.begin() + 0x20000, rig.ram.begin() + 0x20020, [](std::uint8_t b) { return b == 0; }));
+        rig.run_for(246);
+    }
+    CHECK(std::all_of(dsp.aram().begin(), dsp.aram().begin() + 0x400, [](std::uint8_t b) { return b == 0; }));
+    CHECK(std::equal(rig.ram.begin() + 0x10000, rig.ram.begin() + 0x10100, dsp.aram().begin() + 0x400));
+
+    // A DMA across the 16 MiB line: the part below it is ARAM, the rest the empty port.
+    for (std::uint32_t i = 0; i < 0x40; ++i) rig.ram[0x30000 + i] = static_cast<std::uint8_t>(0x40 + i);
+    dsp.write32(kArMm, 0x00030000);
+    dsp.write32(kArAr, 0x00FFFFE0);
+    dsp.write32(kArCnt, 0x00000040);
+    CHECK(std::equal(rig.ram.begin() + 0x30000, rig.ram.begin() + 0x30020, dsp.aram().end() - 0x20));
+    CHECK(dsp.read32(kArAr) == 0x01000020);
+    rig.run_for(2 * 246);
+    std::fill_n(rig.ram.begin() + 0x40000, 0x40, std::uint8_t{0xAA});
+    dsp.write32(kArMm, 0x00040000);
+    dsp.write32(kArAr, 0x00FFFFE0);
+    dsp.write32(kArCnt, 0x80000040);
+    CHECK(std::equal(rig.ram.begin() + 0x30000, rig.ram.begin() + 0x30020, rig.ram.begin() + 0x40000));
+    CHECK(std::all_of(rig.ram.begin() + 0x40020, rig.ram.begin() + 0x40040, [](std::uint8_t b) { return b == 0; }));
+    rig.run_for(2 * 246);
+
+    // The controller registers keep Dolphin's write masks; AR_MODE takes no write at all.
+    dsp.write16(kArInfo, 0xFFFF);
+    CHECK(dsp.read16(kArInfo) == 0x007F);
+    dsp.write16(0x1A, 0xFFFF);
+    CHECK(dsp.read16(0x1A) == 0x07FF);
+    dsp.write16(kArMode, 0);
+    CHECK(dsp.read16(kArMode) == 1);
+    dsp.write16(kArCnt, 0xFFFF);
+    CHECK(dsp.read16(kArCnt) == 0x83FF);
+    dsp.write16(kArCnt, 0);
+
+    // A main-memory side past MEM1 stops the machine, before anything is copied, and the
+    // 32-bit write that would start it changes no register (not even its high half).
     dsp.write32(kArMm, Memory::kMem1Size - 0x20);
     dsp.write32(kArAr, 0);
+    const std::uint32_t count_before = dsp.read32(kArCnt);
+    CHECK(count_before == 0);
     CHECK_THROWS_AS(dsp.write32(kArCnt, 0x80000040), BusError);
+    CHECK(dsp.read32(kArCnt) == count_before);
+    CHECK((rig.control() & kDmaBusy) == 0);
     CHECK(std::all_of(rig.ram.end() - 0x20, rig.ram.end(), [](std::uint8_t b) { return b == 0; }));
 }
 
@@ -177,6 +226,16 @@ TEST_CASE("AI DMA consumes blocks at 32 kHz and raises its interrupt") {
     dsp.write32(kAiStart, Memory::kMem1Size - 0x20);
     CHECK_THROWS_AS(dsp.write16(kAiControl, 0x8000 | 2), BusError);
     CHECK_THROWS_AS(dsp.write16(kAiBlocksLeft, 0), BusError);
+
+    // A DSP reset stops the AI DMA by clearing its control register only: the blocks left keep
+    // their count, as in Dolphin (its DSP_CONTROL write clears AudioDMAControl.Hex alone).
+    dsp.write32(kAiStart, 0x00100000);
+    dsp.write16(kAiControl, 0x8000 | 4);
+    rig.set_control(kHalt | kInit | kAidMask | kReset);
+    CHECK(dsp.read16(kAiControl) == 0);
+    CHECK(dsp.read16(kAiBlocksLeft) == 3);
+    CHECK_FALSE(rig.sched.pending(EventType::AiDmaStart));
+    CHECK_FALSE(rig.sched.pending(EventType::AiDmaBlock));
 }
 
 TEST_CASE("AI sample counter counts while playing and raises AIINT at its timing register") {

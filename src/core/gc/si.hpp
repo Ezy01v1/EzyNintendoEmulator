@@ -57,8 +57,10 @@ struct PadState {
 // VI's line, Vi::kCyclesPerHalfLine * 2) each enabled channel is polled. Channel 0 latches
 // IN_HI = stick Y | stick X << 8 | (buttons | 0x0080 "use origin") << 16 and, in mode 3,
 // IN_LO = trigger R | trigger L << 8 | C-stick Y << 16 | C-stick X << 24, and sets RDST0.
-// A channel with no device gets ERRSTAT | ERRLATCH in IN_HI and NOREP, no RDST (Dolphin's
-// ErrorNoResponse path). Simplification: the polls run free every X lines from the SIPOLL
+// A channel with no device gets ERRSTAT | ERRLATCH in IN_HI and NOREP, no RDST: Dolphin's
+// CSIDevice_Null::GetData (SI_DeviceNull.cpp, master) returns ErrorNoResponse, which SI.cpp's
+// UpdateDevices turns into SetNoResponse + ERRSTAT/ERRLATCH. (Older Dolphin versions set
+// hi = 0x80000000 and reported data; master no longer does.) Simplification: the polls run free every X lines from the SIPOLL
 // write instead of restarting at each field's vsync, and Y (polls per field) is not used to
 // stop them (Dolphin also polls every X lines; YAGCD: "Polls per X lines, begins at vsync").
 class Si final : public MmioHandler {

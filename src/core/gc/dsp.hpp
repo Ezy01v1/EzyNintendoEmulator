@@ -27,17 +27,20 @@ class Scheduler;
 //             set; reading the low half takes it (Dolphin's CMailHandler). While the DSP is
 //             halted, mails stay queued and the reads repeat the last one, its bit 15 clear.
 //   0x0A      control: RES 0 (reset: done at once, reads 0; also stops the AI DMA, as
-//             Dolphin), PIINT 1 (the CPU interrupts the DSP: part of a microcode's protocol,
-//             Task 7, throws), HALT 2, AID 3, AID mask 4, ARINT 5, ARINT mask 6, DSPINT 7,
+//             Dolphin: only its control register, the blocks left keep their count), PIINT 1
+//             (the CPU interrupts the DSP: part of a microcode's protocol, Task 7, throws),
+//             HALT 2, AID 3, AID mask 4, ARINT 5, ARINT mask 6, DSPINT 7,
 //             DSPINT mask 8 (the interrupt bits clear when written 1), DMA busy 9 (read-only:
 //             an ARAM DMA runs), INITCODE 10, INIT 11. Bits 12-15 throw. Reset value: HALT |
 //             INIT (0x0804, Dolphin's DSPHLE::Initialize). DSP cause to the PI: any of the
 //             three interrupt bits with its mask (the bit to its left).
-//   0x12 AR_INFO, 0x16 AR_MODE (reads 1: the ARAM controller is ready, which ARInit waits on),
-//   0x1A AR_REFRESH (156 at reset): stored, no effect (ARAM is always 16 MiB here).
+//   0x12 AR_INFO (write mask 0x007F), 0x1A AR_REFRESH (0x07FF; 156 at reset): stored, no
+//   effect (ARAM is always 16 MiB here). 0x16 AR_MODE reads 1 (the ARAM controller is ready,
+//   which ARInit waits on); no bit of it is writable (Dolphin's WMASK_NONE).
 //   0x20/0x22 ARAM DMA main-memory address (high masked 0x03FF, low 0xFFE0), 0x24/0x26 the
 //             ARAM address (same masks), 0x28/0x2A the count (bit 31: 1 = ARAM -> main
-//             memory; the low half drops bits 0-4). Writing 0x2A starts the DMA: the copy is
+//             memory; the high half keeps 0x83FF, the low half drops bits 0-4). Writing 0x2A
+//             (or 0x28 as a 32-bit write, all or nothing) starts the DMA: the copy is
 //             immediate, the addresses advance and the count drops to 0; the busy bit stays up
 //             and ARINT comes (count / 32) * 246 CPU cycles later (Dolphin's hardware
 //             measurement; EventType::ArDma). ARAM addresses from 16 MiB on are the expansion
@@ -103,6 +106,8 @@ private:
     void start_program(Program program);
     void receive_mail(std::uint32_t mail);
     void push_mail(std::uint32_t mail) { mails_out_.push_back(mail); }
+    // Throws if an ARAM DMA with this count register would run past MEM1.
+    void check_aram_dma(std::uint32_t count_register) const;
     void start_aram_dma();
     void latch_ai_dma();  // loads the AI DMA's block count (throws if the buffer leaves MEM1)
     [[nodiscard]] std::uint64_t ai_block_cycles() const;
@@ -132,7 +137,8 @@ private:
     std::optional<MicrocodeUpload> microcode_;
 
     // ARAM controller and DMA.
-    std::uint16_t ar_info_ = 0, ar_mode_ = 1, ar_refresh_ = 156;
+    std::uint16_t ar_info_ = 0, ar_refresh_ = 156;
+    static constexpr std::uint16_t ar_mode_ = 1;  // read-only: the ARAM controller is ready
     std::uint32_t ar_mm_ = 0, ar_ar_ = 0, ar_count_ = 0;
 
     // AI DMA.

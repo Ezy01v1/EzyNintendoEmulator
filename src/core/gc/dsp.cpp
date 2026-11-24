@@ -25,6 +25,9 @@ constexpr std::uint64_t kInitCodeCycles = 130 * 12;  // 130 time-base ticks (Dol
 // Address registers: the high half keeps 10 bits, the low half drops the low 5 (Dolphin's
 // WMASK_* for AR_DMA_MMADDR/ARADDR and AUDIO_DMA_START).
 constexpr std::uint16_t kHighMask = 0x03FF, kLowMask = 0xFFE0;
+// The other write masks (Dolphin's WMASK_AR_INFO, WMASK_AR_REFRESH, and WMASK_AR_HI_RESTRICT |
+// WMASK_AR_CNT_DIR_BIT for the count's high half). AR_MODE has WMASK_NONE: writes keep it.
+constexpr std::uint16_t kArInfoMask = 0x007F, kArRefreshMask = 0x07FF, kCountHighMask = 0x83FF;
 constexpr std::uint32_t kAddressMask = 0x03FFFFE0;
 constexpr std::uint32_t kToMainMemory = 0x80000000;
 constexpr std::uint16_t kAiEnable = 0x8000, kAiBlocks = 0x7FFF;
@@ -110,7 +113,7 @@ void Dsp::write_control(std::uint16_t value) {
     control_ = c;
     if (value & kReset) {  // Dolphin: SetUCode(UCODE_ROM), and the AI DMA control cleared
         start_program(Program::Rom);
-        ai_control_ = 0;
+        ai_control_ = 0;  // only the control: the blocks left keep their count, as in Dolphin
         sched_.cancel(EventType::AiDmaStart);
         sched_.cancel(EventType::AiDmaBlock);
     }
@@ -122,20 +125,26 @@ void Dsp::write_control(std::uint16_t value) {
     update_irq();
 }
 
-void Dsp::start_aram_dma() {
-    const std::uint32_t count = ar_count_ & ~kToMainMemory;
+void Dsp::check_aram_dma(std::uint32_t count_register) const {
+    const std::uint32_t count = count_register & ~kToMainMemory;
     if (std::uint64_t{ar_mm_} + count > mem1_.size()) {
         throw BusError("ARAM DMA of " + hex32(count) + " bytes at main memory " + hex32(ar_mm_) + " runs past MEM1",
                        kBase + 0x2A);
     }
-    // The part below 16 MiB is ARAM; the rest is the empty expansion port.
+}
+
+void Dsp::start_aram_dma() {
+    check_aram_dma(ar_count_);
+    const std::uint32_t count = ar_count_ & ~kToMainMemory;
+    // The part below 16 MiB is ARAM; the rest is the empty expansion port. The ARAM pointer
+    // is only formed when some of the range is in ARAM (never past its end).
     const std::uint32_t in_aram = ar_ar_ < kAramSize ? std::min(count, kAramSize - ar_ar_) : 0;
-    const auto main = mem1_.begin() + ar_mm_;
+    std::uint8_t* const main = mem1_.data() + ar_mm_;
     if (ar_count_ & kToMainMemory) {
-        std::copy_n(aram_.begin() + ar_ar_, in_aram, main);
+        if (in_aram) std::copy_n(aram_.data() + ar_ar_, in_aram, main);
         std::fill_n(main + in_aram, count - in_aram, std::uint8_t{0});
-    } else {
-        std::copy_n(main, in_aram, aram_.begin() + ar_ar_);
+    } else if (in_aram) {
+        std::copy_n(main, in_aram, aram_.data() + ar_ar_);
     }
     ar_mm_ = (ar_mm_ + count) & kAddressMask;
     ar_ar_ = (ar_ar_ + count) & kAddressMask;
@@ -220,14 +229,14 @@ void Dsp::write16(std::uint32_t offset, std::uint16_t value) {
             return;
         case 0x0A: write_control(value); return;
         // The ARAM controller's setup: accepted, no effect (ARAM is a fixed 16 MiB here).
-        case 0x12: ar_info_ = value; return;
-        case 0x16: ar_mode_ = value; return;
-        case 0x1A: ar_refresh_ = value; return;
+        case 0x12: ar_info_ = value & kArInfoMask; return;
+        case 0x16: return;  // AR_MODE: no bit is writable (WMASK_NONE); it keeps reading 1
+        case 0x1A: ar_refresh_ = value & kArRefreshMask; return;
         case 0x20: set_high(ar_mm_, value & kHighMask); return;
         case 0x22: set_low(ar_mm_, value & kLowMask); return;
         case 0x24: set_high(ar_ar_, value & kHighMask); return;
         case 0x26: set_low(ar_ar_, value & kLowMask); return;
-        case 0x28: set_high(ar_count_, value); return;
+        case 0x28: set_high(ar_count_, value & kCountHighMask); return;
         case 0x2A:
             set_low(ar_count_, value & kLowMask);
             start_aram_dma();
@@ -267,6 +276,13 @@ std::uint32_t Dsp::read32(std::uint32_t offset) {
 
 void Dsp::write32(std::uint32_t offset, std::uint32_t value) {
     if (offset & 3) unmodeled("misaligned 32-bit write", offset);
+    // A 32-bit write is all or nothing. Of the register pairs, only the ARAM count's can fail
+    // on its low half (the DMA it starts runs past MEM1), so that one is checked before the
+    // high half lands; every other pair is either always accepted or fails on its high half.
+    if (offset == 0x28) {
+        const std::uint32_t high = (value >> 16) & kCountHighMask;
+        check_aram_dma((high << 16) | (value & kLowMask));
+    }
     write16(offset, static_cast<std::uint16_t>(value >> 16));
     write16(offset + 2, static_cast<std::uint16_t>(value));
 }

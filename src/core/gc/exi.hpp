@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <span>
+#include <utility>
 
 #include "gc/mmio.hpp"
 
