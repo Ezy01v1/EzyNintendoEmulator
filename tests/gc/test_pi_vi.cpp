@@ -310,9 +310,9 @@ TEST_CASE("a store to a hardware register does not touch RAM") {
     CHECK(mem.read32(0x3024) == (std::uint32_t{before[0x3024]} << 24 | std::uint32_t{before[0x3025]} << 16 |
                                  std::uint32_t{before[0x3026]} << 8 | before[0x3027]));
 
-    // Blocks the later tasks have not registered still stop the machine; so do 8-bit accesses
-    // and a register in a registered block that nobody models.
-    CHECK_THROWS_AS(mem.read32(0x0C000000), ezy::gc::BusError);  // CP (Task 6)
+    // An address between the register blocks and the pipe still stops the machine; so do
+    // 8-bit accesses and a register in a registered block that nobody models.
+    CHECK_THROWS_AS(mem.read32(0x0C007000), ezy::gc::BusError);  // past the AI block, before the pipe
     CHECK_THROWS_AS(mem.write8(kPi + 0x24, 1), ezy::gc::BusError);
     CHECK_THROWS_AS(mem.read32(0x0C004030), ezy::gc::BusError);  // MI profiling counters
 }

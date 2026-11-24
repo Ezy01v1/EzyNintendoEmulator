@@ -35,6 +35,12 @@ std::uint32_t yuv_to_argb(int y, int u, int v) {
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
+Yuv rgb_to_yuv(int r, int g, int b) {
+    auto clamp = [](int x) { return static_cast<std::uint8_t>(std::clamp(x, 0, 255)); };
+    return {clamp(16 + ((66 * r + 129 * g + 25 * b + 128) >> 8)), clamp(128 + ((-38 * r - 74 * g + 112 * b + 128) >> 8)),
+            clamp(128 + ((112 * r - 94 * g - 18 * b + 128) >> 8))};
+}
+
 Vi::Vi(Scheduler& scheduler, Pi& pi) : sched_(scheduler), pi_(pi) {
     // Dolphin's VideoInterface::Preset() (NTSC).
     regs_[0x00 / 2] = 6;                // VTR: EQU = 6, ACV = 0

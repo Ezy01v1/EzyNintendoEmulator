@@ -23,8 +23,8 @@ namespace ezy::gc {
 //   0x0C/10/14   the CP FIFO's base, end and write pointer (Task 6 uses them): masked with
 //                0x1FFFFFE0, physical and 32-byte aligned, as Dolphin does (its
 //                GetPhysicalAddressMask(GC) & 0xFFFFFFE0).
-//   0x18         FIFO reset: accepted, no effect (Dolphin resets the pipe and the CP FIFO:
-//                Task 6).
+//   0x18         FIFO reset: bit 0 set calls the FIFO reset sink (Dolphin resets the pipe
+//                and the CP's video buffer; GXAbortFrame uses it); reads 0.
 //   0x24         reset code: stored.
 //   0x2C         the Flipper revision, reads kRevision = FLIPPER_REV_C (0x246500B1 in
 //                Dolphin's ProcessorInterface.cpp); read-only.
@@ -47,6 +47,9 @@ public:
     // interrupt line).
     using LineSink = std::function<void(bool)>;
     void set_line_sink(LineSink sink) { sink_ = std::move(sink); }
+    // Called when the CPU writes the FIFO reset register (0x18) with bit 0 set: the graphics
+    // FIFO drops its gathered bytes (GxFifo::reset_pipe).
+    void set_fifo_reset_sink(std::function<void()> sink) { fifo_reset_ = std::move(sink); }
 
     // A peripheral raises (level true) or clears one cause (0-13; anything else throws
     // std::invalid_argument). A rising edge is counted for Stats.
@@ -79,6 +82,7 @@ private:
     bool line_ = false;
     std::array<std::uint64_t, kCauseCount> counts_{};
     LineSink sink_;
+    std::function<void()> fifo_reset_;
 };
 
 }  // namespace ezy::gc

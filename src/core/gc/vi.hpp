@@ -22,6 +22,15 @@ struct Image {
 // (V-128), B = 1.164 (Y-16) + 2.018 (U-128); clamped to 0..255, alpha 0xFF.
 [[nodiscard]] std::uint32_t yuv_to_argb(int y, int u, int v);
 
+// The inverse, for the EFB copy's clear color (GxFifo): RGB to BT.601 limited range, in 8.8
+// fixed point, Y = 16 + (66 R + 129 G + 25 B + 128) >> 8, U = 128 + (-38 R - 74 G + 112 B +
+// 128) >> 8, V = 128 + (112 R - 94 G - 18 B + 128) >> 8 (the shifts floor). Black is (16,
+// 128, 128) and white (235, 128, 128): both come back exact through yuv_to_argb.
+struct Yuv {
+    std::uint8_t y = 0, u = 0, v = 0;
+};
+[[nodiscard]] Yuv rgb_to_yuv(int r, int g, int b);
+
 // The video interface at 0x0C002000: registers, the frame timing and the display interrupts
 // (YAGCD "Video Interface"; Dolphin's Core/HW/VideoInterface.h/.cpp, read on 2026-11-22,
 // whose register offsets and bit layouts these follow).

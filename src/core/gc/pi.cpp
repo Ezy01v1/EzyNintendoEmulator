@@ -42,7 +42,7 @@ std::uint32_t Pi::read32(std::uint32_t offset) {
         case 0x0C: return fifo_base_;
         case 0x10: return fifo_end_;
         case 0x14: return fifo_wptr_;
-        case 0x18: return 0;  // the FIFO reset register reads 0 (accepted, no effect)
+        case 0x18: return 0;  // the FIFO reset register reads 0
         case 0x24: return reset_code_;
         case 0x2C: return kRevision;
         default: unmodeled("read", offset);
@@ -62,7 +62,9 @@ void Pi::write32(std::uint32_t offset, std::uint32_t value) {
         case 0x0C: fifo_base_ = value & kFifoMask; return;
         case 0x10: fifo_end_ = value & kFifoMask; return;
         case 0x14: fifo_wptr_ = value & kFifoMask; return;
-        case 0x18: return;  // FIFO reset: accepted, no effect
+        case 0x18:  // FIFO reset (GXAbortFrame): bit 0 drops the graphics FIFO's gathered data
+            if ((value & 1) && fifo_reset_) fifo_reset_();
+            return;
         case 0x24: reset_code_ = value; return;
         default: unmodeled("write", offset);  // includes the read-only revision at 0x2C
     }

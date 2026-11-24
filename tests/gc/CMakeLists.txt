@@ -1,6 +1,6 @@
 add_executable(ezy_gc_tests test_main.cpp test_gekko_integer.cpp test_gekko_system.cpp test_gekko_fpu.cpp
                             test_gekko_paired.cpp test_disc_boot.cpp test_memory.cpp test_scheduler.cpp test_pi_vi.cpp
-                            test_di.cpp test_si_exi.cpp test_dsp_ai.cpp)
+                            test_di.cpp test_si_exi.cpp test_dsp_ai.cpp test_gx_fifo.cpp)
 target_link_libraries(ezy_gc_tests PRIVATE ezy_gc doctest::doctest ezy_warnings)
 # Lets doctest print std::string_view on MSVC (it otherwise forward-declares std::ostream).
 target_compile_definitions(ezy_gc_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
