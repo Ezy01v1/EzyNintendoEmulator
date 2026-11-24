@@ -362,6 +362,8 @@ Diseño: `docs/superpowers/specs/2026-11-21-gamecube-base-design.md`. Subproyect
 - [ ] **Subproyecto 2 (siguiente): GX en la GPU del host.** Hito: la pantalla de título de MKDD se ve. Hoy el
   XFB es negro (la copia del EFB solo escribe el color de borrado). Necesita su propio diseño y plan.
 - [ ] Subproyecto 3 (audio): mezclar de verdad en el HLE Zelda (VPB, AFC, reverberación) y reproducir el AI.
+- Ojo: `ezy_gc_tests` en Debug tarda ~75 s de su límite de 120 s en ctest (la prueba de tiempos del VI
+  sola ~56 s); poco margen para más pruebas largas de MKDD.
 - Velocidad: el intérprete corre MKDD a ~0,47× (600 campos en ~2 min 10 s en Release); el JIT es el
   subproyecto 4.
 

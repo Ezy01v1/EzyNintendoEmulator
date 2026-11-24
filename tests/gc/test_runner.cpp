@@ -123,3 +123,16 @@ TEST_CASE("the criterion streak counts the longest run of fields with FIFO data 
     CHECK(streak.current == 1);
     CHECK(streak.longest == 3);
 }
+
+TEST_CASE("the runner prints only the final stats when print_every is 0") {
+    DiscBuilder builder;
+    const auto image = builder.write("runner_print0");
+    auto gc = GameCube::create(image);
+    REQUIRE(gc != nullptr);
+    std::ostringstream out;
+    const ezy::gc_runner::RunReport report = ezy::gc_runner::run_fields(*gc, 2, out, 0);
+    CHECK(report.exit_code == 0);
+    const std::string text = out.str();
+    CHECK(text.find("field 1:") == std::string::npos);
+    CHECK(text.find("field 2:") != std::string::npos);
+}

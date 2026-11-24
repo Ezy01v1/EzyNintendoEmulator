@@ -15,12 +15,15 @@ por juego, nada por dirección), con su prueba unitaria.
 
 ### 1. `mtspr` SPR 952 (MMCR0) en `0x800A9654`, tras 132 511 instrucciones
 
-El SDK escribe el monitor de rendimiento del 750 al iniciar. Se modelan los SPR 952-958
-(MMCR0, PMC1, PMC2, SIA, MMCR1, PMC3, PMC4) como en el hardware y en Dolphin: se guardan y se
-leen; las copias de usuario de solo lectura 936-942 (UMMCR0…UPMC4) leen los mismos registros
-y no se pueden escribir. Ningún evento se cuenta (los PMC conservan lo escrito y nunca piden
-la excepción del monitor). Prueba: `the performance monitor SPRs are stored, and their
-user-level copies read them` (test_gekko_system.cpp).
+El SDK escribe el monitor de rendimiento del 750 al iniciar (con ceros). Se modelan los SPR
+952-958 (MMCR0, PMC1, PMC2, SIA, MMCR1, PMC3, PMC4): se guardan y se leen; las copias de usuario
+de solo lectura 936-942 (UMMCR0…UPMC4) leen los mismos registros y no se pueden escribir. El
+conteo de eventos no se modela (Dolphin sí cuenta algunos, `UpdatePerformanceMonitor`, y puede
+pedir la excepción del monitor), así que una escritura de MMCR0/MMCR1 que elija un evento
+(PMC1SELECT…PMC4SELECT) o active su interrupción (ENINT, PMC1INTCONTROL, PMCINTCONTROL) detiene
+la emulación con el PC y el valor, en vez de no contar nada en silencio; MKDD no lo hace (revisión
+de la tarea 7). Prueba: `the performance monitor SPRs are stored, and their user-level copies
+read them` (test_gekko_system.cpp).
 
 ### 2. EXI canal 0, dispositivo 2, en `0x800C3BD8`, tras 145 146 instrucciones
 
@@ -44,7 +47,7 @@ primera tarea: es el protocolo de tareas del SDK (`DSPAddTask`), que todo microc
 El microcódigo de MKDD se identifica como lo hace Dolphin (`UCodeFactory`): el CRC
 `HashEctor` de la imagen de IRAM que sube el SDK (0x00343680, 0x1D20 bytes) es **0x2FCDF1EC**,
 el microcódigo "Zelda" de JAudio (Nintendo EAD; Dolphin `Zelda.cpp`, banderas
-`MAKE_DOLBY_LOUD`: el protocolo por defecto). Se añade `dsp_zelda.hpp/.cpp` con ese protocolo
+`MAKE_DOLBY_LOUDER`: el protocolo por defecto). Se añade `dsp_zelda.hpp/.cpp` con ese protocolo
 de correos. Arranque: `DSP_INIT` con interrupción y luego el saludo 0xF3551111. Los correos
 DSP→CPU pueden llevar la interrupción del DSP como en el `CMailHandler` de Dolphin (sube cuando
 ese correo pasa a ser el primero pendiente). Un microcódigo con otro CRC detiene la emulación
@@ -93,10 +96,9 @@ La prueba de MKDD en `test_pi_vi.cpp` ahora exige que los 5 primeros campos corr
 que el DSP arranque el microcódigo 0x2FCDF1EC (unos 7 s en Debug; la suite cabe en su límite).
 
 El protocolo del DSP no fue un bloqueo para el subproyecto 3: con respuestas al protocolo de
-correos (sin mezclar) el juego avanza. Nota: el protocolo se escribió de memoria del código de
-Dolphin (`Zelda.cpp`), sin releerlo en esta sesión (sin red), y se comprobó contra lo que envía y
-espera el propio código del SDK y de JAudio en MKDD (desensamblado con un script local); conviene
-cotejarlo con `Zelda.cpp` en el subproyecto 3. Lo que queda para el subproyecto 3 es mezclar de verdad
+correos (sin mezclar) el juego avanza. El protocolo se comprobó contra lo que envía y espera el
+propio código del SDK y de JAudio en MKDD (desensamblado con un script local), y la revisión de la
+tarea 7 lo cotejó con `Zelda.cpp` y `UCodes.h` de Dolphin master (2026-11-23). Lo que queda para el subproyecto 3 es mezclar de verdad
 (las voces de los VPB, los coeficientes AFC, la reverberación) y llenar los búferes de salida
 que el AI reproduce.
 
@@ -127,3 +129,8 @@ Captura (`build/gc/mkdd_600.bmp`, fuera de git): 608×448, **negra entera**. Es 
 este subproyecto: el juego dibuja con GX (cerca de 300 primitivas por campo), pero el EFB no se
 dibuja todavía, así que la copia del EFB al XFB solo escribe su color de borrado, que en MKDD es
 negro. Ver la pantalla de título es la meta del subproyecto 2.
+
+Tras las correcciones de la revisión (el monitor de rendimiento se detiene si se le pide contar;
+PIINT solo con un microcódigo; comandos 01/02 de longitud exacta; WPL > 40 se detiene), la misma
+corrida con un runner Release limpio da exactamente lo mismo: 618 campos seguidos (3-620), exit 0.
+MKDD no pide contar eventos al monitor de rendimiento.

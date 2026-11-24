@@ -122,6 +122,11 @@ public:
     static constexpr std::uint32_t kHid0Icfi = 0x00000800, kHid0Dcfi = 0x00000400;
     // HID2: LSQE (psq_l[u]/psq_st[u] legal), WPE (write-gather pipe), PSE (paired singles), LCE
     // (the locked cache is enabled: dcbz_l is legal).
+    // The MMCR fields that make the performance monitor count or interrupt (750 manual, PEM bit
+    // numbers): MMCR0 ENINT (5), PMC1INTCONTROL (16), PMCINTCONTROL (17), PMC1SELECT (19-25),
+    // PMC2SELECT (26-31); MMCR1 PMC3SELECT (0-4), PMC4SELECT (5-9).
+    static constexpr std::uint32_t kMmcr0Counting = 0x04000000 | 0x00008000 | 0x00004000 | 0x00001FC0 | 0x0000003F;
+    static constexpr std::uint32_t kMmcr1Counting = 0xF8000000 | 0x07C00000;
     static constexpr std::uint32_t kHid2Lsqe = 0x80000000, kHid2Wpe = 0x40000000, kHid2Pse = 0x20000000,
                                    kHid2Lce = 0x10000000;
     // FPSCR bits (PEM 2.1.4). FEX and VX are summaries the CPU computes; the rest are stored.
@@ -215,7 +220,8 @@ public:
     void set_gqr(int index, std::uint32_t value) { s_.gqr[static_cast<std::size_t>(index)] = value; }
     // mfspr/mtspr by number, with their effects (a DEC write can request the exception).
     // Throw GekkoError (word_or_address = the SPR number) for an SPR this core does not
-    // model, or a write to a read-only one (PVR, the TBL/TBU read numbers).
+    // model, or a write to a read-only one (PVR, the TBL/TBU read numbers); also an MMCR
+    // write that would start performance-monitor counting (word_or_address = the value).
     [[nodiscard]] std::uint32_t spr(int number) const;
     void set_spr(int number, std::uint32_t value);
     [[nodiscard]] GekkoState& state() { return s_; }

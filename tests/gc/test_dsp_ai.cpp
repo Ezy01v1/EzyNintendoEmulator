@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <initializer_list>
+#include <type_traits>
 #include <vector>
 
 #include "disc_builder.hpp"
@@ -55,7 +56,7 @@ struct AudioRig {
 };
 
 // MKDD's DSP microcode, as Dolphin's UCodeFactory knows it (HashEctor of the IRAM image):
-// its "Zelda" microcode (Zelda.cpp, flags MAKE_DOLBY_LOUD: the default mail protocol).
+// its "Zelda" microcode (Zelda.cpp, flags MAKE_DOLBY_LOUDER: the default mail protocol).
 constexpr std::uint32_t kMkddMicrocodeCrc = 0x2FCDF1EC;
 constexpr std::uint32_t kIramImage = 0x00345600, kIramLength = 0x1F20;
 
@@ -348,6 +349,10 @@ TEST_CASE("DSP HLE answers the boot handshake mails") {
     CHECK(dsp.read32(kMailFromDsp) == 0x8071FEEDu);
     CHECK((dsp.read32(kMailFromDsp) & 0x80000000u) == 0);
     CHECK((rig.control() & kDspInt) == 0);  // polled: the ROM raises no interrupt
+    // The CPU->DSP interrupt means something only to a microcode: with the ROM running it stops.
+    const std::uint16_t rom_control = rig.control();
+    CHECK_THROWS_AS(rig.set_control(static_cast<std::uint16_t>((rom_control & ~0xA8) | kAssertInt)), BusError);
+    CHECK(rig.control() == rom_control);  // nothing changed
 
     // Mail the ROM does not expect: it answers 0xFEEE0000 | the low half.
     dsp.write32(kMailToDsp, 0x12345678);
@@ -387,6 +392,11 @@ TEST_CASE("DSP HLE answers the boot handshake mails") {
     CHECK_THROWS_AS(dsp.write16(kMailFromDsp, 0), BusError);
     CHECK_THROWS_AS(dsp.read16(0x10), BusError);
 }
+
+// The microcode HLE calls back into its Dsp: a copy or a move would leave it pointing at the
+// old object.
+static_assert(!std::is_copy_constructible_v<Dsp> && !std::is_copy_assignable_v<Dsp>);
+static_assert(!std::is_move_constructible_v<Dsp> && !std::is_move_assignable_v<Dsp>);
 
 TEST_CASE("the DSP HLE identifies the microcode by its CRC and stops on an unknown one") {
     AudioRig rig;
@@ -484,11 +494,36 @@ TEST_CASE("MKDD's microcode acknowledges each command with DSP_SYNC and the comm
         CHECK(rig.take() == kDspSync);
         CHECK(rig.take() == (0xF3550000u | (cmd >> 16)));
     }
+    // 0C, 0D and 0E take parameters this HLE does not use; their acks are the same.
+    rig.command({0x0C340000, 0x00005678, 0x00009ABC});
+    CHECK(rig.take() == kDspSync);
+    CHECK(rig.take() == 0xF3550C34u);
     rig.command({0x0D120000, 0x00001234});
     CHECK(rig.take() == kDspSync);
     CHECK(rig.take() == 0xF3550D12u);
+    rig.command({0x0E560000, 0x00800000});
+    CHECK(rig.take() == kDspSync);
+    CHECK(rig.take() == 0xF3550E56u);
     // A command the microcode does not have, or one that crashes it (04-09), stops emulation.
     CHECK_THROWS_AS(rig.command({0x10000000}), BusError);
+}
+
+TEST_CASE("MKDD's microcode stops on a setup or render command of the wrong length") {
+    // Command 01 is 5 words and 02 is 3: fewer or more would desynchronize the real
+    // microcode's command buffer, so they stop emulation instead of dropping words.
+    const std::vector<std::vector<std::uint32_t>> wrong = {
+        {0x01000040, 0x80340000, 0x80341000, 0x80342000},
+        {0x01000040, 0x80340000, 0x80341000, 0x80342000, 0x80343000, 0x80344000},
+        {0x02018000, 0x80350000},
+        {0x02018000, 0x80350000, 0x80351000, 0x80352000},
+    };
+    for (const auto& words : wrong) {
+        CAPTURE(words.size());
+        ZeldaRig rig;
+        rig.dsp.write32(kMailToDsp, static_cast<std::uint32_t>(words.size()));
+        for (std::size_t i = 0; i + 1 < words.size(); ++i) rig.dsp.write32(kMailToDsp, words[i]);
+        CHECK_THROWS_AS(rig.dsp.write32(kMailToDsp, words.back()), BusError);
+    }
 }
 
 TEST_CASE("MKDD's microcode renders frames as the CPU syncs the voices, then ends with DSP_FRAME_END") {

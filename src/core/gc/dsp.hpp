@@ -29,7 +29,8 @@ class Scheduler;
 //             halted, mails stay queued and the reads repeat the last one, its bit 15 clear.
 //   0x0A      control: RES 0 (reset: done at once, reads 0; also stops the AI DMA, as
 //             Dolphin: only its control register, the blocks left keep their count), PIINT 1
-//             (the CPU interrupts the DSP: taken at once by the HLE, reads 0, no effect),
+//             (the CPU interrupts the DSP: taken at once by a running microcode, reads 0, no
+//             effect; with the ROM or the init code running it throws),
 //             HALT 2, AID 3, AID mask 4, ARINT 5, ARINT mask 6, DSPINT 7,
 //             DSPINT mask 8 (the interrupt bits clear when written 1), DMA busy 9 (read-only:
 //             an ARAM DMA runs), INITCODE 10, INIT 11. Bits 12-15 throw. Reset value: HALT |
@@ -91,6 +92,9 @@ public:
 
     // `mem1` is MEM1 in guest order; raises Pi::kDsp on `pi`; the AI DMA plays at `ai`'s rate.
     Dsp(Scheduler& scheduler, Pi& pi, std::span<std::uint8_t> mem1, const Ai& ai);
+    // The microcode HLE's mail callback points at this object: no copies, no moves.
+    Dsp(const Dsp&) = delete;
+    Dsp& operator=(const Dsp&) = delete;
 
     // Handlers of EventType::ArDma, AiDmaStart and AiDmaBlock (due at `when`).
     void on_aram_dma_done();

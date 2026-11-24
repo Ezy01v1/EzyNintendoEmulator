@@ -315,6 +315,12 @@ TEST_CASE("the XFB picture is WPL * 16 pixels wide (MKDD's 608-pixel XFB)") {
     REQUIRE(picture.argb.size() == 608u * 448u);
     CHECK(picture.argb.back() == 0xFFFF0000u);  // the last line ends red, at pixel 607
     CHECK(picture.argb[447u * 608u] == 0xFFFF0000u);
+    // A line wider than 640 pixels (WPL > 40, e.g. 720 = 45) is not modeled: the write stops
+    // with the address and leaves the register as it was.
+    CHECK_THROWS_AS(mem.write16(kVi + 0x48, (45 << 8) | 90), BusError);
+    CHECK_THROWS_AS(mem.write32(kVi + 0x48, ((41u << 8) | 82u) << 16), BusError);
+    CHECK(mem.read16(kVi + 0x48) == ((38 << 8) | 76));
+    mem.write16(kVi + 0x48, (40 << 8) | 80);  // 640 is fine
 }
 
 TEST_CASE("a store to a hardware register does not touch RAM") {

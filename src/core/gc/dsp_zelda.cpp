@@ -97,12 +97,12 @@ void ZeldaMicrocode::run_pending_commands() {
             case 0x0E:
             case 0x0F: ack(sync); break;  // no effect here (no mixing, no GBA crypto, no Wii ARAM)
             case 0x01:
-                if (words.size() < 5) unmodeled("setup command " + hex32(cmd) + " of " + std::to_string(words.size()) + " words");
+                if (words.size() != 5) unmodeled("setup command " + hex32(cmd) + " of " + std::to_string(words.size()) + " words");
                 voices_per_frame_ = cmd & 0xFFFF;
                 ack(sync);
                 break;
             case 0x02:
-                if (words.size() < 3) unmodeled("render command " + hex32(cmd) + " of " + std::to_string(words.size()) + " words");
+                if (words.size() != 3) unmodeled("render command " + hex32(cmd) + " of " + std::to_string(words.size()) + " words");
                 frames_ = (cmd >> 16) & 0xFF;
                 frame_ = 0;
                 render();

@@ -73,7 +73,7 @@ struct RunReport {
 };
 
 // Runs `fields` fields, printing the stats every `print_every` fields (the runner: 60, one
-// emulated second) and at the end. When emulation
+// emulated second; 0: only at the end) and at the end. When emulation
 // stops (GekkoError, BusError, or any other error the machine throws), prints the reason, the
 // pc, the word or address, and the PCs gc.recent_pcs() holds, then returns exit code 1.
 inline RunReport run_fields(gc::GameCube& gc, int fields, std::ostream& out, int print_every = 60) {
@@ -98,7 +98,7 @@ inline RunReport run_fields(gc::GameCube& gc, int fields, std::ostream& out, int
             const bool vi = s.interrupts[gc::Pi::kVi] > vi_before;
             if (vi) ++report.fields_with_vi_interrupt;
             report.streak.add(report.fields_run, s.fifo_bytes_last_field > 0, vi);
-            if (report.fields_run % print_every == 0 && report.fields_run != fields) print_stats(out, s);
+            if (print_every > 0 && report.fields_run % print_every == 0 && report.fields_run != fields) print_stats(out, s);
         }
     } catch (const gc::GekkoError& e) {
         out << "Stopped after " << gc.stats().instructions << " instructions, in field " << report.fields_run + 1 << ": "

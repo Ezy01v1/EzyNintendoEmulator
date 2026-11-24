@@ -8,10 +8,10 @@
 namespace ezy::gc {
 
 // The mail protocol of MKDD's DSP microcode: Nintendo EAD's JAudio "Zelda" microcode, CRC
-// 0x2FCDF1EC (after Dolphin's Core/HW/DSPHLE/UCodes/Zelda.cpp and UCodes.cpp, from memory of
-// that code, not re-read in this session: flags MAKE_DOLBY_LOUD, so the default protocol,
-// neither LIGHT_PROTOCOL nor SYNC_PER_FRAME; checked against what MKDD's own SDK and JAudio
-// code send and wait for). The protocol is followed mail for mail, so the CPU gets every
+// 0x2FCDF1EC (Dolphin's Core/HW/DSPHLE/UCodes/Zelda.cpp, UCodes.cpp and UCodes.h: flags
+// MAKE_DOLBY_LOUDER, so the default protocol, neither LIGHT_PROTOCOL nor SYNC_PER_FRAME;
+// checked against Dolphin master by the Task 7 review on 2026-11-23, and against what MKDD's
+// own SDK and JAudio code send and wait for). The protocol is followed mail for mail, so the CPU gets every
 // answer when Dolphin's HLE would give it; no audio is mixed (design: audio is sub-project
 // 3), so the output buffers are left as they are. Every mail or command this does not model
 // throws BusError at the mailbox.
@@ -31,12 +31,13 @@ namespace ezy::gc {
 // interrupt) and 0xF3550000 | the command word's high half (SendCommandAck STANDARD), except
 // command 02. By the command word's bits 24-30:
 //   00, 03, 0A, 0B, 0F  no effect; 0C, 0D, 0E: their parameters are not used here.
-//   01  setup: voices per frame = the low half; then the VPB base, the coefficient tables, the
-//       AFC coefficients and the reverb PB base (stored only).
-//   02  render (bits 16-23) frames: volume, then the left and right output buffers. For each
+//   01  setup (5 words): voices per frame = the low half; then the VPB base, the coefficient
+//       tables, the AFC coefficients and the reverb PB base (not used here).
+//   02  render (3 words) (bits 16-23) frames: volume, then the left and right output buffers. For each
 //       frame, once the syncs reach the voices per frame: DSP_SYNC and 0xF355FF00 | the frame;
 //       after the last, DSP_FRAME_END 0xDCD10005 with the DSP interrupt.
-//   04-09 crash the real microcode, and the rest do not exist: they stop emulation.
+//   04-09 crash the real microcode, and the rest do not exist: they stop emulation, as does an
+//   01 or 02 of another length (the real microcode's command buffer would lose its place).
 class ZeldaMicrocode {
 public:
     // Sends a mail to the CPU, with the DSP interrupt when `interrupt` (Dsp::push_mail).

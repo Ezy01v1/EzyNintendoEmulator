@@ -150,9 +150,13 @@ void Dsp::receive_mail(std::uint32_t mail) {
 void Dsp::write_control(std::uint16_t value) {
     if (value & kPadding) unmodeled("write of " + hex32(value) + " (bits 12-15)", 0x0A);
     // PIINT (kAssertInt), the CPU interrupting the DSP (the SDK's DSPAssertInt, after the first
-    // mail of a command): the HLE takes it at once, as it takes mails, so it is not stored and
-    // reads 0, as on hardware once the DSP has taken it. No effect otherwise: the HLE does not
-    // need it to read the mails.
+    // mail of a command): a running microcode takes it at once, as the HLE takes mails, so it
+    // is not stored and reads 0, as on hardware once the DSP has taken it. No effect otherwise:
+    // the HLE does not need it to read the mails. With the ROM or the init code running it is
+    // not modeled.
+    if ((value & kAssertInt) && program_ != Program::Microcode) {
+        unmodeled("CPU->DSP interrupt (PIINT, write " + hex32(value) + ") with no microcode running", 0x0A);
+    }
     const std::uint16_t old = control_;
     std::uint16_t c = static_cast<std::uint16_t>(control_ & ~(value & kInterrupts));
     constexpr std::uint16_t kStored = kMasks | kHalt | kInit | kInitCode;

@@ -114,6 +114,16 @@ void Vi::write16(std::uint32_t offset, std::uint16_t value) {
             for (std::uint32_t i = 0x30 / 2; i < 0x40 / 2; ++i) regs_[i] = 0;
             update_irq();
         }
+    } else if (offset == 0x48) {
+        // Lines wider than kXfbWidth (WPL > 40, e.g. a 720-pixel mode) are not modeled.
+        if (((value >> 8) & 0x7F) > kXfbWidth / 16) {
+            char b[8];
+            std::snprintf(b, sizeof b, "%04X", value);
+            throw BusError(std::string("VI picture configuration write of 0x") + b +
+                               ": WPL above 40 (a line wider than 640 pixels) is not modeled",
+                           kBase + offset);
+        }
+        reg = value;
     } else if ((offset == 0x1C || offset == 0x20 || offset == 0x24 || offset == 0x28)) {
         reg = value;
         if (value & 0xE000) reg &= ~0x1000;  // CLRPOFF clears this register's POFF
@@ -144,7 +154,7 @@ Image Vi::xfb_image(std::span<const std::uint8_t> ram) const {
     Image image;
     // The picture configuration's WPL (bits 8-14): words of 32 bytes, 16 pixels, per line.
     const int wpl = (regs_[0x48 / 2] >> 8) & 0x7F;
-    image.width = wpl == 0 ? kXfbWidth : std::min(wpl * 16, kXfbWidth);
+    image.width = wpl == 0 ? kXfbWidth : wpl * 16;  // write16 refuses WPL > 40
     image.height = interlaced_mode ? acv * 2 : (acv <= 240 ? acv * 2 : acv);
     image.argb.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height), 0xFF000000u);
     if (active_lines() == 0) return image;  // the VI was never set up: black

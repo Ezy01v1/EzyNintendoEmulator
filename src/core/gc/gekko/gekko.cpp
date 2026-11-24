@@ -358,11 +358,22 @@ bool Gekko::try_write_spr(int number, std::uint32_t value) {
     else if (in(spr::kIbat0u, 8)) s_.ibat[static_cast<std::size_t>(number - spr::kIbat0u)] = value;
     else if (in(spr::kDbat0u, 8)) s_.dbat[static_cast<std::size_t>(number - spr::kDbat0u)] = value;
     else if (in(spr::kGqr0, 8)) s_.gqr[static_cast<std::size_t>(number - spr::kGqr0)] = value;
-    // The performance monitor: stored and read back (Dolphin's mtspr stores them too). No
-    // event is modeled, so the PMCs hold what was written and never count or raise the
-    // performance-monitor exception; the SDK writes them at boot (MKDD: MMCR0 at 0x800A9654).
-    else if (in(spr::kMmcr0, spr::kPerfMonitorCount))
-        s_.perf_monitor[static_cast<std::size_t>(number - spr::kMmcr0)] = value;
+    // The performance monitor: PMC1-4 and SIA are stored and read back. Counting is not
+    // modeled (Dolphin's UpdatePerformanceMonitor counts some events and can raise the
+    // performance-monitor exception), so an MMCR write that selects an event or enables that
+    // interrupt stops emulation (word_or_address = the value) instead of silently counting
+    // nothing; writes with none of those fields (the SDK's zeros at boot, MKDD's MMCR0 at
+    // 0x800A9654) are stored.
+    else if (in(spr::kMmcr0, spr::kPerfMonitorCount)) {
+        const int index = number - spr::kMmcr0;
+        const std::uint32_t counting = index == 0 ? kMmcr0Counting : index == 4 ? kMmcr1Counting : 0;
+        if ((value & counting) != 0) {
+            throw GekkoError("mtspr " + std::string(index == 0 ? "MMCR0" : "MMCR1") + " = " + hex32(value) +
+                                 " selects performance-monitor events or interrupts (counting is not modeled)",
+                             s_.pc, value);
+        }
+        s_.perf_monitor[static_cast<std::size_t>(index)] = value;
+    }
     else return false;  // unknown, or read-only (PVR, TBL/TBU's read numbers, UMMCR0..UPMC4)
     return true;
 }

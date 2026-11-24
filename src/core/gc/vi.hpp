@@ -54,7 +54,7 @@ struct Yuv {
 //   40/44 DL0/DL1
 //   48 picture configuration (Dolphin's PictureConfigurationRegister; YAGCD's HSW): STD bits
 //        0-7 = the XFB line stride in 32-byte units, WPL bits 8-14 = words per line (40 =
-//        640 pixels); 40/40 at reset.   4A HSR   4C..64 FCT0-FCT6   68 AA   6C VICLK
+//        640 pixels; more than 40 throws: wider lines are not modeled); 40/40 at reset.   4A HSR   4C..64 FCT0-FCT6   68 AA   6C VICLK
 //        6E DTV   70 FBWIDTH   72 HBE (border blank end)   74 HBS (border blank start)
 // Everything except DPV/DPH, the DI registers, DCR.RST and the XFB fields is a store-only
 // register: accepted, no effect on the emulated picture. Any other offset throws BusError.
@@ -92,8 +92,8 @@ public:
     [[nodiscard]] bool interlaced() const { return (regs_[0x02 / 2] & 0x4) == 0; }      // DCR NIN clear
 
     // The XFB(s) as a picture. `ram` is MEM1 (guest order). Width: the picture configuration's
-    // WPL * 16 pixels (WPL counts 32-byte words per line; MKDD's XFB is 608 wide), at most
-    // kXfbWidth, which is also the width when WPL = 0. The line stride comes from its STD
+    // WPL * 16 pixels (WPL counts 32-byte words per line; MKDD's XFB is 608 wide; at most 40
+    // words, kXfbWidth pixels, which is also the width when WPL = 0). The line stride comes from its STD
     // (STD * 32 bytes, 2560 for an interleaved 640-wide double-field buffer; 2 * width bytes if
     // STD = 0). Interlaced: ACV*2 rows, even rows from the top XFB, odd rows from the bottom
     // one. Non-interlaced: the top XFB only, each line doubled when ACV <= 240 (240p), else as

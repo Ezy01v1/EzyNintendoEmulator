@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <utility>
 
 #include "ppc_asm.hpp"
 
@@ -519,21 +520,48 @@ TEST_CASE("the performance monitor SPRs are stored, and their user-level copies 
     GekkoFixture f;
     auto& cpu = f.cpu;
     // MMCR0, PMC1, PMC2, SIA, MMCR1, PMC3, PMC4 (952..958): mtspr stores, mfspr reads back.
+    // The MMCRs take values that select no event and enable no interrupt: MMCR0 = DIS (freeze
+    // the counters) and a threshold, MMCR1 = its reserved low bits.
+    const std::uint32_t values[spr::kPerfMonitorCount] = {0x803F0000, 0x80000111, 0x80000222, 0x80000333,
+                                                          0x00000444, 0x80000555, 0x80000666};
     for (int i = 0; i < spr::kPerfMonitorCount; ++i) {
         CAPTURE(i);
-        const std::uint32_t value = 0x80000000u | static_cast<std::uint32_t>(i * 0x111);
+        const std::uint32_t value = values[i];
         cpu.set_gpr(3, value);
         f.load({mtspr(spr::kMmcr0 + i, 3), mfspr(4, spr::kMmcr0 + i), mfspr(5, spr::kUmmcr0 + i)});
         f.run(3);
         CHECK(cpu.gpr(4) == value);
         CHECK(cpu.gpr(5) == value);  // UMMCR0 ... UPMC4 (936..942)
     }
-    // No event is modeled: a PMC keeps what was written while instructions run.
-    cpu.set_gpr(3, 0x00000080);  // MMCR0: count instructions in PMC1 (750 manual, PMC1 event 2 = 0x80 >> 6)
-    cpu.set_gpr(4, 5);
-    f.load({mtspr(spr::kMmcr0, 3), mtspr(spr::kMmcr0 + 1, 4), ori(0, 0, 0), ori(0, 0, 0), mfspr(6, spr::kMmcr0 + 1)});
-    f.run(5);
-    CHECK(cpu.gpr(6) == 5);
+    // Counting is not modeled, so an MMCR write that selects an event or enables the
+    // performance-monitor interrupt stops emulation with the pc (and leaves the register as it
+    // was). MMCR0 (750 manual): ENINT 0x04000000, PMC1INTCONTROL 0x8000, PMCINTCONTROL 0x4000,
+    // PMC1SELECT 0x1FC0, PMC2SELECT 0x3F; MMCR1: PMC3SELECT 0xF8000000, PMC4SELECT 0x07C00000.
+    const std::pair<int, std::uint32_t> counting[] = {
+        {spr::kMmcr0, 0x00000080},     {spr::kMmcr0, 0x00000001}, {spr::kMmcr0, 0x04000000},
+        {spr::kMmcr0, 0x00008000},     {spr::kMmcr0, 0x00004000}, {spr::kMmcr0 + 4, 0x08000000},
+        {spr::kMmcr0 + 4, 0x00400000},
+    };
+    for (const auto& [number, value] : counting) {
+        CAPTURE(number);
+        CAPTURE(value);
+        const std::uint32_t before = cpu.spr(number);
+        cpu.set_gpr(3, value);
+        f.load({mtspr(number, 3)});
+        try {
+            f.run(1);
+            FAIL("expected GekkoError");
+        } catch (const GekkoError& e) {
+            CHECK(e.pc == GekkoFixture::kProgram);
+            CHECK(e.word_or_address == value);
+        }
+        CHECK(cpu.spr(number) == before);
+    }
+    // Writing 0 (what the SDK does at boot) is accepted.
+    cpu.set_spr(spr::kMmcr0, 0);
+    cpu.set_spr(spr::kMmcr0 + 4, 0);
+    CHECK(cpu.spr(spr::kMmcr0) == 0);
+    cpu.set_spr(spr::kMmcr0 + 1, 5);  // PMC1, for the user-mode read below
     // The user-level copies are read-only.
     CHECK_THROWS_AS(cpu.set_spr(spr::kUmmcr0, 0), GekkoError);
     // The user-level copies are readable in user mode; the supervisor ones are not (bit 4 of
