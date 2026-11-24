@@ -955,3 +955,9 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   saludo `DSP_INIT` y protocolo de correos del microcódigo Zelda (CRC 0x2FCDF1EC), PIINT; además el ancho
   del XFB sale de WPL (MKDD usa 608). Criterio: 618 campos seguidos con FIFO y VI (3-620), sin paradas.
   Registro: `docs/progress/2026-11-21-gamecube-mkdd-boot.md`. Falta la revisión final y el PR.
+- 2026-11-24 — GameCube, subproyecto 1: Tareas 1–7 hechas y revisadas (rama `gc/base`, sin subir; último 2e9d615).
+  La revisión de la Tarea 7 pidió que MMCR0/MMCR1 detengan la emulación si piden contar (no se modela el conteo;
+  MKDD no lo pide). MKDD repetido: 618 campos seguidos con FIFO y VI, sin paradas. Siguiente paso: la revisión
+  final de toda la rama (con la lista de detalles menores diferidos del registro
+  `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`), luego subir `gc/base` y abrir el PR.
+  Pendiente del usuario: probar `GameCubeSystem` en ezyemu con ventana y el mando de Xbox (aún no se ha abierto).
