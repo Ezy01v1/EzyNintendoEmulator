@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <initializer_list>
 #include <vector>
 
 #include "disc_builder.hpp"
@@ -24,7 +25,7 @@ constexpr std::uint32_t kMailToDsp = 0x00, kMailFromDsp = 0x04, kControl = 0x0A,
                         kAiBlocksLeft = 0x3A;
 // Control register bits (Dolphin's UDSPControl).
 constexpr std::uint16_t kReset = 0x001, kAssertInt = 0x002, kHalt = 0x004, kAid = 0x008, kAidMask = 0x010,
-                        kAram = 0x020, kAramMask = 0x040, kDspInt = 0x080, kDmaBusy = 0x200, kInitCode = 0x400,
+                        kAram = 0x020, kAramMask = 0x040, kDspInt = 0x080, kDspMask = 0x100, kDmaBusy = 0x200, kInitCode = 0x400,
                         kInit = 0x800;
 // AI registers (Dolphin's AudioInterface.cpp), 32 bits: control, volume, sample counter, timing.
 constexpr std::uint32_t kAicr = 0x00, kAivr = 0x04, kAiscnt = 0x08, kAiit = 0x0C;
@@ -52,6 +53,40 @@ struct AudioRig {
     std::uint16_t control() { return dsp.read16(kControl); }
     void set_control(std::uint16_t value) { dsp.write16(kControl, value); }
 };
+
+// MKDD's DSP microcode, as Dolphin's UCodeFactory knows it (HashEctor of the IRAM image):
+// its "Zelda" microcode (Zelda.cpp, flags MAKE_DOLBY_LOUD: the default mail protocol).
+constexpr std::uint32_t kMkddMicrocodeCrc = 0x2FCDF1EC;
+constexpr std::uint32_t kIramImage = 0x00345600, kIramLength = 0x1F20;
+
+// An IRAM image of `size` bytes whose HashEctor (crc ^= byte; crc = rotl(crc, 3), from 0) is
+// `crc`: zeros, then a few bytes solved backwards. The tests boot "a microcode" by its
+// identity without any of its code.
+std::vector<std::uint8_t> image_with_crc(std::uint32_t crc, std::size_t size) {
+    std::vector<std::uint8_t> tail;
+    for (std::uint32_t x = crc; x != 0;) {
+        const std::uint32_t before = (x >> 3) | (x << 29);  // undoes the rotate
+        const auto byte = static_cast<std::uint8_t>(before);
+        tail.push_back(byte);
+        x = before ^ byte;
+    }
+    std::vector<std::uint8_t> image(size - tail.size(), 0);
+    image.insert(image.end(), tail.rbegin(), tail.rend());
+    return image;
+}
+
+// The SDK's DSPInit (unhalts the DSP; the ROM greets with 0x8071FEED) and __DSP_boot_task's
+// upload of an IRAM image at kIramImage with the given CRC.
+void boot_microcode(AudioRig& rig, std::uint32_t crc) {
+    rig.set_control(static_cast<std::uint16_t>((rig.control() & ~0xA8) | kInit));
+    rig.set_control(static_cast<std::uint16_t>(rig.control() & ~0xAC));
+    REQUIRE(rig.dsp.read32(kMailFromDsp) == 0x8071FEEDu);
+    const auto image = image_with_crc(crc, kIramLength);
+    std::copy(image.begin(), image.end(), rig.ram.begin() + kIramImage);
+    const std::uint32_t upload[] = {0x80F3A001, kIramImage, 0x80F3C002, 0x0000, 0x80F3A002, kIramLength,
+                                    0x80F3B002, 0x0000,     0x80F3D001, 0x0010};
+    for (const std::uint32_t mail : upload) rig.dsp.write32(kMailToDsp, mail);
+}
 }  // namespace
 
 TEST_CASE("ARAM DMA copies both ways and raises its interrupt") {
@@ -320,6 +355,8 @@ TEST_CASE("DSP HLE answers the boot handshake mails") {
     CHECK(dsp.read32(kMailFromDsp) == 0xFEEE5678u);
 
     // __DSP_boot_task: the microcode upload, each mail taken before the next.
+    const auto image = image_with_crc(kMkddMicrocodeCrc, kIramLength);
+    std::copy(image.begin(), image.end(), rig.ram.begin() + kIramImage);
     const std::uint32_t upload[] = {0x80F3A001, 0x00345600, 0x80F3C002, 0x0000, 0x80F3A002, 0x1F20,
                                     0x80F3B002, 0x0000,     0x80F3D001, 0x0010};
     for (const std::uint32_t mail : upload) {
@@ -333,16 +370,159 @@ TEST_CASE("DSP HLE answers the boot handshake mails") {
     CHECK(ucode.iram_length == 0x1F20);
     CHECK(ucode.dram_length == 0);
     CHECK(ucode.init_vector == 0x0010);
+    CHECK(ucode.crc == kMkddMicrocodeCrc);
     CHECK(dsp.mails_received() == 11);
     REQUIRE(dsp.mail_log().size() == 11);
     CHECK(dsp.mail_log().front() == 0x12345678u);
     CHECK(dsp.mail_log().back() == 0x0010u);
-    CHECK((dsp.read32(kMailFromDsp) & 0x80000000u) == 0);  // the ROM answers nothing to the upload
+    CHECK(dsp.read32(kMailFromDsp) == 0xDCD10000u);  // no answer to the upload: the microcode greets
 
-    // The CPU->DSP interrupt belongs to the microcode's protocol (Task 7): not modeled yet.
-    CHECK_THROWS_AS(rig.set_control(rig.control() | kAssertInt), BusError);
+    // The CPU->DSP interrupt (the SDK's DSPAssertInt, after a command's first mail): the HLE
+    // takes it at once, as it takes mails, so it reads 0 again and changes nothing else.
+    const std::uint16_t before = rig.control();
+    rig.set_control(static_cast<std::uint16_t>((before & ~0xA8) | kAssertInt));
+    CHECK(rig.control() == before);  // (writing 0 to the interrupt bits leaves them)
+    CHECK(dsp.read32(kMailFromDsp) == 0xF3551111u);  // only the greeting's handshake was pending
+    CHECK((dsp.read32(kMailFromDsp) & 0x80000000u) == 0);  // nothing answers the interrupt
     CHECK_THROWS_AS(dsp.write16(kMailFromDsp, 0), BusError);
     CHECK_THROWS_AS(dsp.read16(0x10), BusError);
+}
+
+TEST_CASE("the DSP HLE identifies the microcode by its CRC and stops on an unknown one") {
+    AudioRig rig;
+    // Dolphin's HashEctor of the image (and the helper that builds one): MKDD's is 0x2FCDF1EC.
+    for (const std::uint32_t crc : {kMkddMicrocodeCrc, 0x00000001u, 0xFFFFFFFFu, 0x80000000u}) {
+        const auto image = image_with_crc(crc, 64);
+        std::uint32_t hash = 0;
+        for (const std::uint8_t byte : image) {
+            hash ^= byte;
+            hash = (hash << 3) | (hash >> 29);
+        }
+        CHECK(hash == crc);
+    }
+    // An image this HLE does not know (all zeros: CRC 0) stops at the mail that boots it.
+    rig.set_control(static_cast<std::uint16_t>((rig.control() & ~0xA8) | kInit));
+    rig.set_control(static_cast<std::uint16_t>(rig.control() & ~0xAC));
+    const std::uint32_t upload[] = {0x80F3A001, kIramImage, 0x80F3C002, 0x0000, 0x80F3A002, kIramLength,
+                                    0x80F3B002, 0x0000,     0x80F3D001};
+    for (const std::uint32_t mail : upload) rig.dsp.write32(kMailToDsp, mail);
+    CHECK_THROWS_AS(rig.dsp.write32(kMailToDsp, 0x0010), BusError);
+}
+
+TEST_CASE("MKDD's microcode (Dolphin's Zelda) greets with DSP_INIT, with the DSP interrupt, then its handshake") {
+    AudioRig rig;
+    auto& dsp = rig.dsp;
+    rig.pi.write32(0x04, 1u << Pi::kDsp);
+    boot_microcode(rig, kMkddMicrocodeCrc);
+    REQUIRE(dsp.microcode().has_value());
+    CHECK(dsp.microcode()->crc == kMkddMicrocodeCrc);
+    // DSP_INIT (0xDCD10000) comes with DSPINT: the SDK's __DSPHandler takes it as "the task
+    // started". Unmasked, it reaches the PI.
+    CHECK((rig.control() & kDspInt) != 0);
+    CHECK_FALSE(rig.pi.line());
+    rig.set_control(static_cast<std::uint16_t>((rig.control() & ~kDspInt) | kDspMask));
+    CHECK(rig.pi.line());
+    CHECK(dsp.read32(kMailFromDsp) == 0xDCD10000u);
+    rig.set_control(rig.control());  // acknowledge DSPINT (written 1)
+    CHECK((rig.control() & kDspInt) == 0);
+    // Then the handshake 0xF3551111, with no interrupt (Dolphin's ZeldaUCode::Initialize).
+    CHECK(dsp.read32(kMailFromDsp) == 0xF3551111u);
+    CHECK((rig.control() & kDspInt) == 0);
+    CHECK((dsp.read32(kMailFromDsp) & 0x80000000u) == 0);  // nothing more
+}
+
+namespace {
+// The Zelda microcode's mails (Dolphin's UCodes.h and Zelda.cpp).
+constexpr std::uint32_t kDspSync = 0xDCD10004, kDspFrameEnd = 0xDCD10005;
+
+// MKDD's microcode, booted and greeted (DSP_INIT and the handshake read and acknowledged).
+struct ZeldaRig : AudioRig {
+    ZeldaRig() {
+        boot_microcode(*this, kMkddMicrocodeCrc);
+        CHECK(take() == 0xDCD10000u);
+        CHECK(take() == 0xF3551111u);
+    }
+    // Reads the next mail from the DSP (0 if none is pending). `interrupted`: DSPINT was up
+    // as it became the first pending mail (acknowledged here, as __DSPHandler does).
+    bool interrupted = false;
+    std::uint32_t take() {
+        interrupted = (control() & kDspInt) != 0;
+        if (interrupted) set_control(static_cast<std::uint16_t>(control() | kDspInt));
+        const std::uint32_t mail = dsp.read32(kMailFromDsp);
+        return (mail & 0x80000000u) != 0 ? mail : 0;
+    }
+    // A command: the count mail, then its words.
+    void command(std::initializer_list<std::uint32_t> words) {
+        dsp.write32(kMailToDsp, static_cast<std::uint32_t>(words.size()));
+        for (const std::uint32_t word : words) dsp.write32(kMailToDsp, word);
+    }
+    // A sync mail pair: "sync data follows", then the voice group and its skip flags.
+    void sync(std::uint32_t group, std::uint16_t flags) {
+        dsp.write32(kMailToDsp, 0x00000000);
+        dsp.write32(kMailToDsp, (group << 16) | flags);
+    }
+};
+}  // namespace
+
+TEST_CASE("MKDD's microcode acknowledges each command with DSP_SYNC and the command's sync word") {
+    ZeldaRig rig;
+    // Command 01 (setup: 0x40 voices per frame, then the VPB base, the coefficient tables, the
+    // AFC coefficients and the reverb PB base): taken once all 5 mails are in.
+    rig.dsp.write32(kMailToDsp, 5);
+    rig.dsp.write32(kMailToDsp, 0x01000040);
+    CHECK(rig.take() == 0);  // the command is not complete yet
+    for (const std::uint32_t word : {0x80340000u, 0x80341000u, 0x80342000u, 0x80343000u}) rig.dsp.write32(kMailToDsp, word);
+    CHECK(rig.take() == kDspSync);
+    CHECK(rig.interrupted);  // DSP_SYNC comes with the DSP interrupt
+    CHECK(rig.take() == 0xF3550100u);  // 0xF3550000 | the command mail's high half
+    CHECK_FALSE(rig.interrupted);
+    CHECK(rig.take() == 0);
+    // NOP-like commands (00, 03, 0A, 0B, 0F) and 0C, 0D, 0E are acknowledged the same way.
+    for (const std::uint32_t cmd : {0x00000000u, 0x03AB0000u, 0x0A000000u, 0x0B000000u, 0x0F000000u}) {
+        CAPTURE(cmd);
+        rig.command({cmd});
+        CHECK(rig.take() == kDspSync);
+        CHECK(rig.take() == (0xF3550000u | (cmd >> 16)));
+    }
+    rig.command({0x0D120000, 0x00001234});
+    CHECK(rig.take() == kDspSync);
+    CHECK(rig.take() == 0xF3550D12u);
+    // A command the microcode does not have, or one that crashes it (04-09), stops emulation.
+    CHECK_THROWS_AS(rig.command({0x10000000}), BusError);
+}
+
+TEST_CASE("MKDD's microcode renders frames as the CPU syncs the voices, then ends with DSP_FRAME_END") {
+    ZeldaRig rig;
+    rig.command({0x01000040, 0x80340000, 0x80341000, 0x80342000, 0x80343000});  // 0x40 voices
+    CHECK(rig.take() == kDspSync);
+    CHECK(rig.take() == 0xF3550100u);
+    // Command 02: render 2 frames (volume 0x8000, the left and right output buffers). Nothing
+    // comes back until the CPU syncs the voices.
+    rig.command({0x02028000, 0x80350000, 0x80351000});
+    CHECK(rig.take() == 0);
+    // Syncing voice groups 0-1 (32 voices) is not a whole frame of 0x40.
+    rig.sync(1, 0xFFFF);
+    CHECK(rig.take() == 0);
+    rig.sync(3, 0xFFFF);  // groups up to 3: voices 0-63, the frame
+    CHECK(rig.take() == kDspSync);
+    CHECK(rig.take() == 0xF355FF00u);  // frame 0 done
+    CHECK(rig.take() == 0);
+    // A command sent while rendering waits for the rendering to finish.
+    rig.command({0x00000000});
+    CHECK(rig.take() == 0);
+    rig.sync(3, 0x0000);  // skip flags do not matter here: no voice is mixed
+    CHECK(rig.take() == kDspSync);
+    CHECK(rig.take() == 0xF355FF01u);  // frame 1 done
+    CHECK(rig.take() == kDspFrameEnd);  // DONE_RENDERING, with the DSP interrupt
+    CHECK(rig.interrupted);
+    CHECK(rig.take() == 0);
+    // Commands wait for the CPU's 0xCDD10003 ("go on") after the frame end.
+    rig.dsp.write32(kMailToDsp, 0xCDD10003);
+    CHECK(rig.take() == kDspSync);
+    CHECK(rig.take() == 0xF3550000u);  // the NOP queued during the rendering
+    CHECK(rig.take() == 0);
+    // A sync mail with no rendering in progress halts the real microcode: a stop here.
+    CHECK_THROWS_AS(rig.sync(0, 0xFFFF), BusError);
 }
 
 TEST_CASE("the machine maps the DSP, AI, SI and EXI and routes their events") {

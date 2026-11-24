@@ -54,11 +54,39 @@ void set_low(std::uint32_t& reg, std::uint16_t value) { reg = (reg & 0xFFFF0000)
 }  // namespace
 
 Dsp::Dsp(Scheduler& scheduler, Pi& pi, std::span<std::uint8_t> mem1, const Ai& ai)
-    : sched_(scheduler), pi_(pi), mem1_(mem1), ai_(ai), aram_(kAramSize, 0), control_(kHalt | kInit) {
+    : sched_(scheduler),
+      pi_(pi),
+      mem1_(mem1),
+      ai_(ai),
+      aram_(kAramSize, 0),
+      control_(kHalt | kInit),
+      zelda_([this](std::uint32_t mail, bool interrupt) { push_mail(mail, interrupt); }) {
     start_program(Program::Rom);
 }
 
 bool Dsp::halted() const { return (control_ & kHalt) != 0; }
+
+std::uint32_t Dsp::microcode_crc(std::span<const std::uint8_t> image) {
+    std::uint32_t crc = 0;
+    for (const std::uint8_t byte : image) {
+        crc ^= byte;
+        crc = (crc << 3) | (crc >> 29);
+    }
+    return crc;
+}
+
+void Dsp::raise_dsp_interrupt() {
+    control_ |= kDspInt;
+    update_irq();
+}
+
+void Dsp::push_mail(std::uint32_t mail, bool interrupt) {
+    if (interrupt) {
+        if (mails_out_.empty()) raise_dsp_interrupt();
+        else mails_out_.back().interrupt_after_read = true;
+    }
+    mails_out_.push_back({mail, false});
+}
 
 void Dsp::update_irq() {
     // Each interrupt's mask is the bit to its left (Dolphin's UpdateInterrupts).
@@ -73,11 +101,29 @@ void Dsp::start_program(Program program) {
     if (program == Program::InitCode) push_mail(kInitCodeMail);
 }
 
+void Dsp::boot_microcode() {
+    if (std::uint64_t{upload_.iram_mmem_address} + upload_.iram_length > mem1_.size()) {
+        throw BusError("DSP microcode IRAM image at " + hex32(upload_.iram_mmem_address) + " runs past MEM1",
+                       kBase + 0x02);
+    }
+    upload_.crc = microcode_crc(mem1_.subspan(upload_.iram_mmem_address, upload_.iram_length));
+    if (upload_.crc != ZeldaMicrocode::kCrc) {
+        throw BusError("DSP microcode with CRC " + hex32(upload_.crc) + " is not modeled", kBase + 0x02);
+    }
+    microcode_ = upload_;
+    start_program(Program::Microcode);  // Dolphin's BootUCode
+    zelda_.start();
+}
+
 void Dsp::receive_mail(std::uint32_t mail) {
     ++mails_;
     mail_log_.push_back(mail);
     if (mail_log_.size() > kMailLogSize) mail_log_.pop_front();
-    if (program_ != Program::Rom) return;  // the init code ignores mail; a microcode's is Task 7's
+    if (program_ == Program::Microcode) {
+        zelda_.receive(mail);
+        return;
+    }
+    if (program_ != Program::Rom) return;  // the init code ignores mail
     if (rom_parameter_ == 0) {
         if ((mail & 0xFFFF0000) == kUploadPrefix) {
             rom_parameter_ = mail;
@@ -93,8 +139,8 @@ void Dsp::receive_mail(std::uint32_t mail) {
         case kIramAddress: upload_.iram_address = static_cast<std::uint16_t>(mail); break;
         case kStartVector:
             upload_.init_vector = static_cast<std::uint16_t>(mail);
-            microcode_ = upload_;
-            start_program(Program::Microcode);  // Dolphin's BootUCode
+            rom_parameter_ = 0;
+            boot_microcode();
             return;
         default: break;  // an unknown parameter: ignored, as Dolphin's ROMUCode
     }
@@ -103,9 +149,10 @@ void Dsp::receive_mail(std::uint32_t mail) {
 
 void Dsp::write_control(std::uint16_t value) {
     if (value & kPadding) unmodeled("write of " + hex32(value) + " (bits 12-15)", 0x0A);
-    if (value & kAssertInt) {
-        unmodeled("CPU->DSP interrupt (PIINT, write " + hex32(value) + "; a microcode protocol, Task 7)", 0x0A);
-    }
+    // PIINT (kAssertInt), the CPU interrupting the DSP (the SDK's DSPAssertInt, after the first
+    // mail of a command): the HLE takes it at once, as it takes mails, so it is not stored and
+    // reads 0, as on hardware once the DSP has taken it. No effect otherwise: the HLE does not
+    // need it to read the mails.
     const std::uint16_t old = control_;
     std::uint16_t c = static_cast<std::uint16_t>(control_ & ~(value & kInterrupts));
     constexpr std::uint16_t kStored = kMasks | kHalt | kInit | kInitCode;
@@ -190,12 +237,14 @@ std::uint16_t Dsp::read16(std::uint32_t offset) {
         case 0x00: return static_cast<std::uint16_t>(mail_to_dsp_ >> 16);
         case 0x02: return static_cast<std::uint16_t>(mail_to_dsp_);
         case 0x04:
-            if (!halted() && !mails_out_.empty()) last_mail_out_ = mails_out_.front();
+            if (!halted() && !mails_out_.empty()) last_mail_out_ = mails_out_.front().mail;
             return static_cast<std::uint16_t>(last_mail_out_ >> 16);
         case 0x06:
             if (!halted() && !mails_out_.empty()) {
-                last_mail_out_ = mails_out_.front();
+                const OutMail taken = mails_out_.front();
+                last_mail_out_ = taken.mail;
                 mails_out_.pop_front();
+                if (taken.interrupt_after_read) raise_dsp_interrupt();
             }
             last_mail_out_ &= 0x7FFFFFFF;  // read: no longer pending
             return static_cast<std::uint16_t>(last_mail_out_);

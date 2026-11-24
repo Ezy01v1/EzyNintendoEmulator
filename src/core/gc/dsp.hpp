@@ -6,6 +6,7 @@
 #include <span>
 #include <vector>
 
+#include "gc/dsp_zelda.hpp"
 #include "gc/mmio.hpp"
 
 namespace ezy::gc {
@@ -28,7 +29,7 @@ class Scheduler;
 //             halted, mails stay queued and the reads repeat the last one, its bit 15 clear.
 //   0x0A      control: RES 0 (reset: done at once, reads 0; also stops the AI DMA, as
 //             Dolphin: only its control register, the blocks left keep their count), PIINT 1
-//             (the CPU interrupts the DSP: part of a microcode's protocol, Task 7, throws),
+//             (the CPU interrupts the DSP: taken at once by the HLE, reads 0, no effect),
 //             HALT 2, AID 3, AID mask 4, ARINT 5, ARINT mask 6, DSPINT 7,
 //             DSPINT mask 8 (the interrupt bits clear when written 1), DMA busy 9 (read-only:
 //             an ARAM DMA runs), INITCODE 10, INIT 11. Bits 12-15 throw. Reset value: HALT |
@@ -64,7 +65,14 @@ class Scheduler;
 // 0xFEEE0000 | the mail's low half, and takes the SDK's microcode upload (__DSP_boot_task):
 // 0x80F3A001 then the main-memory address of IRAM, 0x80F3C002 the IRAM address, 0x80F3A002 the
 // IRAM length, 0x80F3B002 the DRAM length, 0x80F3D001 the start vector, which boots it (see
-// microcode()). From then on every mail is only logged: the microcode's protocol is Task 7's.
+// microcode()). The booted microcode is identified as Dolphin's UCodeFactory does, by the
+// HashEctor CRC of its IRAM image in main memory; only MKDD's (ZeldaMicrocode, dsp_zelda.hpp)
+// is modeled, and any other stops emulation at the mail that boots it, naming the CRC. From
+// then on the microcode takes the mails (every one is still logged).
+//
+// DSP->CPU mails can carry the DSP interrupt (Dolphin's CMailHandler::PushMail): DSPINT rises
+// when such a mail becomes the first pending one (at once if none is pending, otherwise when
+// the CPU reads the mail before it).
 class Dsp final : public MmioHandler {
 public:
     static constexpr std::uint32_t kAramSize = 0x01000000;
@@ -76,7 +84,10 @@ public:
     struct MicrocodeUpload {
         std::uint32_t iram_mmem_address = 0;  // where the IRAM image is in main memory
         std::uint16_t iram_address = 0, iram_length = 0, dram_length = 0, init_vector = 0;
+        std::uint32_t crc = 0;  // Dolphin's HashEctor of the IRAM image (its microcode id)
     };
+    // Dolphin's HashEctor (Common/Hash.cpp): crc ^= byte, then crc rotated left by 3, from 0.
+    [[nodiscard]] static std::uint32_t microcode_crc(std::span<const std::uint8_t> image);
 
     // `mem1` is MEM1 in guest order; raises Pi::kDsp on `pi`; the AI DMA plays at `ai`'s rate.
     Dsp(Scheduler& scheduler, Pi& pi, std::span<std::uint8_t> mem1, const Ai& ai);
@@ -105,7 +116,10 @@ private:
     void write_control(std::uint16_t value);
     void start_program(Program program);
     void receive_mail(std::uint32_t mail);
-    void push_mail(std::uint32_t mail) { mails_out_.push_back(mail); }
+    void boot_microcode();
+    // Queues a mail to the CPU; `interrupt`: with DSPINT (see the class comment).
+    void push_mail(std::uint32_t mail, bool interrupt = false);
+    void raise_dsp_interrupt();
     // Throws if an ARAM DMA with this count register would run past MEM1.
     void check_aram_dma(std::uint32_t count_register) const;
     void start_aram_dma();
@@ -125,7 +139,11 @@ private:
 
     // Mailboxes.
     std::uint32_t mail_to_dsp_ = 0;
-    std::deque<std::uint32_t> mails_out_;  // DSP -> CPU, oldest first
+    struct OutMail {
+        std::uint32_t mail;
+        bool interrupt_after_read;  // DSPINT rises once the CPU has read this one
+    };
+    std::deque<OutMail> mails_out_;  // DSP -> CPU, oldest first
     std::uint32_t last_mail_out_ = 0;
     std::uint64_t mails_ = 0;
     std::deque<std::uint32_t> mail_log_;
@@ -135,6 +153,7 @@ private:
     std::uint32_t rom_parameter_ = 0;  // the upload mail whose value comes next (0: none)
     MicrocodeUpload upload_;
     std::optional<MicrocodeUpload> microcode_;
+    ZeldaMicrocode zelda_;
 
     // ARAM controller and DMA.
     std::uint16_t ar_info_ = 0, ar_refresh_ = 156;

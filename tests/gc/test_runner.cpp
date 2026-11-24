@@ -110,3 +110,16 @@ TEST_CASE("the runner counts the fields in which the VI raised its interrupt") {
     CHECK(report.fields_with_vi_interrupt == 1);
     CHECK(gc->stats().interrupts[Pi::kVi] == 1);
 }
+
+TEST_CASE("the criterion streak counts the longest run of fields with FIFO data and a VI interrupt") {
+    ezy::gc_runner::CriterionStreak streak;
+    const bool fifo[] = {false, true, true, true, false, true, true};
+    const bool vi[] = {true, true, true, true, true, true, false};
+    for (int i = 0; i < 7; ++i) streak.add(i + 1, fifo[i], vi[i]);
+    CHECK(streak.longest == 3);
+    CHECK(streak.longest_last_field == 4);  // fields 2-4
+    CHECK(streak.current == 0);             // field 7 had no VI interrupt
+    streak.add(8, true, true);
+    CHECK(streak.current == 1);
+    CHECK(streak.longest == 3);
+}

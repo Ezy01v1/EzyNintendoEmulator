@@ -1,5 +1,5 @@
 add_library(ezy_gc STATIC gekko/gekko.cpp gekko/gekko_integer.cpp gekko/gekko_fpu.cpp gekko/gekko_paired.cpp
-            disc.cpp dol.cpp hle_boot.cpp memory.cpp scheduler.cpp pi.cpp mi.cpp vi.cpp di.cpp si.cpp exi.cpp ai.cpp dsp.cpp
+            disc.cpp dol.cpp hle_boot.cpp memory.cpp scheduler.cpp pi.cpp mi.cpp vi.cpp di.cpp si.cpp exi.cpp ai.cpp dsp.cpp dsp_zelda.cpp
             gx_vertex.cpp gx_fifo.cpp
             gamecube.cpp)
 target_include_directories(ezy_gc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

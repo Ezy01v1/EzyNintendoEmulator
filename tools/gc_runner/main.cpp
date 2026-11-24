@@ -6,6 +6,8 @@
 //       when emulation stopped. On an unimplemented instruction, MMIO register or disc command
 //       it prints the pc, the word or address, and the last --trace PCs executed (default 64),
 //       and exits with code 1.
+//   --dump-end: debugging; after the run, also prints the pc, the PC trace and the DSP's log
+//       (the microcode the DSP ROM booted and the last CPU->DSP mails).
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -15,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "gc/dsp.hpp"
 #include "gc/gamecube.hpp"
 #include "gc_run.hpp"
 
@@ -58,8 +61,25 @@ bool parse_int(const char* text, int& value) {
     return ec == std::errc() && ptr == end && value >= 0;
 }
 
+// --dump-end.
+void dump_state(ezy::gc::GameCube& gc) {
+    using ezy::gc_runner::hex32;
+    std::cout << "pc " << hex32(gc.cpu().pc()) << ", lr " << hex32(gc.cpu().lr()) << '\n';
+    const auto pcs = gc.recent_pcs();
+    std::cout << "last " << pcs.size() << " pcs, oldest first:\n";
+    for (const std::uint32_t pc : pcs) std::cout << "    " << hex32(pc) << '\n';
+    if (const auto& ucode = gc.dsp().microcode()) {
+        std::cout << "DSP microcode: IRAM image at " << hex32(ucode->iram_mmem_address) << ", IRAM address "
+                  << ucode->iram_address << ", IRAM length " << ucode->iram_length << ", DRAM length "
+                  << ucode->dram_length << ", start vector " << ucode->init_vector << '\n';
+    }
+    std::cout << "DSP mails CPU->DSP (last " << gc.dsp().mail_log().size() << "):";
+    for (const std::uint32_t mail : gc.dsp().mail_log()) std::cout << ' ' << hex32(mail);
+    std::cout << '\n';
+}
+
 int usage() {
-    std::cerr << "Usage: ezy_gc_runner <disc.iso|.gcm> --fields N [--screenshot out.bmp] [--trace N]\n";
+    std::cerr << "Usage: ezy_gc_runner <disc.iso|.gcm> --fields N [--screenshot out.bmp] [--trace N] [--dump-end]\n";
     return 2;
 }
 
@@ -69,12 +89,15 @@ int main(int argc, char* argv[]) {
     if (argc < 2) return usage();
     int fields = 600, trace = 64;
     std::string screenshot;
+    bool dump_end = false;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--fields" && i + 1 < argc) {
             if (!parse_int(argv[++i], fields)) return usage();
         } else if (arg == "--trace" && i + 1 < argc) {
             if (!parse_int(argv[++i], trace)) return usage();
+        } else if (arg == "--dump-end") {
+            dump_end = true;
         } else if (arg == "--screenshot" && i + 1 < argc) {
             screenshot = argv[++i];
         } else {
@@ -94,6 +117,7 @@ int main(int argc, char* argv[]) {
     gc->set_pc_trace(static_cast<std::size_t>(trace));
 
     const ezy::gc_runner::RunReport report = ezy::gc_runner::run_fields(*gc, fields, std::cout);
+    if (dump_end) dump_state(*gc);
     if (!screenshot.empty()) {
         const ezy::gc::Image img = gc->xfb();
         const std::vector<char> bmp = encode_bmp(img);

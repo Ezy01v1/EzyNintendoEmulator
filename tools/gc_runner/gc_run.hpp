@@ -46,6 +46,22 @@ inline void print_stats(std::ostream& out, const gc::Stats& s) {
         << s.dsp_mails << '\n';
 }
 
+// Goal 1's criterion over consecutive fields: the longest run in which every field had FIFO
+// data and a VI interrupt.
+struct CriterionStreak {
+    int current = 0;             // the run ending at the last field added
+    int longest = 0;
+    int longest_last_field = 0;  // the last field of the longest run
+
+    void add(int field, bool fifo_data, bool vi_interrupt) {
+        current = fifo_data && vi_interrupt ? current + 1 : 0;
+        if (current > longest) {
+            longest = current;
+            longest_last_field = field;
+        }
+    }
+};
+
 struct RunReport {
     int exit_code = 0;   // 0: every field ran; 1: emulation stopped (the reason was printed)
     int fields_run = 0;  // fields that finished
@@ -53,6 +69,7 @@ struct RunReport {
     // its interrupt in it.
     int fields_with_fifo_data = 0;
     int fields_with_vi_interrupt = 0;
+    CriterionStreak streak;
 };
 
 // Runs `fields` fields, printing the stats every `print_every` fields (the runner: 60, one
@@ -63,7 +80,13 @@ inline RunReport run_fields(gc::GameCube& gc, int fields, std::ostream& out, int
     RunReport report;
     auto summary = [&] {
         out << "fields with FIFO data: " << report.fields_with_fifo_data << " of " << report.fields_run
-            << "; fields with a VI interrupt: " << report.fields_with_vi_interrupt << " of " << report.fields_run << '\n';
+            << "; fields with a VI interrupt: " << report.fields_with_vi_interrupt << " of " << report.fields_run << '\n'
+            << "longest run of fields with both: " << report.streak.longest;
+        if (report.streak.longest > 0) {
+            out << " (fields " << report.streak.longest_last_field - report.streak.longest + 1 << '-'
+                << report.streak.longest_last_field << ')';
+        }
+        out << '\n';
     };
     try {
         for (int i = 0; i < fields; ++i) {
@@ -72,7 +95,9 @@ inline RunReport run_fields(gc::GameCube& gc, int fields, std::ostream& out, int
             ++report.fields_run;
             const gc::Stats s = gc.stats();
             if (s.fifo_bytes_last_field > 0) ++report.fields_with_fifo_data;
-            if (s.interrupts[gc::Pi::kVi] > vi_before) ++report.fields_with_vi_interrupt;
+            const bool vi = s.interrupts[gc::Pi::kVi] > vi_before;
+            if (vi) ++report.fields_with_vi_interrupt;
+            report.streak.add(report.fields_run, s.fifo_bytes_last_field > 0, vi);
             if (report.fields_run % print_every == 0 && report.fields_run != fields) print_stats(out, s);
         }
     } catch (const gc::GekkoError& e) {
