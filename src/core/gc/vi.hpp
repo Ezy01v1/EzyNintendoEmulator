@@ -91,12 +91,14 @@ public:
     [[nodiscard]] int active_lines() const { return (regs_[0x00 / 2] >> 4) & 0x3FF; }  // VTR ACV
     [[nodiscard]] bool interlaced() const { return (regs_[0x02 / 2] & 0x4) == 0; }      // DCR NIN clear
 
-    // The XFB(s) as a picture. The line stride comes from the picture configuration's STD
-    // (STD * 32 bytes, 2560 for an interleaved 640-wide double-field buffer; 1280 if STD = 0). `ram` is MEM1 (guest order). Interlaced: ACV*2 rows, even rows
-    // from the top XFB, odd rows from the bottom one. Non-interlaced: the top XFB only, each
-    // line doubled when ACV <= 240 (240p), else as is (480p). ACV = 0 (VI not set up) is
-    // treated as 480 rows. Width is kXfbWidth. An XFB
-    // outside MEM1 gives black.
+    // The XFB(s) as a picture. `ram` is MEM1 (guest order). Width: the picture configuration's
+    // WPL * 16 pixels (WPL counts 32-byte words per line; MKDD's XFB is 608 wide), at most
+    // kXfbWidth, which is also the width when WPL = 0. The line stride comes from its STD
+    // (STD * 32 bytes, 2560 for an interleaved 640-wide double-field buffer; 2 * width bytes if
+    // STD = 0). Interlaced: ACV*2 rows, even rows from the top XFB, odd rows from the bottom
+    // one. Non-interlaced: the top XFB only, each line doubled when ACV <= 240 (240p), else as
+    // is (480p). ACV = 0 (VI not set up) is treated as 480 rows. An XFB outside MEM1 gives
+    // black.
     [[nodiscard]] Image xfb_image(std::span<const std::uint8_t> ram) const;
 
     std::uint16_t read16(std::uint32_t offset) override;

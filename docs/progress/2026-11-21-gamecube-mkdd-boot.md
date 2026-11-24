@@ -79,6 +79,19 @@ Con esto MKDD llega a su bucle principal: corre sin detenerse, con datos en el F
 cada campo desde el 3 (unos 14-15 KB y ~298 primitivas por campo a partir del campo ~300),
 lecturas de disco continuas y ~58 correos al DSP por campo.
 
+### 6. (No es una parada) El XFB de MKDD mide 608 píxeles de ancho
+
+La captura mostraba 32 píxeles de colores al final de la última línea. El volcado de estado
+(`--dump-end`) dio la causa: la copia del EFB de MKDD es de 608×448 con paso de 1216 bytes, y el
+VI lo dice en su configuración de imagen (WPL = 38 palabras de 32 bytes = 608 píxeles); el VI
+leía siempre 640 píxeles por línea, así que cada línea tomaba 32 píxeles de la siguiente y la
+última, 64 bytes de después del XFB. Ahora el ancho de la imagen es WPL × 16 píxeles (como el
+`fbWidth` de Dolphin), hasta 640; ezyemu la escala a 640×480 y el runner la guarda tal cual.
+Prueba: `the XFB picture is WPL * 16 pixels wide (MKDD's 608-pixel XFB)` (test_pi_vi.cpp).
+
+La prueba de MKDD en `test_pi_vi.cpp` ahora exige que los 5 primeros campos corran sin parar y
+que el DSP arranque el microcódigo 0x2FCDF1EC (unos 7 s en Debug; la suite cabe en su límite).
+
 El protocolo del DSP no fue un bloqueo para el subproyecto 3: con respuestas al protocolo de
 correos (sin mezclar) el juego avanza. Lo que queda para el subproyecto 3 es mezclar de verdad
 (las voces de los VPB, los coeficientes AFC, la reverberación) y llenar los búferes de salida

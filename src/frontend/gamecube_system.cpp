@@ -177,7 +177,7 @@ void GameCubeSystem::handle_gamepad_axis(SDL_GamepadAxis axis, std::int16_t valu
     update_pad();
 }
 
-// The XFB (gc::GameCube::xfb, 640 wide, the frame's height), nearest-scaled to 640x480.
+// The XFB (gc::GameCube::xfb: up to 640 wide, the frame's height), nearest-scaled to 640x480.
 void GameCubeSystem::render(std::span<std::uint32_t> argb_pixels) const {
     const gc::Image img = gc_->xfb();
     if (img.width <= 0 || img.height <= 0) {

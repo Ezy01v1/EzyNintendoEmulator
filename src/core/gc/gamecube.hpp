@@ -57,7 +57,8 @@ public:
     // run_field()'s loop body, for the debugger's single step. Throws as run_field().
     void step();
 
-    // The picture the VI is showing: ARGB, 640 wide, the frame's height (see Vi::xfb_image).
+    // The picture the VI is showing: ARGB, the XFB's width (640 or less) and the frame's height
+    // (see Vi::xfb_image).
     [[nodiscard]] Image xfb() const;
     [[nodiscard]] Stats stats() const;
     // Controller 1 (PadState is in gc/si.hpp; the SI's channel 0 reports it).

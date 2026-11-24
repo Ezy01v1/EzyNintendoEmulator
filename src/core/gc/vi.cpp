@@ -142,7 +142,9 @@ Image Vi::xfb_image(std::span<const std::uint8_t> ram) const {
     const int acv = active_lines() == 0 ? 480 : active_lines();
     const bool interlaced_mode = interlaced();
     Image image;
-    image.width = kXfbWidth;
+    // The picture configuration's WPL (bits 8-14): words of 32 bytes, 16 pixels, per line.
+    const int wpl = (regs_[0x48 / 2] >> 8) & 0x7F;
+    image.width = wpl == 0 ? kXfbWidth : std::min(wpl * 16, kXfbWidth);
     image.height = interlaced_mode ? acv * 2 : (acv <= 240 ? acv * 2 : acv);
     image.argb.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height), 0xFF000000u);
     if (active_lines() == 0) return image;  // the VI was never set up: black
@@ -150,8 +152,8 @@ Image Vi::xfb_image(std::span<const std::uint8_t> ram) const {
     // The line stride in bytes: the picture configuration's STD in 32-byte units (the SDK sets
     // WPL = 40 for 640 pixels, so 1280 bytes; STD = 2 * WPL = 2560 for an interleaved buffer).
     const std::size_t std_units = regs_[0x48 / 2] & 0xFFu;
-    const std::size_t stride = std_units == 0 ? 2 * kXfbWidth : std_units * 32;
-    const std::size_t row_bytes = 2 * kXfbWidth;
+    const std::size_t stride = std_units == 0 ? 2 * static_cast<std::size_t>(image.width) : std_units * 32;
+    const std::size_t row_bytes = 2 * static_cast<std::size_t>(image.width);
     const std::uint32_t top = xfb_top(), bottom = xfb_bottom();
     for (int row = 0; row < image.height; ++row) {
         std::uint64_t base;
@@ -166,8 +168,8 @@ Image Vi::xfb_image(std::span<const std::uint8_t> ram) const {
         const std::uint64_t at = base + static_cast<std::uint64_t>(line) * stride;
         if (at + row_bytes > ram.size()) continue;  // outside MEM1: this row stays black
         const std::uint8_t* p = ram.data() + at;
-        std::uint32_t* out = image.argb.data() + static_cast<std::size_t>(row) * kXfbWidth;
-        for (int x = 0; x < kXfbWidth; x += 2, p += 4) {  // Y0 U Y1 V
+        std::uint32_t* out = image.argb.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(image.width);
+        for (int x = 0; x < image.width; x += 2, p += 4) {  // Y0 U Y1 V
             out[x] = yuv_to_argb(p[0], p[1], p[3]);
             out[x + 1] = yuv_to_argb(p[2], p[1], p[3]);
         }

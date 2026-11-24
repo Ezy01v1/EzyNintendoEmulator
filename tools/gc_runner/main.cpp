@@ -73,6 +73,11 @@ void dump_state(ezy::gc::GameCube& gc) {
                   << ucode->iram_address << ", IRAM length " << ucode->iram_length << ", DRAM length "
                   << ucode->dram_length << ", start vector " << ucode->init_vector << '\n';
     }
+    std::cout << "VI: XFB top " << hex32(gc.vi().xfb_top()) << ", bottom " << hex32(gc.vi().xfb_bottom())
+              << ", active lines " << gc.vi().active_lines() << (gc.vi().interlaced() ? ", interlaced" : ", progressive")
+              << " | last EFB copy: top-left " << hex32(gc.gx().bp(0x49)) << ", size " << hex32(gc.gx().bp(0x4A))
+              << ", destination " << hex32(gc.gx().bp(0x4B) << 5) << ", stride " << (gc.gx().bp(0x4D) << 5)
+              << ", y scale " << hex32(gc.gx().bp(0x4E)) << '\n';
     std::cout << "DSP mails CPU->DSP (last " << gc.dsp().mail_log().size() << "):";
     for (const std::uint32_t mail : gc.dsp().mail_log()) std::cout << ' ' << hex32(mail);
     std::cout << '\n';

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "disc_builder.hpp"
+#include "gc/dsp.hpp"
 #include "gc/gamecube.hpp"
 #include "gc/gekko/gekko.hpp"
 #include "gc/memory.hpp"
@@ -290,6 +291,32 @@ TEST_CASE("the XFB picture takes its line stride from STD (one interleaved doubl
     for (int row : {1, 3, 101, 479}) CHECK(picture.argb[static_cast<std::size_t>(row) * 640 + 634] == 0xFFFFFFFFu);
 }
 
+TEST_CASE("the XFB picture is WPL * 16 pixels wide (MKDD's 608-pixel XFB)") {
+    DiscBuilder builder;
+    const auto image = builder.write("xfb_wpl");
+    auto gc = GameCube::create(image);
+    REQUIRE(gc != nullptr);
+    auto& mem = gc->memory();
+    auto ram = mem.mem1();
+    constexpr std::uint32_t fb = 0x00100000;
+    // A 608x448 XFB as MKDD's EFB copy writes it (stride 1216 bytes), red, followed by white
+    // bytes that a 640-pixel line would wrongly show at the end of the last line.
+    const std::uint8_t red[4] = {81, 90, 81, 240}, white[4] = {235, 128, 235, 128};
+    for (std::uint32_t i = 0; i < 448 * 1216; i += 4) std::copy(red, red + 4, ram.begin() + fb + i);
+    for (std::uint32_t i = 0; i < 64; i += 4) std::copy(white, white + 4, ram.begin() + fb + 448 * 1216 + i);
+    mem.write16(kVi + 0x00, 224 << 4);
+    mem.write16(kVi + 0x02, 0x0001);
+    mem.write16(kVi + 0x48, (38 << 8) | 76);  // WPL = 38 (608 pixels), STD = 76
+    mem.write32(kVi + 0x1C, fb);
+    mem.write32(kVi + 0x24, fb + 1216);
+    const auto picture = gc->xfb();
+    CHECK(picture.width == 608);
+    REQUIRE(picture.height == 448);
+    REQUIRE(picture.argb.size() == 608u * 448u);
+    CHECK(picture.argb.back() == 0xFFFF0000u);  // the last line ends red, at pixel 607
+    CHECK(picture.argb[447u * 608u] == 0xFFFF0000u);
+}
+
 TEST_CASE("a store to a hardware register does not touch RAM") {
     DiscBuilder builder;
     const auto image = builder.write("mmio_ram");
@@ -339,10 +366,11 @@ TEST_CASE("MI accepts its protection registers and masks its interrupt") {
     CHECK_THROWS_AS(mi.read16(0x32), ezy::gc::BusError);
 }
 
-// The real game, only on a machine that has it: the boot through the machine loop reaches
-// the stop the plain CPU loop reached (the unmodeled MMCR0 SPR, Task 7), or a hardware block
-// Tasks 5-6 add. Where it stops is reported, not checked.
-TEST_CASE("the MKDD boot through run_field reports where it stops") {
+// The real game, only on a machine that has it. Since Task 7 the boot runs into the game's
+// main loop (docs/progress/2026-11-21-gamecube-mkdd-boot.md); the first 5 fields (40 million
+// instructions, a few seconds in Debug) must run without a stop and boot the DSP microcode
+// this HLE knows. Where a regression stops it is reported.
+TEST_CASE("the MKDD boot through run_field runs its first fields and boots its DSP microcode") {
     const std::filesystem::path path = "E:/Rom nintendo/Mario Kart Double Dash/Mario Kart - Double Dash!! (USA).nkit.iso";
     if (!std::filesystem::exists(path)) {
         MESSAGE("MKDD image not found; skipped: " << path.string());
@@ -350,11 +378,15 @@ TEST_CASE("the MKDD boot through run_field reports where it stops") {
     }
     auto gc = GameCube::create(path);
     REQUIRE(gc != nullptr);
+    bool stopped = false;
     try {
         for (int i = 0; i < 5; ++i) gc->run_field();
-        MESSAGE("MKDD ran 5 fields; pc " << gc->cpu().pc());
     } catch (const ezy::gc::GekkoError& e) {
+        stopped = true;
         MESSAGE("MKDD stopped after " << gc->stats().instructions << " instructions: " << std::string(e.what()));
     }
-    CHECK(gc->stats().instructions > 1000);
+    CHECK_FALSE(stopped);
+    CHECK(gc->stats().fields == 5);
+    REQUIRE(gc->dsp().microcode().has_value());
+    CHECK(gc->dsp().microcode()->crc == 0x2FCDF1EC);  // JAudio's "Zelda" microcode (dsp_zelda.hpp)
 }
