@@ -19,6 +19,7 @@
 #include "beeper.hpp"
 #include "chip8_system.hpp"
 #include "debugger.hpp"
+#include "gamecube_system.hpp"
 #include "gameboy_system.hpp"
 #include "gba_system.hpp"
 #include "n64_system.hpp"
@@ -90,10 +91,19 @@ std::optional<Options> parse_options(int argc, char* argv[]) {
     return options;
 }
 
-// Picks the console from the file extension.
-std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom, Options options) {
+// The file's extension, lower case: it picks the console.
+std::string lower_extension(const char* path) {
     std::string ext = std::filesystem::path(path).extension().string();
     std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext;
+}
+
+// GameCube discs (1.4 GB) are opened by path and read on demand, never loaded into memory.
+bool is_disc_image(const std::string& ext) { return ext == ".iso" || ext == ".gcm"; }
+
+// Picks the console from the file extension (cartridge ROMs, read whole into `rom`).
+std::unique_ptr<System> create_system(const char* path, std::span<const std::uint8_t> rom, Options options) {
+    const std::string ext = lower_extension(path);
     if (ext == ".gba") {
         return ezy::frontend::GbaSystem::create(rom, {}, std::filesystem::path(path).replace_extension(".sav"));
     }
@@ -124,7 +134,7 @@ bool handle_shortcut(SDL_Scancode scancode, RunState& run) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba | rom.z64/.v64/.n64> [options]\n"
+        std::cerr << "Usage: ezyemu <rom.ch8 | rom.gb | rom.gbc | rom.gba | rom.z64/.v64/.n64 | disc.iso/.gcm> [options]\n"
                      "  --model auto|dmg|cgb    Game Boy hardware to emulate (auto = Game Boy Color)\n"
                      "  --boot-rom <file>       run a real CGB boot ROM dump (2304 bytes)\n"
                      "  --no-color-correction   show raw CGB colours\n"
@@ -137,8 +147,12 @@ int main(int argc, char* argv[]) {
 
     auto options = parse_options(argc, argv);
     if (!options) return 1;
-    const auto rom = read_file(argv[1]);
-    std::unique_ptr<System> system = rom ? create_system(argv[1], *rom, std::move(*options)) : nullptr;
+    std::unique_ptr<System> system;
+    if (is_disc_image(lower_extension(argv[1]))) {
+        system = ezy::frontend::GameCubeSystem::create(argv[1]);
+    } else if (const auto rom = read_file(argv[1])) {
+        system = create_system(argv[1], *rom, std::move(*options));
+    }
     if (!system) {
         std::cerr << "Could not load ROM: " << argv[1] << '\n';
         return 1;

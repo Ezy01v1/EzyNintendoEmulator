@@ -1,5 +1,7 @@
 #include "gc/gamecube.hpp"
 
+#include <algorithm>
+
 #include "gc/disc.hpp"
 #include "gc/hle_boot.hpp"
 
@@ -46,31 +48,52 @@ GameCube::~GameCube() = default;
 
 void GameCube::run_field() {
     const std::uint64_t fields_before = vi_.fields();
-    while (vi_.fields() == fields_before) {
-        const int cycles = cpu_.step();
-        ++instructions_;
-        scheduler_.advance(static_cast<std::uint64_t>(cycles));
-        // The time base ticks once per 12 CPU cycles; the decrementer follows it.
-        cycle_remainder_ += static_cast<std::uint64_t>(cycles);
-        if (cycle_remainder_ >= 12) {
-            cpu_.advance_timebase(cycle_remainder_ / 12);
-            cycle_remainder_ %= 12;
-        }
-        while (const auto due = scheduler_.pop_due()) {
-            switch (due->type) {
-                case EventType::ViLine:
-                    if (vi_.on_event(due->when)) gx_.end_field();
-                    break;
-                case EventType::DiTransfer: di_.on_event(); break;
-                case EventType::SiPoll: si_.on_event(due->when); break;
-                case EventType::ArDma: dsp_.on_aram_dma_done(); break;
-                case EventType::AiDmaStart: dsp_.on_ai_dma_start(); break;
-                case EventType::AiDmaBlock: dsp_.on_ai_dma_block(due->when); break;
-                case EventType::AiSample: ai_.on_event(); break;
-                case EventType::Count: break;
-            }
+    while (vi_.fields() == fields_before) step();
+}
+
+void GameCube::step() {
+    if (!pc_trace_.empty()) {
+        pc_trace_[pc_trace_next_] = cpu_.pc();
+        if (++pc_trace_next_ == pc_trace_.size()) pc_trace_next_ = 0;
+        if (pc_trace_count_ < pc_trace_.size()) ++pc_trace_count_;
+    }
+    const int cycles = cpu_.step();
+    ++instructions_;
+    scheduler_.advance(static_cast<std::uint64_t>(cycles));
+    // The time base ticks once per 12 CPU cycles; the decrementer follows it.
+    cycle_remainder_ += static_cast<std::uint64_t>(cycles);
+    if (cycle_remainder_ >= 12) {
+        cpu_.advance_timebase(cycle_remainder_ / 12);
+        cycle_remainder_ %= 12;
+    }
+    while (const auto due = scheduler_.pop_due()) {
+        switch (due->type) {
+            case EventType::ViLine:
+                if (vi_.on_event(due->when)) gx_.end_field();
+                break;
+            case EventType::DiTransfer: di_.on_event(); break;
+            case EventType::SiPoll: si_.on_event(due->when); break;
+            case EventType::ArDma: dsp_.on_aram_dma_done(); break;
+            case EventType::AiDmaStart: dsp_.on_ai_dma_start(); break;
+            case EventType::AiDmaBlock: dsp_.on_ai_dma_block(due->when); break;
+            case EventType::AiSample: ai_.on_event(); break;
+            case EventType::Count: break;
         }
     }
+}
+
+void GameCube::set_pc_trace(std::size_t depth) {
+    pc_trace_.assign(depth, 0);
+    pc_trace_next_ = 0;
+    pc_trace_count_ = 0;
+}
+
+std::vector<std::uint32_t> GameCube::recent_pcs() const {
+    std::vector<std::uint32_t> pcs;
+    pcs.reserve(pc_trace_count_);
+    const std::size_t first = (pc_trace_next_ + pc_trace_.size() - pc_trace_count_) % std::max<std::size_t>(pc_trace_.size(), 1);
+    for (std::size_t i = 0; i < pc_trace_count_; ++i) pcs.push_back(pc_trace_[(first + i) % pc_trace_.size()]);
+    return pcs;
 }
 
 Image GameCube::xfb() const { return vi_.xfb_image(memory_.mem1()); }

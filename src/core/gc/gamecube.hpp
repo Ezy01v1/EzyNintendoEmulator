@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <vector>
 
 #include "gc/ai.hpp"
 #include "gc/di.hpp"
@@ -52,6 +53,9 @@ public:
     // Runs until the VI starts the next field. Throws GekkoError/BusError as the CPU does;
     // the machine stays inspectable (cpu().pc() is the instruction that failed).
     void run_field();
+    // One instruction (or the interrupt the Gekko takes instead) and the events it makes due:
+    // run_field()'s loop body, for the debugger's single step. Throws as run_field().
+    void step();
 
     // The picture the VI is showing: ARGB, 640 wide, the frame's height (see Vi::xfb_image).
     [[nodiscard]] Image xfb() const;
@@ -59,6 +63,13 @@ public:
     // Controller 1 (PadState is in gc/si.hpp; the SI's channel 0 reports it).
     void set_pad(const PadState& pad) { si_.set_pad(pad); }
     [[nodiscard]] const PadState& pad() const { return si_.pad(); }
+
+    // The PC trace the runner prints when emulation stops: run_field() records the pc of every
+    // instruction it steps, keeping the last `depth` (0, the default, turns it off).
+    void set_pc_trace(std::size_t depth);
+    // The recorded PCs, oldest first; the newest is the instruction stepped last (when a step
+    // threw, the one that failed).
+    [[nodiscard]] std::vector<std::uint32_t> recent_pcs() const;
 
     // Gekko cycles since the boot.
     [[nodiscard]] std::uint64_t cycles() const { return scheduler_.now(); }
@@ -95,6 +106,9 @@ private:
     GxFifo gx_;
     std::uint64_t instructions_ = 0;
     std::uint64_t cycle_remainder_ = 0;  // CPU cycles not yet a whole time base tick
+    std::vector<std::uint32_t> pc_trace_;  // a ring of set_pc_trace()'s depth
+    std::size_t pc_trace_next_ = 0;        // where the next pc goes
+    std::size_t pc_trace_count_ = 0;       // how many entries are filled (up to the depth)
 };
 
 }  // namespace ezy::gc

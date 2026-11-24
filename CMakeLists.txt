@@ -38,6 +38,7 @@ add_subdirectory(src/core/gc)
 add_subdirectory(tools/gb_runner)
 add_subdirectory(tools/gba_runner)
 add_subdirectory(tools/n64_runner)
+add_subdirectory(tools/gc_runner)
 add_subdirectory(tools/rdp_trace_diff)
 add_subdirectory(tools/gfx_oracle)
 
