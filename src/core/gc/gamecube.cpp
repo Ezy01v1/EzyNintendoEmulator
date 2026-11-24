@@ -59,7 +59,7 @@ void GameCube::run_field() {
         while (const auto due = scheduler_.pop_due()) {
             switch (due->type) {
                 case EventType::ViLine:
-                    if (vi_.on_event(due->when)) gx_.reset_counters();
+                    if (vi_.on_event(due->when)) gx_.end_field();
                     break;
                 case EventType::DiTransfer: di_.on_event(); break;
                 case EventType::SiPoll: si_.on_event(due->when); break;
@@ -81,11 +81,11 @@ Stats GameCube::stats() const {
     for (unsigned bit = 0; bit < Pi::kCauseCount; ++bit) s.interrupts[bit] = pi_.interrupts(bit);
     s.di_reads = di_.reads();
     s.dsp_mails = dsp_.mails_received();
-    const GxCounters& gx = gx_.counters();
-    s.fifo_bytes_this_field = gx.fifo_bytes;
-    s.gx_commands_this_field = gx.commands;
-    s.gx_primitives_this_field = gx.primitives;
-    s.gx_vertices_this_field = gx.vertices;
+    const GxCounters& gx = gx_.last_field();
+    s.fifo_bytes_last_field = gx.fifo_bytes;
+    s.gx_commands_last_field = gx.commands;
+    s.gx_primitives_last_field = gx.primitives;
+    s.gx_vertices_last_field = gx.vertices;
     s.fields = vi_.fields();
     return s;
 }

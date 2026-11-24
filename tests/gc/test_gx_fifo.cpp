@@ -201,6 +201,17 @@ TEST_CASE("pipe writes reach the FIFO in 32-byte bursts and wrap from end to bas
             CHECK(e.word_or_address == 0x01800000);
             CHECK(std::string(e.what()).find("0x01800000") != std::string::npos);
         }
+        // The failed burst's 32 bytes are dropped: the next store starts a new burst (and never
+        // writes past the gather buffer). With the pointer back in MEM1, it lands there.
+        CHECK(gx.counters().fifo_bytes == 128);
+        mem.write8(Memory::kPipeBase, 0x5A);
+        pi.write32(kPiFifoWptr, 0x10000);
+        for (int i = 0; i < 31; ++i) mem.write8(Memory::kPipeBase, 0x5B);
+        CHECK(ram_at(0x10000) == 0x5A);
+        CHECK(ram_at(0x10001) == 0x5B);
+        CHECK(ram_at(0x1001F) == 0x5B);
+        CHECK(pi.fifo_write_pointer() == 0x10020);
+        CHECK(gx.counters().fifo_bytes == 160);
     }
 }
 
@@ -353,6 +364,15 @@ TEST_CASE("CALL_DL parses a display list in RAM and returns") {
         CHECK(rig.gx.counters().primitives == 1);
         CHECK(rig.gx.counters().vertices == 2);
         CHECK(count(rig.gx, GxCommand::Nop) == 20 + 20 + 18);  // the setup's, the list's, the call's
+    }
+    SUBCASE("a list at a cached or uncached address runs from its physical address") {
+        rig.put(0x30000, Cmds{}.bp(0x47, 0x4444).pad());
+        rig.send(Cmds{}.call_dl(0x80030000, 32).pad());  // GXCallDisplayList with a heap pointer
+        CHECK(rig.gx.pe().read16(kPeToken) == 0x4444);
+        rig.put(0x30000, Cmds{}.bp(0x47, 0x5555).pad());
+        rig.send(Cmds{}.call_dl(0xC0030000, 32).pad());
+        CHECK(rig.gx.pe().read16(kPeToken) == 0x5555);
+        CHECK(count(rig.gx, GxCommand::CallDisplayList) == 2);
     }
     SUBCASE("address and size are 32-byte aligned") {
         rig.put(0x30000, Cmds{}.bp(0x47, 0x3333).pad());
@@ -518,6 +538,17 @@ TEST_CASE("an unknown command opcode stops with its address") {
         CHECK(std::string(e.what()).find("0x00050005") != std::string::npos);
     }
 
+    // The offending command stays queued: more data runs into the same error, and the commands
+    // before it are not run again.
+    CHECK(count(rig.gx, GxCommand::Nop) == 5);
+    try {
+        rig.send(Cmds{}.nop(32));
+        FAIL("no error");
+    } catch (const BusError& e) {
+        CHECK(e.word_or_address == 0x50005);
+    }
+    CHECK(count(rig.gx, GxCommand::Nop) == 5);
+
     // In a display list, the address is the list's byte.
     GxRig rig2;
     rig2.linked_fifo(0x50000, 0x50FE0);
@@ -601,7 +632,9 @@ TEST_CASE("CP status, watermarks and the breakpoint interrupt") {
     }
     // Registers nobody models, and 32-bit accesses, stop the machine.
     CHECK_THROWS_AS(cp.read16(0x40), BusError);
-    CHECK_THROWS_AS(cp.read16(kCpClear), BusError);
+    CHECK(cp.read16(kCpClear) == 0);  // Dolphin: reads a constant 0
+    cp.write16(0x06, 0xFFFF);          // PERF_SELECT: stored, 3 bits
+    CHECK(cp.read16(0x06) == 0x0007);
     CHECK_THROWS_AS(cp.write16(kCpStatus, 0), BusError);
     CHECK_THROWS_AS(cp.read32(kCpBase), BusError);
     CHECK_THROWS_AS(cp.write32(kCpBase, 0), BusError);
@@ -655,17 +688,23 @@ TEST_CASE("the machine maps CP, PE and the pipe, and counts the FIFO per field")
     mem.write32(Memory::kPipeBase, 0x47000042);  // token 0x0042
     for (int i = 0; i < 6; ++i) mem.write32(Memory::kPipeBase, 0);
     CHECK(mem.read16(kPe + kPeToken) == 0x0042);
-    Stats s = gc->stats();
-    CHECK(s.fifo_bytes_this_field == 32);
-    CHECK(s.gx_commands_this_field[static_cast<std::size_t>(GxCommand::LoadBpReg)] == 1);
-    CHECK(s.gx_commands_this_field[static_cast<std::size_t>(GxCommand::Nop)] == 24);
-    CHECK(s.gx_primitives_this_field == 1);
-    CHECK(s.gx_vertices_this_field == 4);
     CHECK(mem.mem1()[0x00100000] == 0x80);  // the FIFO in RAM holds the data
-    // The next field starts the counts again.
+    CHECK(gc->gx().counters().fifo_bytes == 32);  // the field in progress
+    CHECK(gc->stats().fifo_bytes_last_field == 0);
+    // run_field ends as the next field starts: Stats shows the field that just finished.
+    gc->run_field();
+    Stats s = gc->stats();
+    CHECK(s.fifo_bytes_last_field == 32);
+    CHECK(s.gx_commands_last_field[static_cast<std::size_t>(GxCommand::LoadBpReg)] == 1);
+    CHECK(s.gx_commands_last_field[static_cast<std::size_t>(GxCommand::Nop)] == 24);
+    CHECK(s.gx_primitives_last_field == 1);
+    CHECK(s.gx_vertices_last_field == 4);
+    CHECK(gc->gx().counters().fifo_bytes == 0);
+    // A field with no graphics data shows zeros.
     gc->run_field();
     s = gc->stats();
-    CHECK(s.fifo_bytes_this_field == 0);
-    CHECK(s.gx_primitives_this_field == 0);
+    CHECK(s.fifo_bytes_last_field == 0);
+    CHECK(s.gx_primitives_last_field == 0);
+    CHECK(s.gx_commands_last_field[static_cast<std::size_t>(GxCommand::Nop)] == 0);
     CHECK(mem.read16(kPe + kPeToken) == 0x0042);
 }

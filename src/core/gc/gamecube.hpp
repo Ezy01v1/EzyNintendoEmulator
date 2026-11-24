@@ -23,16 +23,17 @@ namespace ezy::gc {
 class Disc;
 
 // What the runner prints. stats() fills it from the peripherals. The graphics FIFO's counts
-// are this field's (the machine resets them at each field start); the rest count since the
-// boot.
+// are the last finished field's (run_field() returns as a field starts, so the field in
+// progress has seen nothing yet; GxFifo::counters() has it); the rest count since the boot.
 struct Stats {
     std::uint64_t instructions = 0;
     std::array<std::uint64_t, Pi::kCauseCount> interrupts{};  // rising edges per PI cause bit
     std::uint64_t di_reads = 0;               // DI Read commands (Di::reads())
-    std::uint64_t fifo_bytes_this_field = 0;  // written to the FIFO by the pipe
-    std::array<std::uint64_t, kGxCommandCount> gx_commands_this_field{};  // by GxCommand
-    std::uint64_t gx_primitives_this_field = 0;
-    std::uint64_t gx_vertices_this_field = 0;
+    // The graphics FIFO in the last finished field (GxFifo::last_field()).
+    std::uint64_t fifo_bytes_last_field = 0;  // written to the FIFO by the pipe
+    std::array<std::uint64_t, kGxCommandCount> gx_commands_last_field{};  // by GxCommand
+    std::uint64_t gx_primitives_last_field = 0;
+    std::uint64_t gx_vertices_last_field = 0;
     std::uint64_t dsp_mails = 0;              // mails CPU->DSP (Dsp::mails_received())
     std::uint64_t fields = 0;
 };

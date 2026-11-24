@@ -27,8 +27,8 @@ enum class GxCommand : std::uint8_t {
 };
 inline constexpr std::size_t kGxCommandCount = static_cast<std::size_t>(GxCommand::Count);
 
-// What the graphics FIFO saw since the last reset_counters() (the machine resets them at each
-// field start; design: "Contadores por campo").
+// What the graphics FIFO saw in one field (design: "Contadores por campo"; see
+// GxFifo::end_field).
 struct GxCounters {
     std::uint64_t fifo_bytes = 0;                           // written to the FIFO by the pipe
     std::array<std::uint64_t, kGxCommandCount> commands{};  // run, FIFO and display lists
@@ -47,7 +47,8 @@ struct GxCounters {
 // each full buffer is copied to MEM1 at the PI's FIFO write pointer, which then moves 32 bytes
 // on, or back to the PI's base when it was at the PI's end (the end register is the address of
 // the FIFO's last block: GPFifo::UpdateGatherPipe). A burst outside MEM1 throws BusError with
-// its address. When the CP is linked (CTRL.GPLinkEnable) the CP's write pointer moves the same
+// its address; its 32 bytes are dropped and the pointers stay, so a later store starts a new
+// burst. When the CP is linked (CTRL.GPLinkEnable) the CP's write pointer moves the same
 // way within the CP's base/end and the read-write distance grows by 32 (GatherPipeBursted).
 // Deviation: Dolphin also copies the CP's base/end/write pointer back to the PI when linked
 // with reading on; here the PI keeps its own (games point both at the same FIFO).
@@ -57,7 +58,8 @@ struct GxCounters {
 // reads 32-byte blocks while CTRL.GPReadEnable is set, the distance is not 0 and the read
 // pointer is not at an enabled breakpoint (Fifo.cpp's loop); the read pointer wraps from end
 // to base like the pipe, the distance drops by 32. Blocks queue as bytes, so a command split
-// by a block or by the FIFO's wrap waits for the rest and runs once, whole.
+// by a block or by the FIFO's wrap waits for the rest and runs once, whole. A command that throws
+// stays queued (the ones before it are done): more data runs into the same error.
 //
 // CP registers, 16 bits each (a 32-bit access throws: Dolphin registers none), offsets from
 // 0x0C000000:
@@ -69,9 +71,9 @@ struct GxCounters {
 //               GPLinkEnable 4, BPInt 5. The CP cause (PI bit 11) is
 //               ((Breakpoint && BPInt) || (Overflow && its enable) || (Underflow && its
 //               enable)) && GPReadEnable.
-//   04 CLEAR    write-only, accepted, no effect (Dolphin: "intentionally don't emulate"; the
-//               watermark bits are recomputed from the distance anyway)
-//   06 PERF_SELECT  write-only, accepted, no effect (performance metrics)
+//   04 CLEAR    accepted, no effect (Dolphin: "intentionally don't emulate"; the watermark
+//               bits are recomputed from the distance anyway); reads 0 (Dolphin's Constant)
+//   06 PERF_SELECT  stored, bits 0-2 (Dolphin's DirectWrite mask 0x0007), no effect
 //   20/22 FIFO base   24/26 end   28/2A high watermark   2C/2E low watermark
 //   30/32 read-write distance   34/36 write pointer   38/3A read pointer   3C/3E breakpoint
 //               each a LO (bits 0-15, masked 0xFFE0) / HI (bits 16-31, masked 0x03FF: the
@@ -81,9 +83,11 @@ struct GxCounters {
 // Commands (OpcodeDecoding.h), in the FIFO and in display lists:
 //   00 NOP (1 byte)   08 LOAD_CP_REG (1 + register + 32-bit value)
 //   10 LOAD_XF_REG (1 + 32-bit word: count - 1 in bits 16-19, address in 0-15, + 4 * count;
-//      bits 20-31 set throw)   20/28/30/38 LOAD_INDX_A..D (1 + 4)
+//      bits 20-31 set throw: stricter than Dolphin, which asserts and then uses bits 16-19)   20/28/30/38 LOAD_INDX_A..D (1 + 4)
 //   40 CALL_DL (1 + address + size, both & ~31): runs the list from MEM1 at once, then the
-//      FIFO goes on. A list outside MEM1, a list inside a list (the hardware has no nesting;
+//      FIFO goes on. The address is masked & 0x3FFFFFFF first, as Dolphin's
+//      Memmap::GetSpanForAddress does, so the SDK's cached (0x8...) and uncached (0xC...)
+//      pointers reach their physical address. A list outside MEM1, a list inside a list (the hardware has no nesting;
 //      Dolphin ignores it) or a list that ends inside a command throws BusError.
 //   48 INVALIDATE_VTX_CACHE (1)   61 LOAD_BP_REG (1 + register 8 bits + value 24 bits)
 //   80-BF primitives: opcode bits 3-6 the type, bits 0-2 the VAT group; 1 + 16-bit vertex
@@ -141,8 +145,14 @@ public:
     MmioHandler& cp() { return cp_regs_; }
     MmioHandler& pe() { return pe_regs_; }
 
+    // The field in progress, and the last finished one. end_field() (the machine calls it at
+    // each field start) moves the first into the second and starts again from zero.
     [[nodiscard]] const GxCounters& counters() const { return counters_; }
-    void reset_counters() { counters_ = {}; }
+    [[nodiscard]] const GxCounters& last_field() const { return last_field_; }
+    void end_field() {
+        last_field_ = counters_;
+        counters_ = {};
+    }
     [[nodiscard]] const VertexFormat& vertex_format() const { return vertex_; }
     [[nodiscard]] std::uint32_t bp(std::uint8_t reg) const { return bp_[reg]; }
 
@@ -179,10 +189,12 @@ private:
     // Reads and runs the FIFO while the CP may (see the class comment), then updates the CP
     // cause.
     void run_cp();
-    // Runs the complete commands at the start of `data`; returns the bytes they took (a
-    // command cut short by the end of `data` is left).
-    std::size_t run_commands(std::span<const std::uint8_t> data, const Source& source);
-    void call_display_list(std::uint32_t address, std::uint32_t size);
+    // Runs the complete commands at the start of `data`. `pos` ends as the bytes they took (a
+    // command cut short by the end of `data` is left); it moves past each command as it
+    // completes, so after a throw it is the offending command's offset.
+    void run_commands(std::span<const std::uint8_t> data, const Source& source, std::size_t& pos);
+    // CALL_DL's two words, as written.
+    void call_display_list(std::uint32_t pointer, std::uint32_t raw_size);
     void load_cp_reg(std::uint8_t reg, std::uint32_t value, std::uint32_t at);
     void load_bp_reg(std::uint8_t reg, std::uint32_t value, std::uint32_t at);
     void efb_copy(std::uint32_t copy, std::uint32_t at);
@@ -204,7 +216,7 @@ private:
     std::size_t gathered_ = 0;
 
     // CP
-    std::uint16_t cp_ctrl_ = 0;
+    std::uint16_t cp_ctrl_ = 0, perf_select_ = 0;
     std::uint32_t base_ = 0, end_ = 0, hi_mark_ = 0, lo_mark_ = 0, distance_ = 0, wptr_ = 0, rptr_ = 0,
                   breakpoint_ = 0;
     std::vector<std::uint8_t> pending_;          // FIFO blocks read, whole, oldest first
@@ -219,7 +231,7 @@ private:
     std::uint16_t pe_token_ = 0;
     bool token_signal_ = false, finish_signal_ = false;
 
-    GxCounters counters_;
+    GxCounters counters_, last_field_;
 };
 
 }  // namespace ezy::gc

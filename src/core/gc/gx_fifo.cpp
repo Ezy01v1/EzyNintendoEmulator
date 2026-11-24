@@ -83,12 +83,12 @@ void GxFifo::write(std::span<const std::uint8_t> bytes) {
 }
 
 void GxFifo::burst() {
+    gathered_ = 0;  // first: a burst that throws is dropped, the next store starts a new one
     const std::uint32_t at = pi_.fifo_write_pointer();
     if (std::uint64_t{at} + kBurst > mem1_.size()) {
         throw BusError("the write-gather pipe's burst to " + hex32(at) + " is outside MEM1", at);
     }
     std::copy(gather_.begin(), gather_.end(), mem1_.begin() + at);
-    gathered_ = 0;
     counters_.fifo_bytes += kBurst;
     pi_.set_fifo_write_pointer(at == pi_.fifo_end() ? pi_.fifo_base() : at + kBurst);
     if (cp_ctrl_ & kGpLinkEnable) {  // Dolphin's GatherPipeBursted
@@ -139,7 +139,14 @@ void GxFifo::run_cp() {
         distance_ -= kBurst;  // a multiple of 32: its LO half is 32-byte aligned
 
         const Source source{false, 0, pending_pos_};
-        pending_pos_ += run_commands(std::span<const std::uint8_t>(pending_).subspan(pending_pos_), source);
+        std::size_t ran = 0;
+        try {
+            run_commands(std::span<const std::uint8_t>(pending_).subspan(pending_pos_), source, ran);
+        } catch (...) {
+            pending_pos_ += ran;  // the commands before the offending one are done
+            throw;
+        }
+        pending_pos_ += ran;
         // Drop the blocks that are run to their end.
         const std::size_t done = pending_pos_ / kBurst;
         pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(done * kBurst));
@@ -155,9 +162,9 @@ std::uint32_t GxFifo::address_of(const Source& source, std::size_t offset) const
     return pending_blocks_[k / kBurst] + static_cast<std::uint32_t>(k % kBurst);
 }
 
-std::size_t GxFifo::run_commands(std::span<const std::uint8_t> data, const Source& source) {
+void GxFifo::run_commands(std::span<const std::uint8_t> data, const Source& source, std::size_t& pos) {
     auto counted = [this](GxCommand kind) { ++counters_.commands[static_cast<std::size_t>(kind)]; };
-    std::size_t pos = 0;
+    pos = 0;
     while (pos < data.size()) {
         const std::uint8_t* p = data.data() + pos;
         const std::size_t left = data.size() - pos;
@@ -170,13 +177,13 @@ std::size_t GxFifo::run_commands(std::span<const std::uint8_t> data, const Sourc
                 counted(GxCommand::Nop);
                 break;
             case 0x08:  // LOAD_CP_REG: register, value
-                if (left < 6) return pos;
+                if (left < 6) return;
                 load_cp_reg(p[1], be32(p + 2), here());
                 bytes = 6;
                 counted(GxCommand::LoadCpReg);
                 break;
             case 0x10: {  // LOAD_XF_REG: count - 1 and address, then the words. Accepted, no effect.
-                if (left < 5) return pos;
+                if (left < 5) return;
                 const std::uint32_t word = be32(p + 1);
                 if ((word >> 16) >= 16) {
                     throw BusError("LOAD_XF_REG at " + hex32(here()) + " with the count field " + hex32(word >> 16) +
@@ -184,7 +191,7 @@ std::size_t GxFifo::run_commands(std::span<const std::uint8_t> data, const Sourc
                                    here());
                 }
                 bytes = 5 + 4 * std::size_t{(word >> 16) + 1};
-                if (left < bytes) return pos;
+                if (left < bytes) return;
                 counted(GxCommand::LoadXfReg);
                 break;
             }
@@ -192,18 +199,18 @@ std::size_t GxFifo::run_commands(std::span<const std::uint8_t> data, const Sourc
             case 0x28:
             case 0x30:
             case 0x38:  // LOAD_INDX_A..D: index, size, address. Accepted, no effect (XF matrices).
-                if (left < 5) return pos;
+                if (left < 5) return;
                 bytes = 5;
                 counted(GxCommand::LoadIndexed);
                 break;
             case 0x40:  // CALL_DL: address, size
-                if (left < 9) return pos;
+                if (left < 9) return;
                 if (source.list) {
                     throw BusError("CALL_DL at " + hex32(here()) + " inside the display list at " + hex32(source.base) +
                                        " (the hardware does not nest lists)",
                                    here());
                 }
-                call_display_list(be32(p + 1) & ~31u, be32(p + 5) & ~31u);
+                call_display_list(be32(p + 1), be32(p + 5));
                 bytes = 9;
                 counted(GxCommand::CallDisplayList);
                 break;
@@ -212,7 +219,7 @@ std::size_t GxFifo::run_commands(std::span<const std::uint8_t> data, const Sourc
                 counted(GxCommand::InvalidateVertexCache);
                 break;
             case 0x61:  // LOAD_BP_REG: register, 24-bit value
-                if (left < 5) return pos;
+                if (left < 5) return;
                 load_bp_reg(p[1], be24(p + 2), here());
                 bytes = 5;
                 counted(GxCommand::LoadBpReg);
@@ -224,7 +231,7 @@ std::size_t GxFifo::run_commands(std::span<const std::uint8_t> data, const Sourc
                                    here());
                 }
                 // A primitive: type in bits 3-6, VAT group in bits 0-2, then the vertex count.
-                if (left < 3) return pos;
+                if (left < 3) return;
                 const auto vertex_bytes = vertex_.vertex_size(op & 7u);
                 if (!vertex_bytes) {
                     throw BusError("primitive " + hex8(op) + " at " + hex32(here()) + ": VAT group " +
@@ -233,7 +240,7 @@ std::size_t GxFifo::run_commands(std::span<const std::uint8_t> data, const Sourc
                 }
                 const std::uint32_t vertices = be16(p + 1);
                 bytes = 3 + std::size_t{vertices} * *vertex_bytes;
-                if (left < bytes) return pos;
+                if (left < bytes) return;
                 counted(GxCommand::Primitive);
                 ++counters_.primitives;
                 counters_.vertices += vertices;
@@ -242,15 +249,20 @@ std::size_t GxFifo::run_commands(std::span<const std::uint8_t> data, const Sourc
         }
         pos += bytes;
     }
-    return pos;
 }
 
-void GxFifo::call_display_list(std::uint32_t address, std::uint32_t size) {
+void GxFifo::call_display_list(std::uint32_t pointer, std::uint32_t raw_size) {
+    // OpcodeDecoding's OnDisplayList(address & ~31, size & ~31), then Memmap's
+    // GetSpanForAddress (address &= 0x3FFFFFFF): cached and uncached pointers reach MEM1.
+    const std::uint32_t address = (pointer & 0x3FFFFFFF) & ~31u, size = raw_size & ~31u;
     if (std::uint64_t{address} + size > mem1_.size()) {
-        throw BusError("display list at " + hex32(address) + ", " + hex32(size) + " bytes, runs past MEM1", address);
+        throw BusError("display list at " + hex32(pointer) + " (physical " + hex32(address) + "), " + hex32(size) +
+                           " bytes, runs past MEM1",
+                       address);
     }
     const Source source{true, address, 0};
-    const std::size_t done = run_commands(std::span<const std::uint8_t>(mem1_).subspan(address, size), source);
+    std::size_t done = 0;
+    run_commands(std::span<const std::uint8_t>(mem1_).subspan(address, size), source, done);
     if (done != size) {
         const std::uint32_t at = address + static_cast<std::uint32_t>(done);
         throw BusError("display list at " + hex32(address) + " (" + hex32(size) + " bytes) ends inside the command at " +
@@ -365,11 +377,13 @@ std::uint32_t& GxFifo::fifo_register(std::uint32_t offset) {
 std::uint16_t GxFifo::cp_read16(std::uint32_t offset) {
     if (offset == kCpStatus) return cp_status();
     if (offset == kCpCtrl) return cp_ctrl_;
+    if (offset == kCpClear) return 0;  // Dolphin: MMIO::Constant<u16>(0)
+    if (offset == kCpPerfSelect) return perf_select_;
     if (offset >= kCpFifoFirst && offset <= kCpFifoLast && !(offset & 1)) {
         const std::uint32_t value = fifo_register(offset);
         return static_cast<std::uint16_t>((offset & 2) ? value >> 16 : value);
     }
-    unmodeled("command processor", kCpBlock, "read", offset);  // CLEAR and PERF_SELECT are write-only
+    unmodeled("command processor", kCpBlock, "read", offset);
 }
 
 void GxFifo::cp_write16(std::uint32_t offset, std::uint16_t value) {
@@ -378,8 +392,14 @@ void GxFifo::cp_write16(std::uint32_t offset, std::uint16_t value) {
         run_cp();  // turning reading on (or a breakpoint off) reads what waits
         return;
     }
-    if (offset == kCpClear) return;       // accepted, no effect (Dolphin: not emulated)
-    if (offset == kCpPerfSelect) return;  // accepted, no effect (performance metrics)
+    if (offset == kCpClear) {  // accepted, no effect (Dolphin: not emulated; it runs the GPU)
+        run_cp();
+        return;
+    }
+    if (offset == kCpPerfSelect) {  // stored, no effect (performance metrics)
+        perf_select_ = value & 0x0007;
+        return;
+    }
     if (offset >= kCpFifoFirst && offset <= kCpFifoLast && !(offset & 1)) {
         std::uint32_t& reg = fifo_register(offset);
         if (offset & 2) reg = (reg & 0xFFFFu) | std::uint32_t{static_cast<std::uint16_t>(value & kHiMask)} << 16;
