@@ -922,3 +922,9 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Falta: Tarea 5 (DI, SI, EXI, AI, interfaz DSP; detenida antes de escribir nada), 6 (FIFO gráfico), 7 (runner,
   ezyemu, arrancar MKDD) y la revisión final. Registro de la ejecución (fuera de git):
   `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`.
+- 2026-11-23 — PAUSA (límite de uso) en GameCube, subproyecto 1 (rama `gc/base`, sin subir desde 53e42cb).
+  Tarea 5 (DI, SI, EXI, AI, DSP) hecha y revisada: 8635847 + 54e3c03. ARAM ≥ 16 MiB = puerto de expansión
+  vacío (como el hardware y Dolphin). Tarea 6 (FIFO gráfico) hecha: ce75746 + correcciones 2c0f3fc; falta
+  confirmar la re-revisión de esas correcciones. Falta: Tarea 7 (runner, ezyemu, MKDD) y la revisión final.
+  Ojo: el Release incremental (LTCG) de ezy_gc_tests compiló mal dos veces; borrar los objetos Release de GC
+  antes de fiarse de un resultado Release. Registro: `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`.
