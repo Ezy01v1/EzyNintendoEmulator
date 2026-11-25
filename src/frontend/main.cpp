@@ -262,7 +262,7 @@ int main(int argc, char* argv[]) {
                 // time, it slows the game down instead of showing one frame out of many.
                 for (int frames = 0; accumulator >= frame_seconds && frames < kMaxFramesPerRender; ++frames) {
                     system->run_frame();
-                    ++emulated_frames;
+                    if (system->stop_reason().empty()) ++emulated_frames;
                     accumulator -= frame_seconds;
                 }
                 if (accumulator >= frame_seconds) accumulator = 0.0;
@@ -270,8 +270,10 @@ int main(int argc, char* argv[]) {
             // Emulated frames per second in the title, refreshed every second: the speed the
             // game really runs at (60 = full speed for NTSC N64 games).
             if (const double elapsed = static_cast<double>(now - fps_window_start) / counter_freq; elapsed >= 1.0) {
-                const std::string speed = title + "  |  " + std::to_string(static_cast<int>(emulated_frames / elapsed + 0.5)) +
-                                          " fps";
+                std::string speed = title + "  |  " + std::to_string(static_cast<int>(emulated_frames / elapsed + 0.5)) +
+                                    " fps";
+                if (const auto reason = system->stop_reason(); !reason.empty())
+                    speed += "  |  STOPPED: " + std::string(reason.substr(0, 120));
                 SDL_SetWindowTitle(window, speed.c_str());
                 emulated_frames = 0;
                 fps_window_start = now;

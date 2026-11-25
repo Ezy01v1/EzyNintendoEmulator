@@ -100,8 +100,35 @@ std::uint32_t Vi::read32(std::uint32_t offset) {
     return (std::uint32_t{read16(offset)} << 16) | read16(offset + 2);
 }
 
-void Vi::write16(std::uint32_t offset, std::uint16_t value) {
+// Refuses, before anything is stored, a write the VI cannot honor: an unmodeled or read-only
+// register, a picture wider than 640 pixels, or a video format whose timing is not modeled
+// (the field is fixed at NTSC 525 half-lines: Dolphin derives it from these registers).
+void Vi::check_write(std::uint32_t offset, std::uint16_t value) const {
     if (offset & 1 || offset >= kRegisterBytes || offset == 0x2C || offset == 0x2E) unmodeled("write", offset);
+    const auto refuse = [&](const char* what) {
+        char b[48];
+        std::snprintf(b, sizeof b, "VI write of 0x%04X at offset 0x%X: ", value, offset);
+        throw BusError(std::string(b) + what, kBase + offset);
+    };
+    if (offset == 0x02) {
+        if (value & 0x0300) refuse("DCR.FMT is not NTSC (PAL, MPAL and debug timing are not modeled)");
+        if (value & 0x0004) refuse("DCR.NIN set (non-interlaced 263-line fields are not modeled)");
+    } else if (offset == 0x6C) {
+        if (value & 1) refuse("VICLK selects 54 MHz (progressive scan timing is not modeled)");
+    } else if (offset == 0x48) {
+        // Lines wider than kXfbWidth (WPL > 40, e.g. a 720-pixel mode) are not modeled.
+        if (((value >> 8) & 0x7F) > kXfbWidth / 16) {
+            char b[8];
+            std::snprintf(b, sizeof b, "%04X", value);
+            throw BusError(std::string("VI picture configuration write of 0x") + b +
+                               ": WPL above 40 (a line wider than 640 pixels) is not modeled",
+                           kBase + offset);
+        }
+    }
+}
+
+void Vi::write16(std::uint32_t offset, std::uint16_t value) {
+    check_write(offset, value);
     std::uint16_t& reg = regs_[offset / 2];
     if (is_di_high(offset)) {
         reg = value & 0x97FF;  // INT, ENB and VCT, stored as written (INT included: Dolphin)
@@ -114,16 +141,6 @@ void Vi::write16(std::uint32_t offset, std::uint16_t value) {
             for (std::uint32_t i = 0x30 / 2; i < 0x40 / 2; ++i) regs_[i] = 0;
             update_irq();
         }
-    } else if (offset == 0x48) {
-        // Lines wider than kXfbWidth (WPL > 40, e.g. a 720-pixel mode) are not modeled.
-        if (((value >> 8) & 0x7F) > kXfbWidth / 16) {
-            char b[8];
-            std::snprintf(b, sizeof b, "%04X", value);
-            throw BusError(std::string("VI picture configuration write of 0x") + b +
-                               ": WPL above 40 (a line wider than 640 pixels) is not modeled",
-                           kBase + offset);
-        }
-        reg = value;
     } else if ((offset == 0x1C || offset == 0x20 || offset == 0x24 || offset == 0x28)) {
         reg = value;
         if (value & 0xE000) reg &= ~0x1000;  // CLRPOFF clears this register's POFF
@@ -133,6 +150,9 @@ void Vi::write16(std::uint32_t offset, std::uint16_t value) {
 }
 
 void Vi::write32(std::uint32_t offset, std::uint32_t value) {
+    // All or nothing: both halves are checked before the high one lands.
+    check_write(offset, static_cast<std::uint16_t>(value >> 16));
+    check_write(offset + 2, static_cast<std::uint16_t>(value));
     write16(offset, static_cast<std::uint16_t>(value >> 16));
     write16(offset + 2, static_cast<std::uint16_t>(value));
 }

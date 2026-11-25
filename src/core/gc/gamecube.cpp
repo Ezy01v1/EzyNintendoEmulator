@@ -66,6 +66,14 @@ void GameCube::step() {
         cpu_.advance_timebase(cycle_remainder_ / 12);
         cycle_remainder_ %= 12;
     }
+    try {
+        dispatch_events();
+    } catch (const BusError& e) {
+        throw BusError(e, cpu_.pc());  // an event handler's bus error gets the PC it happened at
+    }
+}
+
+void GameCube::dispatch_events() {
     while (const auto due = scheduler_.pop_due()) {
         switch (due->type) {
             case EventType::ViLine:

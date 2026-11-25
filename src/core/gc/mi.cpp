@@ -28,9 +28,8 @@ void Mi::raise(unsigned region) {
 
 void Mi::update_irq() {
     const bool now = (cause_ & regs_[0x1C / 2] & kMaskBits) != 0;
-    if (now == irq_) return;
     irq_ = now;
-    if (sink_) sink_(now);
+    if (sink_) sink_(now);  // by level, like every other peripheral: the PI may have dropped bit 7
 }
 
 std::uint16_t Mi::read16(std::uint32_t offset) {
@@ -60,6 +59,10 @@ void Mi::write16(std::uint32_t offset, std::uint16_t value) {
 }
 
 void Mi::write32(std::uint32_t offset, std::uint32_t value) {
+    // All or nothing: a half that would throw must not leave the other one applied.
+    if (offset & 1) unmodeled("misaligned write", offset);
+    for (const std::uint32_t half : {offset, offset + 2})
+        if (!store_only(half) && half != 0x1C && half != 0x1E) unmodeled("write", half);
     write16(offset, static_cast<std::uint16_t>(value >> 16));
     write16(offset + 2, static_cast<std::uint16_t>(value));
 }

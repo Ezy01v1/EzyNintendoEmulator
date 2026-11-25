@@ -31,6 +31,7 @@ public:
     // command), the reason goes to stderr and the debugger window, and the machine stays
     // stopped until a reset.
     void run_frame() override;
+    [[nodiscard]] std::string_view stop_reason() const override { return stop_reason_; }
     void step_instruction() override;
     void reset() override;
 

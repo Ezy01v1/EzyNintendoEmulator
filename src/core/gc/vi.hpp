@@ -56,6 +56,9 @@ struct Yuv {
 //        0-7 = the XFB line stride in 32-byte units, WPL bits 8-14 = words per line (40 =
 //        640 pixels; more than 40 throws: wider lines are not modeled); 40/40 at reset.   4A HSR   4C..64 FCT0-FCT6   68 AA   6C VICLK
 //        6E DTV   70 FBWIDTH   72 HBE (border blank end)   74 HBS (border blank start)
+// Timing is NTSC only: a write that sets DCR.FMT (PAL/MPAL/debug), DCR.NIN (263-line fields) or
+// VICLK bit 0 (54 MHz, progressive) throws BusError naming the register, and stores nothing.
+// (xfb_image still has a non-interlaced path, unreachable until NIN is modeled.)
 // Everything except DPV/DPH, the DI registers, DCR.RST and the XFB fields is a store-only
 // register: accepted, no effect on the emulated picture. Any other offset throws BusError.
 // Reset values follow Dolphin's VideoInterface::Preset(): VTR EQU 6, DCR ENB, DI0 = line 263
@@ -113,6 +116,7 @@ private:
     }
     void update_irq();
     void check_half_line();
+    void check_write(std::uint32_t offset, std::uint16_t value) const;
 
     Scheduler& sched_;
     Pi& pi_;

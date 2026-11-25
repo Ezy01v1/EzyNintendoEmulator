@@ -123,7 +123,7 @@ void Dsp::receive_mail(std::uint32_t mail) {
         zelda_.receive(mail);
         return;
     }
-    if (program_ != Program::Rom) return;  // the init code ignores mail
+    if (program_ != Program::Rom) return;  // ROM init code: it never reads the mailbox (Dolphin: HLE ignores it too), hardware-faithful
     if (rom_parameter_ == 0) {
         if ((mail & 0xFFFF0000) == kUploadPrefix) {
             rom_parameter_ = mail;
@@ -142,7 +142,7 @@ void Dsp::receive_mail(std::uint32_t mail) {
             rom_parameter_ = 0;
             boot_microcode();
             return;
-        default: break;  // an unknown parameter: ignored, as Dolphin's ROMUCode
+        default: break;  // an unknown upload parameter: the ROM loader drops the word (Dolphin's ROMUCode); hardware behavior, not an omission
     }
     rom_parameter_ = 0;
 }

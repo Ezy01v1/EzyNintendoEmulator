@@ -46,6 +46,7 @@ std::uint32_t load_dol(Memory& memory, Disc& disc, std::uint32_t memory_end) {
     if (!disc.read(disc.dol_offset(), bytes)) throw std::runtime_error("hle_boot: cannot read the DOL header");
     const auto size = Dol::file_size(bytes);
     if (!size) throw std::runtime_error("hle_boot: bad DOL header");
+    if (*size > Memory::kMem1Size + Dol::kHeaderSize) throw std::runtime_error("hle_boot: the DOL is larger than MEM1");
     if (std::uint64_t{disc.dol_offset()} + *size > disc.size())
         throw std::runtime_error("hle_boot: the DOL runs past the end of the disc");
     bytes.resize(*size);
@@ -78,7 +79,11 @@ void hle_boot(Gekko& cpu, Memory& memory, Disc& disc, const HleBootOptions& opti
     memory.write32(phys(0x8000002C), 0x00000003);
     // Video mode: 0 NTSC, 1 PAL (YAGCD; Dolphin: 0 for NTSC discs, 1 otherwise). The disc's
     // region is BI2's country code (+0x18: 0 Japan, 1 USA, 2 PAL).
-    memory.write32(phys(0x800000CC), be32(bi2, 0x18) == 2 ? 1u : 0u);
+    // Only NTSC timing is modeled (the VI refuses PAL), so a PAL disc stops here instead of
+    // running 50 Hz code against a 59.94 Hz retrace.
+    if (be32(bi2, 0x18) == 2)
+        throw std::runtime_error("hle_boot: this is a PAL disc (BI2 region 2); only NTSC video timing is modeled");
+    memory.write32(phys(0x800000CC), 0);
     memory.write32(phys(0x800000D0), 0x01000000);  // ARAM size, 16 MiB
     memory.write32(phys(0x800000F8), 162000000);   // bus clock (Dolphin: 0x09A7EC80)
     memory.write32(phys(0x800000FC), 486000000);   // CPU clock (Dolphin: 0x1CF7C580)

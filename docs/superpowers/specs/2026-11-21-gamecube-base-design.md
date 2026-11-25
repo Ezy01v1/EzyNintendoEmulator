@@ -223,7 +223,7 @@ En vez del IPL, el emulador deja la máquina como la deja la BIOS al saltar al j
 
 ### Runner y ezyemu
 
-- `ezy_gc_runner <imagen> --fields N [--screenshot out.bmp] [--trace-unimplemented]`: arranca,
+- `ezy_gc_runner <imagen> --fields N [--screenshot out.bmp] [--trace N]`: arranca,
   corre N campos, imprime estadísticas (instrucciones, interrupciones por tipo, lecturas de disco,
   bytes del FIFO por campo, correos del DSP), y guarda el XFB. Ante algo sin implementar, se
   detiene con PC, palabra/dirección y las últimas instrucciones ejecutadas.

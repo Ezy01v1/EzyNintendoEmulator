@@ -263,7 +263,17 @@ TEST_CASE("hle_boot refuses an FST or a DOL that does not fit in MEM1") {
     }
 }
 
-TEST_CASE("hle_boot writes the boot time and the PAL video mode") {
+TEST_CASE("hle_boot writes the boot time and refuses a PAL disc") {
+    {
+        DiscBuilder builder;
+        const auto image = builder.write("ntsc_time");
+        auto disc = Disc::open(image);
+        REQUIRE(disc != nullptr);
+        Memory memory;
+        Gekko cpu(memory);
+        ezy::gc::hle_boot(cpu, memory, *disc, {.seconds_since_2000 = 100});
+        CHECK(memory.read64(phys(0x800030D8)) == 100ull * 40500000ull);
+    }
     DiscBuilder builder;
     builder.put32(0x458, 2);  // BI2 region: PAL
     const auto image = builder.write("pal");
@@ -271,9 +281,12 @@ TEST_CASE("hle_boot writes the boot time and the PAL video mode") {
     REQUIRE(disc != nullptr);
     Memory memory;
     Gekko cpu(memory);
-    ezy::gc::hle_boot(cpu, memory, *disc, {.seconds_since_2000 = 100});
-    CHECK(memory.read32(phys(0x800000CC)) == 1);
-    CHECK(memory.read64(phys(0x800030D8)) == 100ull * 40500000ull);
+    try {
+        ezy::gc::hle_boot(cpu, memory, *disc, {.seconds_since_2000 = 100});
+        FAIL("expected the PAL disc to be refused");
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("PAL") != std::string::npos);
+    }
 }
 
 TEST_CASE("a boot of the synthetic disc runs its DOL to a known result") {

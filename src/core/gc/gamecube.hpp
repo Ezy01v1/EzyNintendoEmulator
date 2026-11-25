@@ -56,6 +56,7 @@ public:
     // One instruction (or the interrupt the Gekko takes instead) and the events it makes due:
     // run_field()'s loop body, for the debugger's single step. Throws as run_field().
     void step();
+    void dispatch_events();
 
     // The picture the VI is showing: ARGB, the XFB's width (640 or less) and the frame's height
     // (see Vi::xfb_image).
