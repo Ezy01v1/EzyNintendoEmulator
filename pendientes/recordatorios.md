@@ -961,3 +961,12 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   final de toda la rama (con la lista de detalles menores diferidos del registro
   `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`), luego subir `gc/base` y abrir el PR.
   Pendiente del usuario: probar `GameCubeSystem` en ezyemu con ventana y el mando de Xbox (aún no se ha abierto).
+- 2026-11-24 (2) — GameCube, subproyecto 1: revisión final de toda la rama hecha ("lista con correcciones", sin
+  críticos) y sus correcciones (430c760): prueba de tiempos del VI de 60 a 3 campos (suite gc en Debug 73 → 28 s);
+  el VI se detiene con error ante PAL/no entrelazado/VICLK (solo se modela NTSC 480i) y el arranque HLE rechaza
+  discos PAL; errores de eventos con PC; MI por nivel; escrituras de 32 bits validadas antes de aplicar; ezyemu
+  muestra "STOPPED: <motivo>" en el título. Suite Debug 12/12 (174 s); MKDD 620 campos limpios (Release).
+  Rama `gc/base` subida. Pendiente: (1) el usuario abre MKDD en ezyemu con el mando (pantalla negra esperada:
+  comprobar que abre, no se cierra y el mando no la tumba); (2) PR de `gc/base` a `main`; (3) subproyecto 2 (GX en
+  la GPU → pantalla de título). Para el plan del subproyecto 2: el BS2 de Dolphin pone las matrices de
+  post-transformación de XF en identidad; el modo 480p de MKDD hoy se detiene a propósito.
