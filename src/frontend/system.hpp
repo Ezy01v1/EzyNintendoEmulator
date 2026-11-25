@@ -20,6 +20,10 @@ public:
     [[nodiscard]] virtual int screen_height() const = 0;
     [[nodiscard]] virtual double frame_seconds() const = 0;  // real duration of one emulated frame
 
+    // Why emulation stopped (an unimplemented feature), or empty while it runs. The shell shows
+    // it in the window title and counts no frames while it is set.
+    [[nodiscard]] virtual std::string_view stop_reason() const { return {}; }
+
     virtual void run_frame() = 0;
     virtual void step_instruction() = 0;
     virtual void reset() = 0;

@@ -4,7 +4,7 @@ Este archivo es la memoria compartida del proyecto entre PCs y cuentas de Claude
 **Claude: léelo al empezar cada sesión y actualízalo al terminar** (qué se hizo, qué quedó pendiente).
 Responder siempre en español; código, commits y PRs en inglés.
 
-_Última actualización: 2026-11-21_
+_Última actualización: 2026-11-23_
 
 > **Perfil actualizado y SHADE (2026-11-15): nuevo atajo descartado.**
 > Con rectángulos constantes ya activos: 8258 muestras, 0 errores de captura;
@@ -345,6 +345,27 @@ eferenciares-v148` (fuera del repo).
       tejido es viejo (mismo campo dos veces). MK64 no es entrelazado.
 - [ ] Más adelante: RDP en la GPU (estilo parallel-RDP con compute shaders).
 - Nota GameCube/Wii: necesitarán JIT y gráficos en la GPU desde el principio (diseñarlo así).
+
+## GameCube (en curso, rama `gc/base`)
+
+Diseño: `docs/superpowers/specs/2026-11-21-gamecube-base-design.md`. Subproyectos: 1 base y arranque →
+2 GX en la GPU del host → 3 audio (DSP y AI) → 4 JIT de Gekko → 5 tarjeta de memoria, más juegos, Wii.
+
+- [x] **Subproyecto 1: base y arranque de MKDD.** Gekko interpretado con pruebas, disco ISO/GCM (NKit leído
+  directo), DOL y arranque HLE, PI/MI/VI/DI/SI/EXI/AI/DSP, FIFO gráfico sin dibujar, `ezy_gc_runner` y la
+  consola en `ezyemu` (`.iso`/`.gcm` por ruta; mando de Xbox: A/B/X/Y/Start, RB = Z, gatillos = L/R
+  analógicos, sticks = stick y stick C; teclado como en N64 más C/V = X/Y). **MKDD llega a su bucle
+  principal**: 600+ campos seguidos con datos en el FIFO y la interrupción del VI, sin paradas (registro:
+  `docs/progress/2026-11-21-gamecube-mkdd-boot.md`). El DSP es un HLE del protocolo de correos del
+  microcódigo "Zelda" de JAudio (CRC 0x2FCDF1EC), sin mezclar audio. Falta la revisión final del subproyecto
+  y el PR a `main`.
+- [ ] **Subproyecto 2 (siguiente): GX en la GPU del host.** Hito: la pantalla de título de MKDD se ve. Hoy el
+  XFB es negro (la copia del EFB solo escribe el color de borrado). Necesita su propio diseño y plan.
+- [ ] Subproyecto 3 (audio): mezclar de verdad en el HLE Zelda (VPB, AFC, reverberación) y reproducir el AI.
+- Ojo: `ezy_gc_tests` en Debug tarda ~75 s de su límite de 120 s en ctest (la prueba de tiempos del VI
+  sola ~56 s); poco margen para más pruebas largas de MKDD.
+- Velocidad: el intérprete corre MKDD a ~0,47× (600 campos en ~2 min 10 s en Release); el JIT es el
+  subproyecto 4.
 
 ## Roadmap
 
@@ -913,3 +934,40 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   Pendiente del usuario: probar el puente de DK's Jungle Parkway; luego el PR.
 - 2026-11-21 (4) — PR #19 abierto: `n64/jit-smooth` → `n64/vi-output` (apilado sobre #16-#18). Fusionar en orden #16, #17, #18, #19.
 - 2026-11-21 (5) — PRs #16-#19 fusionados en `main` (de arriba abajo: #19, #18, #17, #16). `main` = `n64/jit-smooth`. Desde ahora trabajar en ramas nuevas desde `main`.
+- 2026-11-22 — PAUSA en GameCube, subproyecto 1 (rama `gc/base`, subida). Diseño
+  `docs/superpowers/specs/2026-11-21-gamecube-base-design.md`, plan `docs/superpowers/plans/2026-11-21-gamecube-base.md`.
+  Hechas y revisadas: Tareas 1–4 (CPU Gekko entera + FPU + paired singles; disco NKit/DOL/arranque HLE/mapa de
+  memoria; máquina, PI, MI, VI y XFB). Suite Debug 12/12. MKDD (volcado en `E:\Rom nintendo\Mario Kart Double Dash\`,
+  NKit ISO; el .zip era un 7z, extraído con un script de Python) arranca y ejecuta 132 511 instrucciones hasta
+  `mtspr` MMCR0 (SPR 952) en 0x800A9654 (para la Tarea 7).
+  Falta: Tarea 5 (DI, SI, EXI, AI, interfaz DSP; detenida antes de escribir nada), 6 (FIFO gráfico), 7 (runner,
+  ezyemu, arrancar MKDD) y la revisión final. Registro de la ejecución (fuera de git):
+  `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`.
+- 2026-11-23 — PAUSA (límite de uso) en GameCube, subproyecto 1 (rama `gc/base`, sin subir desde 53e42cb).
+  Tarea 5 (DI, SI, EXI, AI, DSP) hecha y revisada: 8635847 + 54e3c03. ARAM ≥ 16 MiB = puerto de expansión
+  vacío (como el hardware y Dolphin). Tarea 6 (FIFO gráfico) hecha: ce75746 + correcciones 2c0f3fc; falta
+  confirmar la re-revisión de esas correcciones. Falta: Tarea 7 (runner, ezyemu, MKDD) y la revisión final.
+  Ojo: el Release incremental (LTCG) de ezy_gc_tests compiló mal dos veces; borrar los objetos Release de GC
+  antes de fiarse de un resultado Release. Registro: `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`.
+- 2026-11-23 (2) — GameCube, subproyecto 1, Tarea 7 hecha (rama `gc/base`): `ezy_gc_runner` (estadísticas cada
+  60 campos, `--trace N`, `--screenshot`, `--dump-end`), `GameCubeSystem` en ezyemu, y MKDD hasta su bucle
+  principal. Paradas resueltas: SPR del monitor de rendimiento (MMCR0…PMC4), puerto serie 1 vacío (EXI 0:2),
+  saludo `DSP_INIT` y protocolo de correos del microcódigo Zelda (CRC 0x2FCDF1EC), PIINT; además el ancho
+  del XFB sale de WPL (MKDD usa 608). Criterio: 618 campos seguidos con FIFO y VI (3-620), sin paradas.
+  Registro: `docs/progress/2026-11-21-gamecube-mkdd-boot.md`. Falta la revisión final y el PR.
+- 2026-11-24 — GameCube, subproyecto 1: Tareas 1–7 hechas y revisadas (rama `gc/base`, sin subir; último 2e9d615).
+  La revisión de la Tarea 7 pidió que MMCR0/MMCR1 detengan la emulación si piden contar (no se modela el conteo;
+  MKDD no lo pide). MKDD repetido: 618 campos seguidos con FIFO y VI, sin paradas. Siguiente paso: la revisión
+  final de toda la rama (con la lista de detalles menores diferidos del registro
+  `.superpowers/sdd/2026-11-21-gamecube-base/progress.md`), luego subir `gc/base` y abrir el PR.
+  Pendiente del usuario: probar `GameCubeSystem` en ezyemu con ventana y el mando de Xbox (aún no se ha abierto).
+- 2026-11-24 (2) — GameCube, subproyecto 1: revisión final de toda la rama hecha ("lista con correcciones", sin
+  críticos) y sus correcciones (430c760): prueba de tiempos del VI de 60 a 3 campos (suite gc en Debug 73 → 28 s);
+  el VI se detiene con error ante PAL/no entrelazado/VICLK (solo se modela NTSC 480i) y el arranque HLE rechaza
+  discos PAL; errores de eventos con PC; MI por nivel; escrituras de 32 bits validadas antes de aplicar; ezyemu
+  muestra "STOPPED: <motivo>" en el título. Suite Debug 12/12 (174 s); MKDD 620 campos limpios (Release).
+  Rama `gc/base` subida. Pendiente: (1) el usuario abre MKDD en ezyemu con el mando (pantalla negra esperada:
+  comprobar que abre, no se cierra y el mando no la tumba); (2) PR de `gc/base` a `main`; (3) subproyecto 2 (GX en
+  la GPU → pantalla de título). Para el plan del subproyecto 2: el BS2 de Dolphin pone las matrices de
+  post-transformación de XF en identidad; el modo 480p de MKDD hoy se detiene a propósito.
+- 2026-11-24 (3) — El usuario abrió MKDD en ezyemu: la ventana corre (~4 fps, pantalla negra, esperado) y no se cae. PR #20 abierto: `gc/base` → `main`. Siguiente: fusionar #20 y empezar el subproyecto 2 (GX en la GPU).
