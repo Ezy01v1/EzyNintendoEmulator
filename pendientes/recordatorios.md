@@ -970,3 +970,4 @@ Wii U / Switch solo después, si vale la pena. **No** NES ni SNES.
   comprobar que abre, no se cierra y el mando no la tumba); (2) PR de `gc/base` a `main`; (3) subproyecto 2 (GX en
   la GPU → pantalla de título). Para el plan del subproyecto 2: el BS2 de Dolphin pone las matrices de
   post-transformación de XF en identidad; el modo 480p de MKDD hoy se detiene a propósito.
+- 2026-11-24 (3) — El usuario abrió MKDD en ezyemu: la ventana corre (~4 fps, pantalla negra, esperado) y no se cae. PR #20 abierto: `gc/base` → `main`. Siguiente: fusionar #20 y empezar el subproyecto 2 (GX en la GPU).
